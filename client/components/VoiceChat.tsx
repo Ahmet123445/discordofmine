@@ -3,8 +3,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Socket } from "socket.io-client";
 import { createPortal } from "react-dom";
-// @ts-ignore
-import Peer from "simple-peer";
 
 interface VoiceChatProps {
   socket: Socket | null;
@@ -12,23 +10,25 @@ interface VoiceChatProps {
   user: { id: number; username: string };
 }
 
-// Sound effects
-const playJoinSound = () => {
-  const audio = new Audio("/sounds/join.mp3");
-  audio.volume = 0.5;
-  audio.play().catch(e => console.log("Audio play failed (user interaction needed first)", e));
-};
-
-const playLeaveSound = () => {
-  const audio = new Audio("/sounds/leave.mp3");
-  audio.volume = 0.5;
-  audio.play().catch(e => console.log("Audio play failed", e));
-};
-
 export default function VoiceChat({ socket, roomId, user }: VoiceChatProps) {
   const [inVoice, setInVoice] = useState(false);
+  const [Peer, setPeer] = useState<any>(null); // Store Peer class dynamically
   const [isSharingScreen, setIsSharingScreen] = useState(false);
-  // Fix type definition for peers
+  
+  // Load Peer and Polyfills on mount
+  useEffect(() => {
+    // Apply polyfills immediately
+    if (typeof window !== "undefined") {
+      if ((window as any).global === undefined) (window as any).global = window;
+      if ((window as any).process === undefined) (window as any).process = { env: {} };
+      
+      // Load simple-peer
+      import("simple-peer").then((module) => {
+        setPeer(() => module.default);
+      });
+    }
+  }, []);
+
   const [peers, setPeers] = useState<{ peerID: string, peer: any, volume: number, username: string }[]>([]);
   const [incomingStreams, setIncomingStreams] = useState<{ id: string, stream: MediaStream }[]>([]);
   const [isMuted, setIsMuted] = useState(false);
@@ -37,6 +37,7 @@ export default function VoiceChat({ socket, roomId, user }: VoiceChatProps) {
   const peersRef = useRef<{ peerID: string; peer: any }[]>([]);
   const localStream = useRef<MediaStream | null>(null);
   const screenStream = useRef<MediaStream | null>(null);
+
 
   // ... Keyboard Shortcuts & Clean up ...
 
