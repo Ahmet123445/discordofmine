@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState, useRef, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import io, { Socket } from "socket.io-client";
 import dynamic from "next/dynamic";
@@ -26,7 +26,7 @@ interface Message {
   room_id?: string;
 }
 
-export default function ChatPage() {
+function ChatContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const roomId = searchParams.get("roomId");
@@ -484,5 +484,13 @@ export default function ChatPage() {
         </div>
       </div>
     </div>
+  );
+}
+
+export default function ChatPage() {
+  return (
+    <Suspense fallback={<div className="flex h-screen items-center justify-center bg-zinc-950 text-white">Loading chat...</div>}>
+      <ChatContent />
+    </Suspense>
   );
 }
