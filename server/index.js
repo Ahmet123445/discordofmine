@@ -73,7 +73,11 @@ app.get("/api/rooms", (req, res) => {
     // Add stats
     const stats = getRoomStats();
     const roomsWithStats = rooms.map(room => ({
-      ...room,
+      id: room.id,
+      name: room.name,
+      created_by: room.created_by,
+      created_at: room.created_at,
+      isPrivate: !!room.password, // Don't send password, just flag
       onlineCount: stats[room.id]?.count || 0,
       users: stats[room.id]?.users || []
     }));
@@ -85,18 +89,38 @@ app.get("/api/rooms", (req, res) => {
   }
 });
 
+// Verify Room Password
+app.post("/api/rooms/verify", (req, res) => {
+  try {
+    const { roomId, password } = req.body;
+    const room = db.prepare("SELECT password FROM rooms WHERE id = ?").get(roomId);
+    
+    if (!room) return res.status(404).json({ error: "Room not found" });
+    
+    // Simple direct comparison
+    if (room.password === password) {
+      return res.json({ success: true });
+    } else {
+      return res.status(401).json({ error: "Incorrect password" });
+    }
+  } catch (err) {
+     console.error(err);
+     res.status(500).json({ error: "Verification failed" });
+  }
+});
+
 // Create Room
 app.post("/api/rooms", (req, res) => {
   try {
-    const { name, userId } = req.body;
+    const { name, userId, password } = req.body;
     if (!name) return res.status(400).json({ error: "Room name required" });
 
     const id = name.toLowerCase().replace(/[^a-z0-9]/g, "-") + "-" + Date.now().toString().slice(-4);
     
-    const stmt = db.prepare("INSERT INTO rooms (id, name, created_by) VALUES (?, ?, ?)");
-    stmt.run(id, name, userId || 0);
+    const stmt = db.prepare("INSERT INTO rooms (id, name, created_by, password) VALUES (?, ?, ?, ?)");
+    stmt.run(id, name, userId || 0, password || null);
     
-    const newRoom = { id, name, created_by: userId || 0 };
+    const newRoom = { id, name, created_by: userId || 0, isPrivate: !!password };
     io.emit("room-created", newRoom); // Notify clients
     res.status(201).json(newRoom);
   } catch (err) {

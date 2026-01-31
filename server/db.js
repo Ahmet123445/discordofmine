@@ -40,16 +40,18 @@ db.exec(`
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
     created_by INTEGER,
+    password TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   )
 `);
 
-// Seed default rooms if empty
-const roomCount = db.prepare("SELECT count(*) as count FROM rooms").get();
-if (roomCount.count === 0) {
-  const insertRoom = db.prepare("INSERT INTO rooms (id, name, created_by) VALUES (?, ?, ?)");
-  insertRoom.run("general", "General", 0);
-  insertRoom.run("gaming", "Gaming", 0);
+// Attempt to add password column if it doesn't exist (migration for existing dbs)
+try {
+  db.exec("ALTER TABLE rooms ADD COLUMN password TEXT");
+} catch (err) {
+  // Column likely exists
 }
+
+// NOTE: Seed data removed as per request. Default state is empty.
 
 export default db;
