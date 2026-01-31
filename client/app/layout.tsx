@@ -1,7 +1,6 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
-import GlobalPolyfill from "@/components/GlobalPolyfill";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -25,10 +24,22 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en">
+      <head>
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `
+              if (typeof window !== 'undefined') {
+                window.global = window;
+                window.process = { env: { DEBUG: undefined }, version: '' };
+                window.Buffer = window.Buffer || [];
+              }
+            `,
+          }}
+        />
+      </head>
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased`}
       >
-        <GlobalPolyfill />
         {children}
       </body>
     </html>
