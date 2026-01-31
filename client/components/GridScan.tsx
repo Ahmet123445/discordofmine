@@ -427,7 +427,7 @@ const GridScan = ({
       uPhaseTaper: { value: scanPhaseTaper },
       uScanDuration: { value: scanDuration },
       uScanDelay: { value: scanDelay },
-      uScanDirection: { value: scanDirection === 'backward' ? 1 : scanDirection === 'pingpong' ? 2 : 0 },
+      uScanDirection: { value: scanDirection === 'bottom-top' ? 1 : scanDirection === 'pingpong' ? 2 : 0 },
       uScanStarts: { value: new Array(8).fill(0) },
       uScanCount: { value: 0 }
     };
