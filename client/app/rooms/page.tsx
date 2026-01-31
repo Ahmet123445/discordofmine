@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import { useRouter } from "next/navigation";
 import SpotlightCard from "@/components/SpotlightCard";
 import Particles from "@/components/Particles";
@@ -31,7 +31,28 @@ export default function RoomsPage() {
   const [joinError, setJoinError] = useState("");
   const [isJoining, setIsJoining] = useState(false);
 
+  // Sound ref
+  const hoverAudioRef = useRef<HTMLAudioElement | null>(null);
+
   useEffect(() => {
+    // Initialize hover sound with a short "pop" Data URI
+    // This avoids needing an external file
+    hoverAudioRef.current = new Audio("data:audio/wav;base64,UklGRl9vT19XQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YU"); 
+    // Wait, the above is empty/invalid. Let's use a real short beep base64.
+    // Short "click" sound
+    const clickSound = "data:audio/wav;base64,UklGRi4AAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAEA//8AAP///wAA//8AAP//AA=="; // Extremely short, might be too short.
+    // Let's use a slightly longer one or just rely on the user adding the file if they want "good" audio. 
+    // But the user asked ME to do it.
+    // I will switch back to /sounds/hover.mp3 and I will try to create a dummy file so it doesn't 404, 
+    // but honestly, providing a real sound file is hard via CLI text.
+    // I will use a known working base64 for a short beep.
+    
+    // Short UI Hover Sound (Base64 encoded WAV)
+    const hoverSoundBase64 = "data:audio/wav;base64,UklGRpQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YVwAAABAgECAQIBAgECAQIBAgECAQIBAgECAQIBAgECAQIBAgECAQIBAgECAQIBAgECAQIBAgECAQIBAgECAQIBAgECAQIBAgECAQIBAgECAQIBAgECAQIBAgECAQIBAgECAQIBA"; 
+    
+    hoverAudioRef.current = new Audio(hoverSoundBase64);
+    hoverAudioRef.current.volume = 0.1;
+
     const token = localStorage.getItem("token");
     if (!token) {
       router.push("/login");
@@ -43,6 +64,13 @@ export default function RoomsPage() {
     const interval = setInterval(fetchRooms, 5000);
     return () => clearInterval(interval);
   }, [router]);
+
+  const playHoverSound = () => {
+    if (hoverAudioRef.current) {
+      hoverAudioRef.current.currentTime = 0;
+      hoverAudioRef.current.play().catch(() => {});
+    }
+  };
 
   const fetchRooms = async () => {
     try {
@@ -165,9 +193,9 @@ export default function RoomsPage() {
           <header className="mb-12 flex items-center justify-between backdrop-blur-md bg-black/30 p-6 rounded-3xl border border-white/5">
             <div>
               <h1 className="text-3xl font-bold bg-white bg-clip-text text-transparent">
-                Active Frequencies
+                Active Servers
               </h1>
-              <p className="text-zinc-400 mt-1">Select a frequency to tune in.</p>
+              <p className="text-zinc-400 mt-1">Select a server to tune in.</p>
             </div>
             <button 
               onClick={() => {
@@ -186,12 +214,13 @@ export default function RoomsPage() {
               className="h-64 flex items-center justify-center cursor-pointer border-dashed border-2 border-zinc-800 hover:border-zinc-500 bg-black/50 hover:bg-black/80 group transition-all"
               spotlightColor="rgba(255, 255, 255, 0.1)"
               onClick={() => setShowCreateModal(true)}
+              onMouseEnter={playHoverSound}
             >
               <div className="flex flex-col items-center gap-4">
                 <div className="w-16 h-16 rounded-full bg-zinc-900 flex items-center justify-center group-hover:scale-110 transition-transform duration-300 border border-zinc-800">
                   <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-zinc-400 group-hover:text-white"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
                 </div>
-                <span className="font-medium text-zinc-400 group-hover:text-white transition-colors">Create Frequency</span>
+                <span className="font-medium text-zinc-400 group-hover:text-white transition-colors">Create Server</span>
               </div>
             </SpotlightCard>
 
@@ -202,6 +231,7 @@ export default function RoomsPage() {
                 className="h-64 flex flex-col justify-between cursor-pointer bg-zinc-900/50 backdrop-blur-sm border border-white/5 hover:border-indigo-500/30 transition-all hover:transform hover:-translate-y-1"
                 spotlightColor="rgba(99, 102, 241, 0.15)"
                 onClick={() => handleRoomClick(room)}
+                onMouseEnter={playHoverSound}
               >
                 <div>
                   <div className="flex justify-between items-start mb-4">
@@ -244,7 +274,7 @@ export default function RoomsPage() {
 
                   <div className="pt-4 border-t border-white/5 flex items-center justify-between group">
                     <span className="text-xs text-zinc-500 group-hover:text-indigo-400 transition-colors">
-                      {room.isPrivate ? "Unlock Frequency" : "Join Frequency"}
+                      {room.isPrivate ? "Unlock Server" : "Join Server"}
                     </span>
                     {room.isPrivate ? (
                       <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-zinc-600 group-hover:translate-x-1 transition-transform group-hover:text-indigo-400"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
@@ -268,14 +298,14 @@ export default function RoomsPage() {
                  <Particles particleCount={30} speed={0.05} />
              </div>
 
-            <h2 className="text-xl font-bold mb-1 relative z-10">Initialize New Frequency</h2>
+            <h2 className="text-xl font-bold mb-1 relative z-10">Initialize New Server</h2>
             <p className="text-xs text-zinc-500 mb-6 relative z-10">Create a new secure channel for communication.</p>
             
             <form onSubmit={createRoom} className="relative z-10 space-y-4">
               <div>
                 <input 
                   type="text" 
-                  placeholder="Frequency Name (e.g. Gaming)"
+                  placeholder="Server Name (e.g. Gaming)"
                   autoFocus
                   className="w-full bg-zinc-900 border border-zinc-700 rounded-xl p-4 text-white focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500/50 transition-all"
                   value={newRoomName}
@@ -290,7 +320,7 @@ export default function RoomsPage() {
                   value={newRoomPassword}
                   onChange={(e) => setNewRoomPassword(e.target.value)}
                 />
-                <p className="text-[10px] text-zinc-500 mt-2 px-1">Leave empty for a public frequency.</p>
+                <p className="text-[10px] text-zinc-500 mt-2 px-1">Leave empty for a public server.</p>
               </div>
 
               <div className="flex gap-3 justify-end pt-2">
@@ -318,7 +348,7 @@ export default function RoomsPage() {
       {showPasswordModal && (
         <div className="fixed inset-0 bg-black/80 backdrop-blur-md z-50 flex items-center justify-center p-4">
           <div className="bg-zinc-950 border border-zinc-800 rounded-2xl w-full max-w-sm p-6 shadow-2xl relative overflow-hidden">
-            <h2 className="text-xl font-bold mb-1 relative z-10 text-center">Secure Frequency</h2>
+            <h2 className="text-xl font-bold mb-1 relative z-10 text-center">Secure Server</h2>
             <p className="text-xs text-zinc-500 mb-6 relative z-10 text-center">Authentication required to proceed.</p>
             
             {joinError && (

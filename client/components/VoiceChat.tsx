@@ -6,12 +6,12 @@ import { createPortal } from "react-dom";
 
 interface VoiceChatProps {
   socket: Socket | null;
-  roomId: string;
+  roomId: string; // This is the Server ID (e.g. "gaming-1234")
   user: { id: number; username: string };
 }
 
 interface VoiceRoom {
-  id: string;
+  id: string; // Internal ID (e.g. "general")
   name: string;
 }
 
@@ -30,9 +30,9 @@ const playLeaveSound = () => {
   audio.play().catch(() => {});
 };
 
-export default function VoiceChat({ socket, roomId: defaultRoomId, user }: VoiceChatProps) {
+export default function VoiceChat({ socket, roomId: serverId, user }: VoiceChatProps) {
   const [inVoice, setInVoice] = useState(false);
-  const [currentRoom, setCurrentRoom] = useState<string | null>(null);
+  const [currentInternalRoomId, setCurrentInternalRoomId] = useState<string | null>(null);
   const [PeerClass, setPeerClass] = useState<any>(null);
   const [isSharingScreen, setIsSharingScreen] = useState(false);
   const [peers, setPeers] = useState<{ peerID: string; peer: any; volume: number; username: string }[]>([]);
@@ -49,10 +49,15 @@ export default function VoiceChat({ socket, roomId: defaultRoomId, user }: Voice
   });
   const [editingKeybind, setEditingKeybind] = useState<"mute" | "deafen" | null>(null);
   const [newRoomName, setNewRoomName] = useState("");
+  
+  // Default channels are "general" and "gaming"
+  // These are SUB-CHANNELS inside the Server
   const [voiceRooms, setVoiceRooms] = useState<VoiceRoom[]>([
     { id: "general", name: "General" },
     { id: "gaming", name: "Gaming" },
   ]);
+  
+  // Map of FULL room IDs (server-internal) to users
   const [allRoomsUsers, setAllRoomsUsers] = useState<{ [roomId: string]: { id: string; username: string }[] }>({});
 
   const peersRef = useRef<{ peerID: string; peer: any }[]>([]);
@@ -110,7 +115,6 @@ export default function VoiceChat({ socket, roomId: defaultRoomId, user }: Voice
     };
     
     const handleKeyDown = (e: KeyboardEvent) => {
-      // Don't trigger if editing keybind
       if (editingKeybind) return;
       
       if (checkKeybind(e, keybinds.mute)) {
@@ -126,7 +130,6 @@ export default function VoiceChat({ socket, roomId: defaultRoomId, user }: Voice
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [inVoice, isMuted, isDeafened, mounted, PeerClass, voiceRooms, keybinds, editingKeybind]);
 
-  // Clean up on unmount
   useEffect(() => {
     return () => {
       if (localStream.current) {
@@ -149,26 +152,29 @@ export default function VoiceChat({ socket, roomId: defaultRoomId, user }: Voice
     setIsDeafened((prev) => !prev);
   };
 
-  // Apply deafen to all audio players
   useEffect(() => {
-    // This will trigger re-render of AudioPlayer components with updated volume
+    // Re-render audio players when deafen state changes
   }, [isDeafened]);
 
-  const joinVoice = (roomId: string) => {
+  const joinVoice = (internalRoomId: string) => {
     if (!socket || !PeerClass) return;
-    if (inVoice) leaveVoice(); // Leave current room first
+    if (inVoice) leaveVoice(); 
 
     playJoinSound();
+
+    // Construct the unique Namespaced Room ID
+    const namespacedRoomId = `${serverId}-${internalRoomId}`;
 
     navigator.mediaDevices
       .getUserMedia({ video: false, audio: true })
       .then((stream) => {
         setInVoice(true);
-        setCurrentRoom(roomId);
+        setCurrentInternalRoomId(internalRoomId);
         setIsMuted(false);
         localStream.current = stream;
 
-        socket.emit("join-voice", { roomId, user });
+        // Join the namespaced room
+        socket.emit("join-voice", { roomId: namespacedRoomId, user });
 
         socket.on("all-voice-users", (users: { id: string; username: string }[]) => {
           const peersArr: { peerID: string; peer: any; volume: number; username: string }[] = [];
@@ -222,7 +228,7 @@ export default function VoiceChat({ socket, roomId: defaultRoomId, user }: Voice
     playLeaveSound();
     stopScreenShare();
     setInVoice(false);
-    setCurrentRoom(null);
+    setCurrentInternalRoomId(null);
     socket?.emit("leave-voice");
 
     localStream.current?.getTracks().forEach((track) => track.stop());
@@ -287,22 +293,18 @@ export default function VoiceChat({ socket, roomId: defaultRoomId, user }: Voice
   };
 
   const handleIncomingStream = (id: string, stream: MediaStream) => {
-    // Handle audio streams
     const audioTracks = stream.getAudioTracks();
     if (audioTracks.length > 0) {
-      // Audio is handled by AudioPlayer component, just update peers
       setPeers((prev) => {
         const updated = [...prev];
         const peerIndex = updated.findIndex((p) => p.peerID === id);
         if (peerIndex !== -1) {
-          // Trigger re-render for AudioPlayer
           updated[peerIndex] = { ...updated[peerIndex] };
         }
         return updated;
       });
     }
 
-    // Handle video streams (screen share)
     const videoTracks = stream.getVideoTracks();
     if (videoTracks.length > 0) {
       setIncomingStreams((prev) => {
@@ -338,13 +340,11 @@ export default function VoiceChat({ socket, roomId: defaultRoomId, user }: Voice
   const stopScreenShare = () => {
     if (!screenStream.current) return;
     
-    // Stop all tracks immediately
     screenStream.current.getTracks().forEach((track) => {
       track.stop();
       track.enabled = false;
     });
 
-    // Remove tracks from peers
     peersRef.current.forEach((p) => {
       try {
         const senders = p.peer._pc?.getSenders?.() || [];
@@ -353,12 +353,9 @@ export default function VoiceChat({ socket, roomId: defaultRoomId, user }: Voice
             p.peer._pc?.removeTrack?.(sender);
           }
         });
-      } catch (e) {
-        // Ignore errors when removing tracks
-      }
+      } catch (e) { }
     });
 
-    // Clear all incoming streams and stop their tracks
     setIncomingStreams((prev) => {
       prev.forEach((s) => {
         s.stream.getTracks().forEach((track) => {
@@ -369,7 +366,6 @@ export default function VoiceChat({ socket, roomId: defaultRoomId, user }: Voice
       return [];
     });
 
-    // Clear state
     screenStream.current = null;
     setIsSharingScreen(false);
   };
@@ -402,7 +398,6 @@ export default function VoiceChat({ socket, roomId: defaultRoomId, user }: Voice
     e.preventDefault();
     e.stopPropagation();
     
-    // Ignore modifier-only presses
     if (["Control", "Alt", "Shift", "Meta"].includes(e.key)) return;
     
     const newBind = {
@@ -458,21 +453,23 @@ export default function VoiceChat({ socket, roomId: defaultRoomId, user }: Voice
 
         <div className="px-2 space-y-0.5">
           {voiceRooms.map((room) => {
-            const isMyRoom = currentRoom === room.id;
-            const roomUsers = allRoomsUsers[room.id] || [];
+            const internalId = room.id;
+            const namespacedId = `${serverId}-${internalId}`;
+            const isMyRoom = currentInternalRoomId === internalId;
+            const roomUsers = allRoomsUsers[namespacedId] || []; // LOOK UP BY FULL ID
             const otherRoomUsers = roomUsers.filter((u) => u.id !== socket?.id);
             
             return (
-            <div key={room.id} className="group">
+            <div key={internalId} className="group">
               <button
-                onClick={() => (currentRoom === room.id ? leaveVoice() : joinVoice(room.id))}
+                onClick={() => (currentInternalRoomId === internalId ? leaveVoice() : joinVoice(internalId))}
                 className={`w-full flex items-center gap-2 px-2 py-1.5 rounded text-sm transition-all ${
-                  currentRoom === room.id
+                  isMyRoom
                     ? "bg-zinc-700 text-white"
                     : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800"
                 }`}
               >
-                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={currentRoom === room.id ? "text-green-400" : ""}>
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={isMyRoom ? "text-green-400" : ""}>
                   <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
                   <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
                 </svg>
@@ -480,7 +477,7 @@ export default function VoiceChat({ socket, roomId: defaultRoomId, user }: Voice
                 {roomUsers.length > 0 && (
                   <span className="ml-auto text-xs text-zinc-500">{roomUsers.length}</span>
                 )}
-                {currentRoom === room.id && (
+                {isMyRoom && (
                   <span>
                     <span className="relative flex h-2 w-2">
                       <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
