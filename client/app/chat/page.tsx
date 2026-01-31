@@ -54,8 +54,10 @@ export default function ChatPage() {
     const formData = new FormData();
     formData.append("file", file);
 
+    const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001";
+
     try {
-      const res = await fetch("http://localhost:3001/api/upload", {
+      const res = await fetch(`${API_URL}/api/upload`, {
         method: "POST",
         body: formData,
       });
@@ -64,7 +66,7 @@ export default function ChatPage() {
       if (data.success) {
         // Send socket message with type 'file'
         // We store the full URL in 'content' for simplicity with existing DB schema
-        const fullUrl = `http://localhost:3001${data.url}`;
+        const fullUrl = `${API_URL}${data.url}`;
         
         socket.emit("send-message", {
           content: fullUrl, 
@@ -220,14 +222,16 @@ export default function ChatPage() {
     const parsedUser = JSON.parse(storedUser);
     setUser(parsedUser);
 
+    const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001";
+
     // Fetch previous messages
-    fetch("http://localhost:3001/api/messages")
+    fetch(`${API_URL}/api/messages`)
       .then(res => res.json())
       .then(data => setMessages(data))
       .catch(err => console.error("Failed to load history", err));
 
     // Connect Socket
-    const newSocket = io("http://localhost:3001");
+    const newSocket = io(API_URL);
     setSocket(newSocket);
 
     newSocket.on("connect", () => {

@@ -1,0 +1,27 @@
+services:
+  - type: web
+    name: discordofmine-server
+    env: node
+    plan: free
+    buildCommand: cd server && npm install
+    startCommand: cd server && node index.js
+    envVars:
+      - key: PORT
+        value: 10000
+      - key: JWT_SECRET
+        generateValue: true
+      - key: NODE_VERSION
+        value: 18.17.0
+
+  - type: web
+    name: discordofmine-client
+    env: node
+    plan: free
+    buildCommand: cd client && npm install && npm run build
+    startCommand: cd client && npm start
+    envVars:
+      - key: NEXT_PUBLIC_API_URL
+        fromService:
+          type: web
+          name: discordofmine-server
+          property: url

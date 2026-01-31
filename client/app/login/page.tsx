@@ -16,7 +16,8 @@ export default function LoginPage() {
     setError("");
     setLoading(true);
 
-    const endpoint = isLogin ? "http://localhost:3001/api/auth/login" : "http://localhost:3001/api/auth/register";
+    const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001";
+    const endpoint = isLogin ? `${API_URL}/api/auth/login` : `${API_URL}/api/auth/register`;
 
     try {
       const res = await fetch(endpoint, {
