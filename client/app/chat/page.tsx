@@ -180,8 +180,8 @@ function ChatContent() {
 
     newSocket.on("connect", () => {
       console.log("Connected to socket server");
-      // Join specific text room
-      newSocket.emit("join-room", roomId);
+      // Join specific text room with username for tracking
+      newSocket.emit("join-room", { roomId, username: user.username });
     });
 
     newSocket.on("message-received", (message: Message) => {

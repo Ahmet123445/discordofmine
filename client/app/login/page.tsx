@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
+import Particles from "@/components/Particles";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -43,29 +44,44 @@ export default function LoginPage() {
   };
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-zinc-950 text-zinc-100">
-      <div className="w-full max-w-md p-8 bg-zinc-900 rounded-2xl shadow-2xl border border-zinc-800">
-        <div className="text-center mb-8">
-          <h1 className="text-3xl font-bold tracking-tight bg-gradient-to-r from-indigo-500 to-purple-500 bg-clip-text text-transparent">
+    <div className="relative w-full h-screen bg-black overflow-hidden flex items-center justify-center font-sans">
+      <div className="absolute inset-0">
+        <Particles
+          particleColors={["#ffffff", "#818cf8"]}
+          particleCount={200}
+          particleSpread={10}
+          speed={0.1}
+          particleBaseSize={100}
+          moveParticlesOnHover={true}
+          alphaParticles={false}
+          disableRotation={false}
+        />
+      </div>
+
+      <div className="relative z-10 w-full max-w-md p-8">
+        <div className="text-center mb-12">
+          <h1 className="text-5xl font-extrabold tracking-tighter text-white mb-4 drop-shadow-xl">
             V A T A N A S K I
           </h1>
-          <p className="text-zinc-500 mt-2 text-sm">Ozel iletisim agina hosgeldin.</p>
+          <p className="text-zinc-400 text-sm tracking-wide uppercase">
+            Private Communication Network
+          </p>
         </div>
 
         {error && (
-          <div className="bg-red-500/10 text-red-400 p-3 rounded-lg mb-6 text-sm border border-red-500/20 text-center">
+          <div className="bg-red-500/10 backdrop-blur-md text-red-400 p-3 rounded-xl mb-6 text-sm border border-red-500/20 text-center">
             {error}
           </div>
         )}
 
-        <form onSubmit={handleSubmit} className="space-y-6">
-          <div className="space-y-2">
-            <label className="text-xs font-semibold text-zinc-400 uppercase tracking-wider ml-1">Kullanici Adi</label>
+        <form onSubmit={handleSubmit} className="flex flex-col items-center gap-6">
+          <div className="w-full relative group">
+            <div className="absolute -inset-0.5 bg-gradient-to-r from-indigo-500 to-purple-600 rounded-xl opacity-75 group-hover:opacity-100 transition duration-200 blur"></div>
             <input
               type="text"
               required
-              placeholder="Isminiz..."
-              className="w-full bg-zinc-950 border border-zinc-800 rounded-xl p-3.5 text-white placeholder-zinc-600 focus:outline-none focus:ring-2 focus:ring-indigo-500/50 focus:border-indigo-500 transition-all"
+              placeholder="Enter your username"
+              className="relative w-full bg-black text-white rounded-xl px-6 py-4 text-center text-lg placeholder-zinc-600 focus:outline-none focus:ring-2 focus:ring-indigo-500/50 transition-all border border-zinc-800/50"
               value={username}
               onChange={(e) => setUsername(e.target.value)}
             />
@@ -74,15 +90,18 @@ export default function LoginPage() {
           <button
             type="submit"
             disabled={loading}
-            className="w-full bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white font-semibold py-3.5 px-4 rounded-xl transition-all disabled:opacity-50 disabled:cursor-not-allowed shadow-lg shadow-indigo-500/20 active:scale-[0.98]"
+            className="group relative px-8 py-3 bg-white text-black font-bold rounded-full hover:bg-zinc-200 transition-all disabled:opacity-50 disabled:cursor-not-allowed active:scale-95 w-full sm:w-auto"
           >
-            {loading ? "Giris Yapiliyor..." : "Giris Yap"}
+            {loading ? "Connecting..." : "Connect"}
+            <div className="absolute inset-0 rounded-full ring-2 ring-white/50 group-hover:ring-4 transition-all opacity-0 group-hover:opacity-100"></div>
           </button>
         </form>
         
-        <p className="text-center text-xs text-zinc-600 mt-6">
-          Sifre gerekmez. Sadece isminizi girin.
-        </p>
+        <div className="mt-12 text-center">
+             <div className="inline-block px-4 py-2 rounded-full bg-white/5 backdrop-blur-sm border border-white/10 text-xs text-zinc-500">
+               No password required • Secure • Fast
+             </div>
+        </div>
       </div>
     </div>
   );

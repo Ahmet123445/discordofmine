@@ -65,11 +65,20 @@ app.delete("/api/messages/:id", (req, res) => {
   }
 });
 
-// Get Rooms
+// Get Rooms with stats
 app.get("/api/rooms", (req, res) => {
   try {
     const rooms = db.prepare("SELECT * FROM rooms ORDER BY created_at ASC").all();
-    res.json(rooms);
+    
+    // Add stats
+    const stats = getRoomStats();
+    const roomsWithStats = rooms.map(room => ({
+      ...room,
+      onlineCount: stats[room.id]?.count || 0,
+      users: stats[room.id]?.users || []
+    }));
+    
+    res.json(roomsWithStats);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Failed to fetch rooms" });
@@ -112,11 +121,25 @@ app.get("/", (req, res) => {
 });
 
 const usersInVoice = {}; // { roomId: [{ id, username }] }
+const usersInRoom = {}; // { roomId: { socketId: username } } for text/presence
 const socketToRoom = {}; // { socketId: roomId }
 
 // Broadcast all voice room users to all connected clients
 const broadcastAllVoiceUsers = () => {
   io.emit("all-rooms-users", usersInVoice);
+};
+
+// Helper to get active users count per room for the rooms API
+const getRoomStats = () => {
+  const stats = {};
+  for (const [roomId, users] of Object.entries(usersInRoom)) {
+    const uniqueNames = [...new Set(Object.values(users))]; // unique usernames
+    stats[roomId] = {
+      count: uniqueNames.length,
+      users: uniqueNames
+    };
+  }
+  return stats;
 };
 
 io.on("connection", (socket) => {
@@ -126,9 +149,24 @@ io.on("connection", (socket) => {
   socket.emit("all-rooms-users", usersInVoice);
 
   // Join a Text/Socket Room
-  socket.on("join-room", (roomId) => {
+  socket.on("join-room", (data) => {
+    // data can be roomId string or object { roomId, username }
+    const roomId = typeof data === 'object' ? data.roomId : data;
+    const username = typeof data === 'object' ? data.username : "Anonymous";
+
     socket.join(roomId);
-    console.log(`User ${socket.id} joined text room ${roomId}`);
+    console.log(`User ${socket.id} (${username}) joined text room ${roomId}`);
+    
+    // Track user in room
+    if (!usersInRoom[roomId]) {
+      usersInRoom[roomId] = {};
+    }
+    usersInRoom[roomId][socket.id] = username;
+    
+    // Store mapping for disconnect
+    // Note: socketToRoom is used for voice, we might need another map or just reuse it carefully.
+    // Since a user might be in text room X and voice room Y, let's keep text tracking separate or assume they are the same.
+    // For now, let's just track it in usersInRoom.
   });
 
   socket.on("send-message", (data) => {
@@ -153,6 +191,7 @@ io.on("connection", (socket) => {
 
       // Broadcast to specific room
       io.to(roomId).emit("message-received", message);
+      console.log(`Message sent to room ${roomId}: ${content}`);
       
     } catch (err) {
       console.error("Error saving message:", err);
@@ -161,6 +200,14 @@ io.on("connection", (socket) => {
 
   socket.on("disconnect", () => {
     console.log("User disconnected:", socket.id);
+    
+    // Remove from text rooms
+    for (const roomId in usersInRoom) {
+      if (usersInRoom[roomId][socket.id]) {
+        delete usersInRoom[roomId][socket.id];
+      }
+    }
+
     // Remove user from voice list if they were in it
     const roomID = socketToRoom[socket.id];
     let room = usersInVoice[roomID];

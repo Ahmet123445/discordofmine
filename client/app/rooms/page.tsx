@@ -3,10 +3,13 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import SpotlightCard from "@/components/SpotlightCard";
+import Particles from "@/components/Particles";
 
 interface Room {
   id: string;
   name: string;
+  onlineCount: number;
+  users: string[];
 }
 
 export default function RoomsPage() {
@@ -24,6 +27,10 @@ export default function RoomsPage() {
       return;
     }
     fetchRooms();
+    
+    // Poll for room stats every 5 seconds
+    const interval = setInterval(fetchRooms, 5000);
+    return () => clearInterval(interval);
   }, [router]);
 
   const fetchRooms = async () => {
@@ -81,82 +88,125 @@ export default function RoomsPage() {
   }
 
   return (
-    <div className="min-h-screen bg-black text-white p-8">
-      <div className="max-w-6xl mx-auto">
-        <header className="mb-12 flex items-center justify-between">
-          <div>
-            <h1 className="text-3xl font-bold bg-gradient-to-r from-indigo-500 to-purple-500 bg-clip-text text-transparent">
-              Sunucular
-            </h1>
-            <p className="text-zinc-500 mt-1">Katilmak istedigin odayi sec veya yeni bir tane olustur.</p>
-          </div>
-          <button 
-            onClick={() => {
-              localStorage.clear();
-              router.push("/login");
-            }}
-            className="text-sm text-zinc-500 hover:text-red-400 transition-colors"
-          >
-            Cikis Yap
-          </button>
-        </header>
+    <div className="relative min-h-screen bg-black text-white font-sans overflow-hidden">
+      {/* Background Particles */}
+      <div className="absolute inset-0 pointer-events-none">
+        <Particles
+          particleColors={["#ffffff", "#6366f1"]}
+          particleCount={150}
+          particleSpread={15}
+          speed={0.05}
+          particleBaseSize={80}
+          moveParticlesOnHover={false}
+          alphaParticles={false}
+          disableRotation={false}
+        />
+      </div>
 
-        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">
-          {/* Create Room Card */}
-          <SpotlightCard 
-            className="h-48 flex items-center justify-center cursor-pointer border-dashed border-2 border-zinc-800 hover:border-zinc-600 bg-transparent group"
-            spotlightColor="rgba(255, 255, 255, 0.1)"
-            onClick={() => setShowCreateModal(true)}
-          >
-            <div className="flex flex-col items-center gap-3">
-              <div className="w-12 h-12 rounded-full bg-zinc-900 flex items-center justify-center group-hover:bg-zinc-800 transition-colors">
-                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-zinc-400 group-hover:text-white"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-              </div>
-              <span className="font-medium text-zinc-400 group-hover:text-white transition-colors">Oda Olustur</span>
+      <div className="relative z-10 p-8">
+        <div className="max-w-6xl mx-auto">
+          <header className="mb-12 flex items-center justify-between backdrop-blur-md bg-black/30 p-6 rounded-3xl border border-white/5">
+            <div>
+              <h1 className="text-3xl font-bold bg-white bg-clip-text text-transparent">
+                Active Frequencies
+              </h1>
+              <p className="text-zinc-400 mt-1">Select a frequency to tune in.</p>
             </div>
-          </SpotlightCard>
-
-          {/* Room Cards */}
-          {rooms.map((room) => (
-            <SpotlightCard 
-              key={room.id}
-              className="h-48 flex flex-col justify-between cursor-pointer"
-              spotlightColor="rgba(99, 102, 241, 0.15)"
-              onClick={() => handleRoomClick(room.id)}
+            <button 
+              onClick={() => {
+                localStorage.clear();
+                router.push("/login");
+              }}
+              className="text-sm text-zinc-500 hover:text-white transition-colors"
             >
-              <div>
-                <div className="flex justify-between items-start mb-2">
-                  <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-indigo-600 to-purple-600 flex items-center justify-center text-lg font-bold shadow-lg shadow-indigo-900/20">
-                    {room.name[0].toUpperCase()}
-                  </div>
-                  <div className="bg-green-500/10 text-green-400 text-[10px] px-2 py-1 rounded-full border border-green-500/20">
-                    Online
-                  </div>
+              Disconnect
+            </button>
+          </header>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">
+            {/* Create Room Card */}
+            <SpotlightCard 
+              className="h-64 flex items-center justify-center cursor-pointer border-dashed border-2 border-zinc-800 hover:border-zinc-500 bg-black/50 hover:bg-black/80 group transition-all"
+              spotlightColor="rgba(255, 255, 255, 0.1)"
+              onClick={() => setShowCreateModal(true)}
+            >
+              <div className="flex flex-col items-center gap-4">
+                <div className="w-16 h-16 rounded-full bg-zinc-900 flex items-center justify-center group-hover:scale-110 transition-transform duration-300 border border-zinc-800">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-zinc-400 group-hover:text-white"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
                 </div>
-                <h3 className="text-xl font-bold text-white truncate">{room.name}</h3>
-                <p className="text-xs text-zinc-500 mt-1">ID: {room.id.split('-')[0]}...</p>
-              </div>
-              
-              <div className="mt-4 pt-4 border-t border-zinc-800 flex items-center justify-between">
-                <span className="text-xs text-zinc-500">Ses & Chat</span>
-                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-zinc-600"><path d="M5 12h14"/><path d="M12 5l7 7-7 7"/></svg>
+                <span className="font-medium text-zinc-400 group-hover:text-white transition-colors">Create Frequency</span>
               </div>
             </SpotlightCard>
-          ))}
+
+            {/* Room Cards */}
+            {rooms.map((room) => (
+              <SpotlightCard 
+                key={room.id}
+                className="h-64 flex flex-col justify-between cursor-pointer bg-zinc-900/50 backdrop-blur-sm border border-white/5 hover:border-indigo-500/30 transition-all hover:transform hover:-translate-y-1"
+                spotlightColor="rgba(99, 102, 241, 0.15)"
+                onClick={() => handleRoomClick(room.id)}
+              >
+                <div>
+                  <div className="flex justify-between items-start mb-4">
+                    <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-indigo-500/20 to-purple-500/20 border border-white/10 flex items-center justify-center text-xl font-bold text-white shadow-[0_0_15px_rgba(99,102,241,0.3)]">
+                      {room.name[0].toUpperCase()}
+                    </div>
+                    <div className={`px-3 py-1 rounded-full border text-[10px] font-bold uppercase tracking-wider ${room.onlineCount > 0 ? 'bg-green-500/10 text-green-400 border-green-500/20' : 'bg-zinc-800 text-zinc-500 border-zinc-700'}`}>
+                      {room.onlineCount} Online
+                    </div>
+                  </div>
+                  <h3 className="text-2xl font-bold text-white truncate tracking-tight">{room.name}</h3>
+                  <p className="text-xs text-zinc-500 mt-1 font-mono">#{room.id.split('-')[0]}</p>
+                </div>
+                
+                <div className="space-y-3">
+                   {/* User List Preview */}
+                   <div className="h-10 flex -space-x-2 overflow-hidden">
+                     {room.users.length > 0 ? (
+                       room.users.slice(0, 5).map((u, i) => (
+                         <div key={i} className="w-8 h-8 rounded-full bg-zinc-800 border-2 border-black flex items-center justify-center text-[10px] font-bold text-zinc-400" title={u}>
+                           {u[0].toUpperCase()}
+                         </div>
+                       ))
+                     ) : (
+                       <span className="text-xs text-zinc-600 italic py-2">No active signals</span>
+                     )}
+                     {room.users.length > 5 && (
+                        <div className="w-8 h-8 rounded-full bg-zinc-800 border-2 border-black flex items-center justify-center text-[10px] text-zinc-500">
+                          +{room.users.length - 5}
+                        </div>
+                     )}
+                   </div>
+
+                  <div className="pt-4 border-t border-white/5 flex items-center justify-between group">
+                    <span className="text-xs text-zinc-500 group-hover:text-indigo-400 transition-colors">Join Frequency</span>
+                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-zinc-600 group-hover:translate-x-1 transition-transform group-hover:text-indigo-400"><path d="M5 12h14"/><path d="M12 5l7 7-7 7"/></svg>
+                  </div>
+                </div>
+              </SpotlightCard>
+            ))}
+          </div>
         </div>
       </div>
 
       {/* Create Room Modal */}
       {showCreateModal && (
-        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="bg-zinc-900 border border-zinc-800 rounded-2xl w-full max-w-md p-6 shadow-2xl">
-            <h2 className="text-xl font-bold mb-4">Yeni Oda Olustur</h2>
-            <form onSubmit={createRoom}>
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-md z-50 flex items-center justify-center p-4">
+          <div className="bg-zinc-950 border border-zinc-800 rounded-2xl w-full max-w-md p-6 shadow-2xl relative overflow-hidden">
+             {/* Modal Particles Effect */}
+             <div className="absolute inset-0 opacity-20 pointer-events-none">
+                 <Particles particleCount={30} speed={0.05} />
+             </div>
+
+            <h2 className="text-xl font-bold mb-1 relative z-10">Initialize New Frequency</h2>
+            <p className="text-xs text-zinc-500 mb-6 relative z-10">Create a new secure channel for communication.</p>
+            
+            <form onSubmit={createRoom} className="relative z-10">
               <input 
                 type="text" 
-                placeholder="Oda ismi..."
+                placeholder="Frequency Name (e.g. Gaming)"
                 autoFocus
-                className="w-full bg-zinc-950 border border-zinc-700 rounded-xl p-3 text-white focus:outline-none focus:border-indigo-500 mb-4"
+                className="w-full bg-zinc-900 border border-zinc-700 rounded-xl p-4 text-white focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500/50 mb-6 transition-all"
                 value={newRoomName}
                 onChange={(e) => setNewRoomName(e.target.value)}
               />
@@ -164,16 +214,16 @@ export default function RoomsPage() {
                 <button 
                   type="button"
                   onClick={() => setShowCreateModal(false)}
-                  className="px-4 py-2 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors"
+                  className="px-4 py-2 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-900 transition-colors"
                 >
-                  Iptal
+                  Cancel
                 </button>
                 <button 
                   type="submit"
                   disabled={isCreating || !newRoomName.trim()}
-                  className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg disabled:opacity-50"
+                  className="px-6 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg disabled:opacity-50 font-medium shadow-lg shadow-indigo-500/20"
                 >
-                  {isCreating ? "Olusturuluyor..." : "Olustur"}
+                  {isCreating ? "Initializing..." : "Create"}
                 </button>
               </div>
             </form>
