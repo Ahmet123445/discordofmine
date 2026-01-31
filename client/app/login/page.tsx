@@ -2,9 +2,9 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import Particles from "@/components/Particles";
+import GridScan from "@/components/GridScan";
 
-export default function LoginPage() {
+export default function Home() {
   const router = useRouter();
   const [username, setUsername] = useState("");
   const [error, setError] = useState("");
@@ -16,7 +16,6 @@ export default function LoginPage() {
     setLoading(true);
 
     const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001";
-    // Always call login, backend handles creation if needed
     const endpoint = `${API_URL}/api/auth/login`;
 
     try {
@@ -34,7 +33,6 @@ export default function LoginPage() {
 
       localStorage.setItem("token", data.token);
       localStorage.setItem("user", JSON.stringify(data.user));
-      // Redirect to rooms selection
       router.push("/rooms");
     } catch (err: any) {
       setError(err.message);
@@ -46,15 +44,17 @@ export default function LoginPage() {
   return (
     <div className="relative w-full h-screen bg-black overflow-hidden flex items-center justify-center font-sans">
       <div className="absolute inset-0">
-        <Particles
-          particleColors={["#ffffff", "#818cf8"]}
-          particleCount={200}
-          particleSpread={10}
-          speed={0.1}
-          particleBaseSize={100}
-          moveParticlesOnHover={true}
-          alphaParticles={false}
-          disableRotation={false}
+        <GridScan
+          sensitivity={0.55}
+          lineThickness={1}
+          linesColor="#392e4e"
+          gridScale={0.1}
+          scanColor="#FF9FFC"
+          scanOpacity={0.4}
+          enablePost
+          bloomIntensity={0.6}
+          chromaticAberration={0.002}
+          noiseIntensity={0.01}
         />
       </div>
 
