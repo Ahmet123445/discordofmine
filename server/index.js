@@ -148,29 +148,16 @@ const usersInVoice = {}; // { roomId: [{ id, username }] }
 const usersInRoom = {}; // { roomId: { socketId: username } } for text/presence
 const socketToRoom = {}; // { socketId: roomId }
 
-// Broadcast all voice room users to all connected clients
-const broadcastAllVoiceUsers = () => {
-  io.emit("all-rooms-users", usersInVoice);
-};
+  // Broadcast all voice room users to all connected clients
+  const broadcastAllVoiceUsers = () => {
+    io.emit("all-rooms-users", usersInVoice);
+  };
 
-// Helper to get active users count per room for the rooms API
-const getRoomStats = () => {
-  const stats = {};
-  for (const [roomId, users] of Object.entries(usersInRoom)) {
-    const uniqueNames = [...new Set(Object.values(users))]; // unique usernames
-    stats[roomId] = {
-      count: uniqueNames.length,
-      users: uniqueNames
-    };
-  }
-  return stats;
-};
-
-io.on("connection", (socket) => {
-  console.log("User connected:", socket.id);
-  
-  // Send current voice users to new connection
-  socket.emit("all-rooms-users", usersInVoice);
+  socket.on("ui-interaction", (data) => {
+    // Broadcast to everyone else (excluding sender)
+    // Rate limit check could happen here too, but client-side is mostly enough for UI feedback
+    socket.broadcast.emit("play-ui-sound", { type: data.type, userId: socket.id });
+  });
 
   // Join a Text/Socket Room
   socket.on("join-room", (data) => {
