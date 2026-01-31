@@ -1,9 +1,14 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import Peer from "simple-peer";
 import { Socket } from "socket.io-client";
 import { createPortal } from "react-dom";
+
+// Dynamic import for simple-peer (it accesses window/navigator immediately)
+let Peer: any;
+if (typeof window !== "undefined") {
+  Peer = require("simple-peer");
+}
 
 interface VoiceChatProps {
   socket: Socket | null;
@@ -27,12 +32,13 @@ const playLeaveSound = () => {
 export default function VoiceChat({ socket, roomId, user }: VoiceChatProps) {
   const [inVoice, setInVoice] = useState(false);
   const [isSharingScreen, setIsSharingScreen] = useState(false);
-  const [peers, setPeers] = useState<{ peerID: string, peer: Peer.Instance, volume: number }[]>([]);
+  // Fix type definition for peers
+  const [peers, setPeers] = useState<{ peerID: string, peer: any, volume: number }[]>([]);
   const [incomingStreams, setIncomingStreams] = useState<{ id: string, stream: MediaStream }[]>([]);
   const [isMuted, setIsMuted] = useState(false);
   
   const userAudio = useRef<HTMLAudioElement>(null);
-  const peersRef = useRef<{ peerID: string; peer: Peer.Instance }[]>([]);
+  const peersRef = useRef<{ peerID: string; peer: any }[]>([]);
   const localStream = useRef<MediaStream | null>(null);
   const screenStream = useRef<MediaStream | null>(null);
 
@@ -72,7 +78,7 @@ export default function VoiceChat({ socket, roomId, user }: VoiceChatProps) {
   };
 
   const joinVoice = () => {
-    if (!socket) return;
+    if (!socket || !Peer) return;
     
     playJoinSound();
 
@@ -85,7 +91,7 @@ export default function VoiceChat({ socket, roomId, user }: VoiceChatProps) {
         socket.emit("join-voice", roomId);
 
         socket.on("all-voice-users", (users: string[]) => {
-          const peersArr: { peerID: string, peer: Peer.Instance, volume: number }[] = [];
+          const peersArr: { peerID: string, peer: any, volume: number }[] = [];
           users.forEach(userID => {
             const peer = createPeer(userID, socket.id, stream);
             peersRef.current.push({ peerID: userID, peer });
@@ -154,11 +160,11 @@ export default function VoiceChat({ socket, roomId, user }: VoiceChatProps) {
       stream,
     });
 
-    peer.on("signal", signal => {
+    peer.on("signal", (signal: any) => {
       socket?.emit("sending-signal", { userToSignal, callerID, signal });
     });
 
-    peer.on("stream", (remoteStream) => {
+    peer.on("stream", (remoteStream: MediaStream) => {
       handleIncomingStream(userToSignal, remoteStream);
     });
 
@@ -172,11 +178,11 @@ export default function VoiceChat({ socket, roomId, user }: VoiceChatProps) {
       stream,
     });
 
-    peer.on("signal", signal => {
+    peer.on("signal", (signal: any) => {
       socket?.emit("returning-signal", { signal, callerID });
     });
 
-    peer.on("stream", (remoteStream) => {
+    peer.on("stream", (remoteStream: MediaStream) => {
       handleIncomingStream(callerID, remoteStream);
     });
 
@@ -341,7 +347,7 @@ export default function VoiceChat({ socket, roomId, user }: VoiceChatProps) {
   );
 }
 
-const AudioPlayer = ({ peer, volume = 1 }: { peer: Peer.Instance, volume?: number }) => {
+const AudioPlayer = ({ peer, volume = 1 }: { peer: any, volume?: number }) => {
   const ref = useRef<HTMLAudioElement>(null);
   useEffect(() => {
     peer.on("stream", (stream: MediaStream) => {
