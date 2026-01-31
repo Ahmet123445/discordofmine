@@ -10,6 +10,11 @@ interface VoiceChatProps {
   user: { id: number; username: string };
 }
 
+interface VoiceRoom {
+  id: string;
+  name: string;
+}
+
 // Sound effects
 const playJoinSound = () => {
   if (typeof window === "undefined") return;
@@ -25,14 +30,21 @@ const playLeaveSound = () => {
   audio.play().catch(() => {});
 };
 
-export default function VoiceChat({ socket, roomId, user }: VoiceChatProps) {
+export default function VoiceChat({ socket, roomId: defaultRoomId, user }: VoiceChatProps) {
   const [inVoice, setInVoice] = useState(false);
+  const [currentRoom, setCurrentRoom] = useState<string | null>(null);
   const [PeerClass, setPeerClass] = useState<any>(null);
   const [isSharingScreen, setIsSharingScreen] = useState(false);
   const [peers, setPeers] = useState<{ peerID: string; peer: any; volume: number; username: string }[]>([]);
   const [incomingStreams, setIncomingStreams] = useState<{ id: string; stream: MediaStream }[]>([]);
   const [isMuted, setIsMuted] = useState(false);
   const [mounted, setMounted] = useState(false);
+  const [showAddRoom, setShowAddRoom] = useState(false);
+  const [newRoomName, setNewRoomName] = useState("");
+  const [voiceRooms, setVoiceRooms] = useState<VoiceRoom[]>([
+    { id: "general", name: "General" },
+    { id: "gaming", name: "Gaming" },
+  ]);
 
   const peersRef = useRef<{ peerID: string; peer: any }[]>([]);
   const localStream = useRef<MediaStream | null>(null);
@@ -41,11 +53,13 @@ export default function VoiceChat({ socket, roomId, user }: VoiceChatProps) {
   // Load Peer dynamically on mount
   useEffect(() => {
     setMounted(true);
-    import("simple-peer").then((mod) => {
-      setPeerClass(() => mod.default);
-    }).catch((err) => {
-      console.error("Failed to load simple-peer:", err);
-    });
+    import("simple-peer")
+      .then((mod) => {
+        setPeerClass(() => mod.default);
+      })
+      .catch((err) => {
+        console.error("Failed to load simple-peer:", err);
+      });
   }, []);
 
   // Keyboard Shortcuts
@@ -57,12 +71,12 @@ export default function VoiceChat({ socket, roomId, user }: VoiceChatProps) {
       }
       if (e.altKey && e.key.toLowerCase() === "v") {
         if (inVoice) leaveVoice();
-        else joinVoice();
+        else if (voiceRooms.length > 0) joinVoice(voiceRooms[0].id);
       }
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [inVoice, isMuted, mounted, PeerClass]);
+  }, [inVoice, isMuted, mounted, PeerClass, voiceRooms]);
 
   // Clean up on unmount
   useEffect(() => {
@@ -83,8 +97,9 @@ export default function VoiceChat({ socket, roomId, user }: VoiceChatProps) {
     }
   };
 
-  const joinVoice = () => {
+  const joinVoice = (roomId: string) => {
     if (!socket || !PeerClass) return;
+    if (inVoice) leaveVoice(); // Leave current room first
 
     playJoinSound();
 
@@ -92,6 +107,7 @@ export default function VoiceChat({ socket, roomId, user }: VoiceChatProps) {
       .getUserMedia({ video: false, audio: true })
       .then((stream) => {
         setInVoice(true);
+        setCurrentRoom(roomId);
         setIsMuted(false);
         localStream.current = stream;
 
@@ -103,7 +119,7 @@ export default function VoiceChat({ socket, roomId, user }: VoiceChatProps) {
             if (socket.id) {
               const peer = createPeer(u.id, socket.id, stream, user.username);
               peersRef.current.push({ peerID: u.id, peer });
-              peersArr.push({ peerID: u.id, peer, volume: 1.0, username: u.username });
+              peersArr.push({ peerID: u.id, peer, volume: 100, username: u.username });
             }
           });
           setPeers(peersArr);
@@ -118,7 +134,7 @@ export default function VoiceChat({ socket, roomId, user }: VoiceChatProps) {
           playJoinSound();
           const peer = addPeer(payload.signal, payload.callerID, stream);
           peersRef.current.push({ peerID: payload.callerID, peer });
-          setPeers((prev) => [...prev, { peerID: payload.callerID, peer, volume: 1.0, username: payload.username }]);
+          setPeers((prev) => [...prev, { peerID: payload.callerID, peer, volume: 100, username: payload.username }]);
         });
 
         socket.on("receiving-returned-signal", (payload: { signal: any; id: string }) => {
@@ -149,6 +165,7 @@ export default function VoiceChat({ socket, roomId, user }: VoiceChatProps) {
     playLeaveSound();
     stopScreenShare();
     setInVoice(false);
+    setCurrentRoom(null);
     socket?.emit("leave-voice");
 
     localStream.current?.getTracks().forEach((track) => track.stop());
@@ -212,8 +229,24 @@ export default function VoiceChat({ socket, roomId, user }: VoiceChatProps) {
   };
 
   const handleIncomingStream = (id: string, stream: MediaStream) => {
-    const isVideo = stream.getVideoTracks().length > 0;
-    if (isVideo) {
+    // Handle audio streams
+    const audioTracks = stream.getAudioTracks();
+    if (audioTracks.length > 0) {
+      // Audio is handled by AudioPlayer component, just update peers
+      setPeers((prev) => {
+        const updated = [...prev];
+        const peerIndex = updated.findIndex((p) => p.peerID === id);
+        if (peerIndex !== -1) {
+          // Trigger re-render for AudioPlayer
+          updated[peerIndex] = { ...updated[peerIndex] };
+        }
+        return updated;
+      });
+    }
+
+    // Handle video streams (screen share)
+    const videoTracks = stream.getVideoTracks();
+    if (videoTracks.length > 0) {
       setIncomingStreams((prev) => {
         if (prev.find((s) => s.id === id && s.stream.id === stream.id)) return prev;
         return [...prev, { id, stream }];
@@ -223,7 +256,6 @@ export default function VoiceChat({ socket, roomId, user }: VoiceChatProps) {
 
   const startScreenShare = () => {
     if (!PeerClass) return;
-    // @ts-ignore
     navigator.mediaDevices
       .getDisplayMedia({ video: true, audio: false })
       .then((stream: MediaStream) => {
@@ -231,7 +263,9 @@ export default function VoiceChat({ socket, roomId, user }: VoiceChatProps) {
         screenStream.current = stream;
 
         peersRef.current.forEach((p) => {
-          p.peer.addStream(stream);
+          stream.getTracks().forEach((track) => {
+            p.peer.addTrack(track, stream);
+          });
         });
 
         stream.getVideoTracks()[0].onended = () => {
@@ -245,111 +279,195 @@ export default function VoiceChat({ socket, roomId, user }: VoiceChatProps) {
 
   const stopScreenShare = () => {
     if (!screenStream.current) return;
-    screenStream.current.getTracks().forEach((track) => track.stop());
-    peersRef.current.forEach((p) => {
-      if (screenStream.current) {
-        try {
-          p.peer.removeStream(screenStream.current);
-        } catch (e) {}
-      }
+    
+    // Stop all tracks
+    screenStream.current.getTracks().forEach((track) => {
+      track.stop();
     });
+
+    // Clear state
     screenStream.current = null;
     setIsSharingScreen(false);
+    
+    // Remove from incoming streams if showing own screen
+    setIncomingStreams([]);
   };
 
   const handleVolumeChange = (peerId: string, newVolume: number) => {
     setPeers((prev) => prev.map((p) => (p.peerID === peerId ? { ...p, volume: newVolume } : p)));
   };
 
+  const addVoiceRoom = () => {
+    if (!newRoomName.trim()) return;
+    const newRoom: VoiceRoom = {
+      id: newRoomName.toLowerCase().replace(/\s+/g, "-"),
+      name: newRoomName,
+    };
+    setVoiceRooms((prev) => [...prev, newRoom]);
+    setNewRoomName("");
+    setShowAddRoom(false);
+  };
+
   if (!mounted) return null;
 
   return (
     <>
-      <div className="p-3 bg-zinc-900 border-t border-zinc-700 flex flex-col gap-2">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <div className={`w-3 h-3 rounded-full ${inVoice ? "bg-green-500 animate-pulse" : "bg-red-500"}`}></div>
-            <span className="text-xs text-zinc-400">
-              {inVoice ? (isMuted ? "Voice (Muted)" : "Voice Connected") : "Disconnected"}
-            </span>
-            {inVoice && (
-              <div className="text-[10px] text-zinc-600 ml-1 border border-zinc-700 px-1 rounded">ALT+M Mute</div>
-            )}
-          </div>
-
-          <div className="flex gap-2">
-            {inVoice && (
-              <>
-                <button
-                  onClick={toggleMute}
-                  className={`p-2 rounded-full transition-all ${isMuted ? "bg-red-600 text-white" : "bg-zinc-700 text-zinc-400 hover:text-white"}`}
-                  title="Toggle Mute (ALT+M)"
-                >
-                  {isMuted ? (
-                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="1" y1="1" x2="23" y2="23" /><path d="M9 9v3a3 3 0 0 0 5.12 2.12M15 9.34V4a3 3 0 0 0-5.94-.6" /></svg>
-                  ) : (
-                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" /><path d="M19 10v2a7 7 0 0 1-14 0v-2" /><line x1="12" y1="19" x2="12" y2="23" /><line x1="8" y1="23" x2="16" y2="23" /></svg>
-                  )}
-                </button>
-
-                <button
-                  onClick={isSharingScreen ? stopScreenShare : startScreenShare}
-                  className={`p-2 rounded-full transition-all ${isSharingScreen ? "bg-blue-600 text-white" : "bg-zinc-700 text-zinc-400 hover:text-white"}`}
-                  title="Share Screen"
-                >
-                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2" /><line x1="8" y1="21" x2="16" y2="21" /><line x1="12" y1="17" x2="12" y2="21" /></svg>
-                </button>
-              </>
-            )}
-
-            {inVoice ? (
-              <button
-                onClick={leaveVoice}
-                className="p-2 rounded-full bg-red-600/20 text-red-500 hover:bg-red-600/40 transition-all"
-                title="Disconnect (ALT+V)"
-              >
-                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M10.68 13.31a16 16 0 0 0 3.41 2.6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7 2 2 0 0 1 1.72 2v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.42 19.42 0 0 1-3.33-2.67m-2.67-3.34a19.79 19.79 0 0 1-3.07-8.63A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91" /><line x1="23" y1="1" x2="1" y2="23" /></svg>
-              </button>
-            ) : (
-              <button
-                onClick={joinVoice}
-                className="p-2 rounded-full bg-green-600/20 text-green-500 hover:bg-green-600/40 transition-all"
-                title="Join Voice (ALT+V)"
-              >
-                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z" /></svg>
-              </button>
-            )}
-          </div>
+      {/* Voice Channels Section */}
+      <div className="flex-1 flex flex-col">
+        <div className="px-3 py-2 flex items-center justify-between">
+          <span className="text-zinc-500 text-xs font-semibold uppercase tracking-wider">Voice Channels</span>
+          <button
+            onClick={() => setShowAddRoom(!showAddRoom)}
+            className="text-zinc-500 hover:text-white transition-colors p-1 rounded hover:bg-zinc-700"
+            title="Add Voice Channel"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          </button>
         </div>
 
-        {inVoice && peers.length > 0 && (
-          <div className="flex flex-col gap-1 mt-2 p-2 bg-zinc-800 rounded border border-zinc-700">
-            <span className="text-[10px] uppercase text-zinc-500 font-bold mb-1">Voice Volume</span>
-            {peers.map((p) => (
-              <div key={p.peerID} className="flex items-center justify-between text-xs">
-                <span className="text-zinc-300 w-20 truncate" title={p.username || p.peerID}>
-                  {p.username || `User ${p.peerID.substring(0, 4)}`}
-                </span>
-                <input
-                  type="range"
-                  min="0"
-                  max="1"
-                  step="0.1"
-                  value={p.volume}
-                  onChange={(e) => handleVolumeChange(p.peerID, parseFloat(e.target.value))}
-                  className="w-20 h-1 bg-zinc-600 rounded-lg appearance-none cursor-pointer accent-blue-500"
-                />
-              </div>
-            ))}
+        {showAddRoom && (
+          <div className="px-3 pb-2">
+            <div className="flex gap-1">
+              <input
+                type="text"
+                value={newRoomName}
+                onChange={(e) => setNewRoomName(e.target.value)}
+                placeholder="Room name..."
+                className="flex-1 bg-zinc-900 text-white text-xs rounded px-2 py-1.5 border border-zinc-600 focus:outline-none focus:border-indigo-500"
+                onKeyDown={(e) => e.key === "Enter" && addVoiceRoom()}
+              />
+              <button
+                onClick={addVoiceRoom}
+                className="px-2 py-1 bg-indigo-600 hover:bg-indigo-500 rounded text-xs font-medium"
+              >
+                Add
+              </button>
+            </div>
           </div>
         )}
 
-        {peers.map((p) => (
-          <AudioPlayer key={p.peerID} peer={p.peer} volume={p.volume} />
-        ))}
+        <div className="px-2 space-y-0.5">
+          {voiceRooms.map((room) => (
+            <div key={room.id} className="group">
+              <button
+                onClick={() => (currentRoom === room.id ? leaveVoice() : joinVoice(room.id))}
+                className={`w-full flex items-center gap-2 px-2 py-1.5 rounded text-sm transition-all ${
+                  currentRoom === room.id
+                    ? "bg-zinc-700 text-white"
+                    : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800"
+                }`}
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={currentRoom === room.id ? "text-green-400" : ""}>
+                  <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+                  <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+                </svg>
+                <span>{room.name}</span>
+                {currentRoom === room.id && (
+                  <span className="ml-auto">
+                    <span className="relative flex h-2 w-2">
+                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
+                      <span className="relative inline-flex rounded-full h-2 w-2 bg-green-500"></span>
+                    </span>
+                  </span>
+                )}
+              </button>
+              
+              {/* Show connected users under the room */}
+              {currentRoom === room.id && peers.length > 0 && (
+                <div className="ml-6 mt-1 space-y-1">
+                  {peers.map((p) => (
+                    <div key={p.peerID} className="flex items-center gap-2 text-xs text-zinc-400 py-0.5">
+                      <div className="w-4 h-4 rounded-full bg-indigo-600 flex items-center justify-center text-[10px] font-bold text-white">
+                        {(p.username || "?")[0].toUpperCase()}
+                      </div>
+                      <span>{p.username || `User ${p.peerID.substring(0, 4)}`}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
       </div>
 
-      {mounted && incomingStreams.length > 0 &&
+      {/* Voice Controls Panel (only when in voice) */}
+      {inVoice && (
+        <div className="p-3 bg-zinc-900/80 border-t border-zinc-700">
+          <div className="flex items-center justify-between mb-2">
+            <div className="flex items-center gap-2">
+              <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></div>
+              <span className="text-xs text-zinc-300 font-medium">
+                {isMuted ? "Muted" : "Connected"}
+              </span>
+            </div>
+            <div className="text-[10px] text-zinc-600 border border-zinc-700 px-1.5 py-0.5 rounded">ALT+M</div>
+          </div>
+
+          <div className="flex items-center justify-center gap-2">
+            <button
+              onClick={toggleMute}
+              className={`p-2.5 rounded-full transition-all ${isMuted ? "bg-red-600 text-white" : "bg-zinc-700 text-zinc-300 hover:text-white hover:bg-zinc-600"}`}
+              title="Toggle Mute (ALT+M)"
+            >
+              {isMuted ? (
+                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="1" y1="1" x2="23" y2="23"/><path d="M9 9v3a3 3 0 0 0 5.12 2.12M15 9.34V4a3 3 0 0 0-5.94-.6"/></svg>
+              ) : (
+                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
+              )}
+            </button>
+
+            <button
+              onClick={isSharingScreen ? stopScreenShare : startScreenShare}
+              className={`p-2.5 rounded-full transition-all ${isSharingScreen ? "bg-indigo-600 text-white" : "bg-zinc-700 text-zinc-300 hover:text-white hover:bg-zinc-600"}`}
+              title="Share Screen"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+            </button>
+
+            <button
+              onClick={leaveVoice}
+              className="p-2.5 rounded-full bg-red-600/20 text-red-400 hover:bg-red-600/40 transition-all"
+              title="Disconnect (ALT+V)"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M10.68 13.31a16 16 0 0 0 3.41 2.6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7 2 2 0 0 1 1.72 2v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.42 19.42 0 0 1-3.33-2.67m-2.67-3.34a19.79 19.79 0 0 1-3.07-8.63A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91"/><line x1="23" y1="1" x2="1" y2="23"/></svg>
+            </button>
+          </div>
+
+          {/* Volume Controls with Percentage */}
+          {peers.length > 0 && (
+            <div className="mt-3 pt-3 border-t border-zinc-700 space-y-2">
+              <span className="text-[10px] uppercase text-zinc-500 font-bold">User Volume</span>
+              {peers.map((p) => (
+                <div key={p.peerID} className="flex items-center gap-2">
+                  <div className="w-5 h-5 rounded-full bg-indigo-600 flex items-center justify-center text-[10px] font-bold text-white flex-shrink-0">
+                    {(p.username || "?")[0].toUpperCase()}
+                  </div>
+                  <span className="text-xs text-zinc-300 w-16 truncate">{p.username || "User"}</span>
+                  <input
+                    type="range"
+                    min="0"
+                    max="100"
+                    step="1"
+                    value={p.volume}
+                    onChange={(e) => handleVolumeChange(p.peerID, parseInt(e.target.value))}
+                    className="flex-1 h-1 bg-zinc-600 rounded-lg appearance-none cursor-pointer accent-indigo-500"
+                  />
+                  <span className="text-[10px] text-zinc-400 w-8 text-right font-mono">{p.volume}%</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Audio Players */}
+      {peers.map((p) => (
+        <AudioPlayer key={p.peerID} peer={p.peer} volume={p.volume / 100} />
+      ))}
+
+      {/* Screen Share Overlay */}
+      {mounted &&
+        incomingStreams.length > 0 &&
         createPortal(
           <>
             {incomingStreams.map((item) => {
@@ -366,6 +484,7 @@ export default function VoiceChat({ socket, roomId, user }: VoiceChatProps) {
 
 const AudioPlayer = ({ peer, volume = 1 }: { peer: any; volume?: number }) => {
   const ref = useRef<HTMLAudioElement>(null);
+  const [hasStream, setHasStream] = useState(false);
 
   useEffect(() => {
     const handler = (stream: MediaStream) => {
@@ -375,10 +494,17 @@ const AudioPlayer = ({ peer, volume = 1 }: { peer: any; volume?: number }) => {
         if (ref.current) {
           ref.current.srcObject = audioStream;
           ref.current.play().catch(() => {});
+          setHasStream(true);
         }
       }
     };
     peer.on("stream", handler);
+    
+    // If peer already has remote streams (reconnection case)
+    if (peer._remoteStreams && peer._remoteStreams.length > 0) {
+      handler(peer._remoteStreams[0]);
+    }
+    
     return () => {
       peer.off("stream", handler);
     };
@@ -386,7 +512,7 @@ const AudioPlayer = ({ peer, volume = 1 }: { peer: any; volume?: number }) => {
 
   useEffect(() => {
     if (ref.current) {
-      ref.current.volume = volume;
+      ref.current.volume = Math.max(0, Math.min(1, volume));
     }
   }, [volume]);
 
@@ -395,17 +521,23 @@ const AudioPlayer = ({ peer, volume = 1 }: { peer: any; volume?: number }) => {
 
 const VideoPlayer = ({ stream, name }: { stream: MediaStream; name: string }) => {
   const ref = useRef<HTMLVideoElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
   const [isExpanded, setIsExpanded] = useState(false);
   const [position, setPosition] = useState({ x: 20, y: 20 });
+  const [size, setSize] = useState({ width: 400, height: 225 });
   const [isDragging, setIsDragging] = useState(false);
+  const [isResizing, setIsResizing] = useState(false);
   const dragRef = useRef({ startX: 0, startY: 0, initialX: 0, initialY: 0 });
+  const resizeRef = useRef({ startX: 0, startY: 0, initialW: 0, initialH: 0 });
 
   useEffect(() => {
     if (ref.current) ref.current.srcObject = stream;
   }, [stream]);
 
   const handleMouseDown = (e: React.MouseEvent) => {
-    if ((e.target as HTMLElement).tagName === "BUTTON") return;
+    if ((e.target as HTMLElement).closest("button")) return;
+    if ((e.target as HTMLElement).classList.contains("resize-handle")) return;
+    
     setIsDragging(true);
     dragRef.current = {
       startX: e.clientX,
@@ -415,19 +547,42 @@ const VideoPlayer = ({ stream, name }: { stream: MediaStream; name: string }) =>
     };
   };
 
+  const handleResizeStart = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    setIsResizing(true);
+    resizeRef.current = {
+      startX: e.clientX,
+      startY: e.clientY,
+      initialW: size.width,
+      initialH: size.height,
+    };
+  };
+
   useEffect(() => {
     const handleMouseMove = (e: MouseEvent) => {
-      if (!isDragging) return;
-      const dx = e.clientX - dragRef.current.startX;
-      const dy = e.clientY - dragRef.current.startY;
-      setPosition({
-        x: dragRef.current.initialX - dx,
-        y: dragRef.current.initialY + dy,
-      });
+      if (isDragging) {
+        const dx = e.clientX - dragRef.current.startX;
+        const dy = e.clientY - dragRef.current.startY;
+        setPosition({
+          x: dragRef.current.initialX - dx,
+          y: dragRef.current.initialY + dy,
+        });
+      }
+      if (isResizing) {
+        const dx = e.clientX - resizeRef.current.startX;
+        const dy = e.clientY - resizeRef.current.startY;
+        setSize({
+          width: Math.max(200, resizeRef.current.initialW - dx),
+          height: Math.max(120, resizeRef.current.initialH + dy),
+        });
+      }
     };
-    const handleMouseUp = () => setIsDragging(false);
+    const handleMouseUp = () => {
+      setIsDragging(false);
+      setIsResizing(false);
+    };
 
-    if (isDragging) {
+    if (isDragging || isResizing) {
       window.addEventListener("mousemove", handleMouseMove);
       window.addEventListener("mouseup", handleMouseUp);
     }
@@ -435,32 +590,54 @@ const VideoPlayer = ({ stream, name }: { stream: MediaStream; name: string }) =>
       window.removeEventListener("mousemove", handleMouseMove);
       window.removeEventListener("mouseup", handleMouseUp);
     };
-  }, [isDragging]);
+  }, [isDragging, isResizing]);
 
   return (
     <div
-      className={`fixed z-50 bg-black rounded-lg overflow-hidden shadow-2xl border border-zinc-700 transition-all duration-200 ${
-        isExpanded ? "inset-4 w-auto h-auto cursor-default" : "w-96 cursor-move hover:shadow-indigo-500/20"
+      ref={containerRef}
+      className={`fixed z-50 bg-black rounded-lg overflow-hidden shadow-2xl border border-zinc-600 transition-all ${
+        isExpanded ? "inset-4" : "cursor-move"
       }`}
-      style={!isExpanded ? { right: `${position.x}px`, top: `${position.y}px` } : {}}
+      style={
+        !isExpanded
+          ? { right: `${position.x}px`, top: `${position.y}px`, width: `${size.width}px`, height: `${size.height}px` }
+          : {}
+      }
       onMouseDown={!isExpanded ? handleMouseDown : undefined}
     >
-      <div className="absolute top-2 left-2 bg-black/60 px-2 py-1 rounded text-xs text-white z-20 pointer-events-none">
-        {name}&apos;s Screen
-      </div>
-      <div className="absolute top-2 right-2 z-20 flex gap-2">
+      {/* Header */}
+      <div className="absolute top-0 left-0 right-0 bg-gradient-to-b from-black/80 to-transparent p-2 flex items-center justify-between z-20">
+        <div className="flex items-center gap-2">
+          <div className="w-6 h-6 rounded-full bg-indigo-600 flex items-center justify-center text-xs font-bold text-white">
+            {name[0].toUpperCase()}
+          </div>
+          <span className="text-xs text-white font-medium">{name}&apos;s Screen</span>
+        </div>
         <button
           onClick={() => setIsExpanded(!isExpanded)}
-          className="p-1.5 bg-black/60 hover:bg-black/80 rounded text-white backdrop-blur-sm transition-colors"
+          className="p-1.5 bg-black/40 hover:bg-black/60 rounded text-white transition-colors"
         >
           {isExpanded ? (
-            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M8 3v3a2 2 0 0 1-2 2H3m18 0h-3a2 2 0 0 1-2-2V3m0 18v-3a2 2 0 0 1 2-2h3M3 16h3a2 2 0 0 1 2 2v3" /></svg>
+            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M8 3v3a2 2 0 0 1-2 2H3m18 0h-3a2 2 0 0 1-2-2V3m0 18v-3a2 2 0 0 1 2-2h3M3 16h3a2 2 0 0 1 2 2v3"/></svg>
           ) : (
-            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" /></svg>
+            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>
           )}
         </button>
       </div>
+      
       <video ref={ref} autoPlay playsInline className="w-full h-full object-contain bg-black" />
+      
+      {/* Resize Handle */}
+      {!isExpanded && (
+        <div
+          className="resize-handle absolute bottom-0 left-0 w-4 h-4 cursor-sw-resize"
+          onMouseDown={handleResizeStart}
+        >
+          <svg className="w-4 h-4 text-zinc-500" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M22 22H20V20H22V22ZM22 18H18V22H22V18ZM18 22H14V20H18V22Z"/>
+          </svg>
+        </div>
+      )}
     </div>
   );
 };
