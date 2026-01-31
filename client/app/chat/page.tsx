@@ -153,8 +153,18 @@ export default function ChatPage() {
 
     fetch(`${API_URL}/api/messages`)
       .then((res) => res.json())
-      .then((data) => setMessages(data))
-      .catch((err) => console.error("Failed to load history", err));
+      .then((data) => {
+        if (Array.isArray(data)) {
+          setMessages(data);
+        } else {
+          console.error("Messages response is not an array:", data);
+          setMessages([]);
+        }
+      })
+      .catch((err) => {
+        console.error("Failed to load history", err);
+        setMessages([]);
+      });
 
     const newSocket = io(API_URL);
     setSocket(newSocket);
@@ -165,7 +175,10 @@ export default function ChatPage() {
     });
 
     newSocket.on("message-received", (message: Message) => {
-      setMessages((prev) => [...prev, message]);
+      console.log("Message received:", message);
+      if (message && message.id) {
+        setMessages((prev) => [...prev, message]);
+      }
     });
 
     newSocket.on("message-deleted", (data: { id: number }) => {

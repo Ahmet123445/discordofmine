@@ -38,8 +38,6 @@ export default function VoiceChat({ socket, roomId: defaultRoomId, user }: Voice
   const [peers, setPeers] = useState<{ peerID: string; peer: any; volume: number; username: string }[]>([]);
   const [incomingStreams, setIncomingStreams] = useState<{ id: string; stream: MediaStream }[]>([]);
   const [hiddenStreams, setHiddenStreams] = useState<Set<string>>(new Set());
-  const [speakingUsers, setSpeakingUsers] = useState<Set<string>>(new Set());
-  const [isSpeaking, setIsSpeaking] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
   const [isDeafened, setIsDeafened] = useState(false);
   const [mounted, setMounted] = useState(false);
@@ -60,8 +58,6 @@ export default function VoiceChat({ socket, roomId: defaultRoomId, user }: Voice
   const peersRef = useRef<{ peerID: string; peer: any }[]>([]);
   const localStream = useRef<MediaStream | null>(null);
   const screenStream = useRef<MediaStream | null>(null);
-  const audioContextRef = useRef<AudioContext | null>(null);
-  const analyserRef = useRef<AnalyserNode | null>(null);
 
   // Load Peer dynamically on mount
   useEffect(() => {
@@ -172,37 +168,6 @@ export default function VoiceChat({ socket, roomId: defaultRoomId, user }: Voice
         setIsMuted(false);
         localStream.current = stream;
 
-        // Setup speaking detection for self
-        try {
-          const audioContext = new AudioContext();
-          audioContextRef.current = audioContext;
-          const analyser = audioContext.createAnalyser();
-          analyserRef.current = analyser;
-          const source = audioContext.createMediaStreamSource(stream);
-          source.connect(analyser);
-          analyser.fftSize = 512;
-          
-          const dataArray = new Uint8Array(analyser.frequencyBinCount);
-          let speakingTimeout: NodeJS.Timeout | null = null;
-          
-          const checkAudioLevel = () => {
-            if (!analyserRef.current || !inVoice) return;
-            analyser.getByteFrequencyData(dataArray);
-            const average = dataArray.reduce((a, b) => a + b, 0) / dataArray.length;
-            
-            if (average > 15) { // Threshold for speaking
-              setIsSpeaking(true);
-              if (speakingTimeout) clearTimeout(speakingTimeout);
-              speakingTimeout = setTimeout(() => setIsSpeaking(false), 300);
-            }
-            
-            requestAnimationFrame(checkAudioLevel);
-          };
-          checkAudioLevel();
-        } catch (e) {
-          console.error("Failed to setup speaking detection", e);
-        }
-
         socket.emit("join-voice", { roomId, user });
 
         socket.on("all-voice-users", (users: { id: string; username: string }[]) => {
@@ -258,16 +223,7 @@ export default function VoiceChat({ socket, roomId: defaultRoomId, user }: Voice
     stopScreenShare();
     setInVoice(false);
     setCurrentRoom(null);
-    setIsSpeaking(false);
-    setSpeakingUsers(new Set());
     socket?.emit("leave-voice");
-
-    // Clean up audio context
-    if (audioContextRef.current) {
-      audioContextRef.current.close().catch(() => {});
-      audioContextRef.current = null;
-    }
-    analyserRef.current = null;
 
     localStream.current?.getTracks().forEach((track) => track.stop());
     localStream.current = null;
@@ -539,7 +495,7 @@ export default function VoiceChat({ socket, roomId: defaultRoomId, user }: Voice
                 <div className="ml-6 mt-1 space-y-1">
                   {/* Show myself first */}
                   <div className="flex items-center gap-2 text-xs text-zinc-300 py-0.5">
-                    <div className={`w-5 h-5 rounded-full bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center text-[10px] font-bold text-white ${isSpeaking && !isMuted ? "ring-2 ring-green-400 ring-offset-1 ring-offset-zinc-800" : ""}`}>
+                    <div className="w-5 h-5 rounded-full bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center text-[10px] font-bold text-white">
                       {user.username[0].toUpperCase()}
                     </div>
                     <span className="flex-1 truncate">{user.username}</span>
@@ -571,7 +527,7 @@ export default function VoiceChat({ socket, roomId: defaultRoomId, user }: Voice
                     
                     return (
                       <div key={p.peerID} className="flex items-center gap-2 text-xs text-zinc-400 py-0.5">
-                        <div className={`w-5 h-5 rounded-full bg-gradient-to-br from-emerald-500 to-teal-600 flex items-center justify-center text-[10px] font-bold text-white ${speakingUsers.has(p.peerID) ? "ring-2 ring-green-400 ring-offset-1 ring-offset-zinc-800" : ""}`}>
+                        <div className="w-5 h-5 rounded-full bg-gradient-to-br from-emerald-500 to-teal-600 flex items-center justify-center text-[10px] font-bold text-white">
                           {(p.username || "?")[0].toUpperCase()}
                         </div>
                         <span className="flex-1 truncate">{p.username || `User ${p.peerID.substring(0, 4)}`}</span>
@@ -723,19 +679,7 @@ export default function VoiceChat({ socket, roomId: defaultRoomId, user }: Voice
         <AudioPlayer
           key={p.peerID}
           peer={p.peer}
-          peerId={p.peerID}
           volume={isDeafened ? 0 : p.volume / 100}
-          onSpeaking={(speaking) => {
-            setSpeakingUsers((prev) => {
-              const next = new Set(prev);
-              if (speaking) {
-                next.add(p.peerID);
-              } else {
-                next.delete(p.peerID);
-              }
-              return next;
-            });
-          }}
         />
       ))}
 
@@ -839,10 +783,8 @@ export default function VoiceChat({ socket, roomId: defaultRoomId, user }: Voice
   );
 }
 
-const AudioPlayer = ({ peer, volume = 1, peerId, onSpeaking }: { peer: any; volume?: number; peerId: string; onSpeaking?: (speaking: boolean) => void }) => {
+const AudioPlayer = ({ peer, volume = 1 }: { peer: any; volume?: number }) => {
   const ref = useRef<HTMLAudioElement>(null);
-  const [hasStream, setHasStream] = useState(false);
-  const audioContextRef = useRef<AudioContext | null>(null);
 
   useEffect(() => {
     const handler = (stream: MediaStream) => {
@@ -852,39 +794,6 @@ const AudioPlayer = ({ peer, volume = 1, peerId, onSpeaking }: { peer: any; volu
         if (ref.current) {
           ref.current.srcObject = audioStream;
           ref.current.play().catch(() => {});
-          setHasStream(true);
-          
-          // Setup speaking detection
-          if (onSpeaking) {
-            try {
-              const audioContext = new AudioContext();
-              audioContextRef.current = audioContext;
-              const analyser = audioContext.createAnalyser();
-              const source = audioContext.createMediaStreamSource(audioStream);
-              source.connect(analyser);
-              analyser.fftSize = 512;
-              
-              const dataArray = new Uint8Array(analyser.frequencyBinCount);
-              let speakingTimeout: NodeJS.Timeout | null = null;
-              
-              const checkAudioLevel = () => {
-                if (!audioContextRef.current) return;
-                analyser.getByteFrequencyData(dataArray);
-                const average = dataArray.reduce((a, b) => a + b, 0) / dataArray.length;
-                
-                if (average > 15) {
-                  onSpeaking(true);
-                  if (speakingTimeout) clearTimeout(speakingTimeout);
-                  speakingTimeout = setTimeout(() => onSpeaking(false), 300);
-                }
-                
-                requestAnimationFrame(checkAudioLevel);
-              };
-              checkAudioLevel();
-            } catch (e) {
-              console.error("Failed to setup speaking detection for peer", e);
-            }
-          }
         }
       }
     };
@@ -897,12 +806,8 @@ const AudioPlayer = ({ peer, volume = 1, peerId, onSpeaking }: { peer: any; volu
     
     return () => {
       peer.off("stream", handler);
-      if (audioContextRef.current) {
-        audioContextRef.current.close().catch(() => {});
-        audioContextRef.current = null;
-      }
     };
-  }, [peer, onSpeaking]);
+  }, [peer]);
 
   useEffect(() => {
     if (ref.current) {
