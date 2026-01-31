@@ -33,6 +33,35 @@ app.get("/api/messages", (req, res) => {
   }
 });
 
+// Delete Message Endpoint
+app.delete("/api/messages/:id", (req, res) => {
+  try {
+    const { id } = req.params;
+    const { userId } = req.body;
+    
+    // Check if message exists and belongs to user
+    const message = db.prepare("SELECT * FROM messages WHERE id = ?").get(id);
+    
+    if (!message) {
+      return res.status(404).json({ error: "Message not found" });
+    }
+    
+    if (message.user_id !== userId) {
+      return res.status(403).json({ error: "Not authorized to delete this message" });
+    }
+    
+    db.prepare("DELETE FROM messages WHERE id = ?").run(id);
+    
+    // Broadcast deletion to all clients
+    io.emit("message-deleted", { id: Number(id) });
+    
+    res.json({ success: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to delete message" });
+  }
+});
+
 const httpServer = new HttpServer(app);
 const io = new SocketIOServer(httpServer, {
   cors: {

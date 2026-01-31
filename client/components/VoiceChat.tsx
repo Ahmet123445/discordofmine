@@ -38,8 +38,15 @@ export default function VoiceChat({ socket, roomId: defaultRoomId, user }: Voice
   const [peers, setPeers] = useState<{ peerID: string; peer: any; volume: number; username: string }[]>([]);
   const [incomingStreams, setIncomingStreams] = useState<{ id: string; stream: MediaStream }[]>([]);
   const [isMuted, setIsMuted] = useState(false);
+  const [isDeafened, setIsDeafened] = useState(false);
   const [mounted, setMounted] = useState(false);
   const [showAddRoom, setShowAddRoom] = useState(false);
+  const [showKeybindSettings, setShowKeybindSettings] = useState(false);
+  const [keybinds, setKeybinds] = useState({
+    mute: { key: "m", alt: true, ctrl: false, shift: false },
+    deafen: { key: "d", alt: true, ctrl: false, shift: false },
+  });
+  const [editingKeybind, setEditingKeybind] = useState<"mute" | "deafen" | null>(null);
   const [newRoomName, setNewRoomName] = useState("");
   const [voiceRooms, setVoiceRooms] = useState<VoiceRoom[]>([
     { id: "general", name: "General" },
@@ -53,6 +60,17 @@ export default function VoiceChat({ socket, roomId: defaultRoomId, user }: Voice
   // Load Peer dynamically on mount
   useEffect(() => {
     setMounted(true);
+    
+    // Load keybinds from localStorage
+    const savedKeybinds = localStorage.getItem("voiceKeybinds");
+    if (savedKeybinds) {
+      try {
+        setKeybinds(JSON.parse(savedKeybinds));
+      } catch (e) {
+        console.error("Failed to parse saved keybinds");
+      }
+    }
+    
     import("simple-peer")
       .then((mod) => {
         setPeerClass(() => mod.default);
@@ -65,18 +83,31 @@ export default function VoiceChat({ socket, roomId: defaultRoomId, user }: Voice
   // Keyboard Shortcuts
   useEffect(() => {
     if (!mounted) return;
+    
+    const checkKeybind = (e: KeyboardEvent, bind: typeof keybinds.mute) => {
+      const keyMatch = e.key.toLowerCase() === bind.key.toLowerCase();
+      const altMatch = e.altKey === bind.alt;
+      const ctrlMatch = e.ctrlKey === bind.ctrl;
+      const shiftMatch = e.shiftKey === bind.shift;
+      return keyMatch && altMatch && ctrlMatch && shiftMatch;
+    };
+    
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.altKey && e.key.toLowerCase() === "m") {
+      // Don't trigger if editing keybind
+      if (editingKeybind) return;
+      
+      if (checkKeybind(e, keybinds.mute)) {
+        e.preventDefault();
         toggleMute();
       }
-      if (e.altKey && e.key.toLowerCase() === "v") {
-        if (inVoice) leaveVoice();
-        else if (voiceRooms.length > 0) joinVoice(voiceRooms[0].id);
+      if (checkKeybind(e, keybinds.deafen)) {
+        e.preventDefault();
+        toggleDeafen();
       }
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [inVoice, isMuted, mounted, PeerClass, voiceRooms]);
+  }, [inVoice, isMuted, isDeafened, mounted, PeerClass, voiceRooms, keybinds, editingKeybind]);
 
   // Clean up on unmount
   useEffect(() => {
@@ -96,6 +127,15 @@ export default function VoiceChat({ socket, roomId: defaultRoomId, user }: Voice
       }
     }
   };
+
+  const toggleDeafen = () => {
+    setIsDeafened((prev) => !prev);
+  };
+
+  // Apply deafen to all audio players
+  useEffect(() => {
+    // This will trigger re-render of AudioPlayer components with updated volume
+  }, [isDeafened]);
 
   const joinVoice = (roomId: string) => {
     if (!socket || !PeerClass) return;
@@ -331,6 +371,35 @@ export default function VoiceChat({ socket, roomId: defaultRoomId, user }: Voice
     setShowAddRoom(false);
   };
 
+  const formatKeybind = (bind: typeof keybinds.mute) => {
+    const parts = [];
+    if (bind.ctrl) parts.push("Ctrl");
+    if (bind.alt) parts.push("Alt");
+    if (bind.shift) parts.push("Shift");
+    parts.push(bind.key.toUpperCase());
+    return parts.join("+");
+  };
+
+  const handleKeybindCapture = (e: React.KeyboardEvent, type: "mute" | "deafen") => {
+    e.preventDefault();
+    e.stopPropagation();
+    
+    // Ignore modifier-only presses
+    if (["Control", "Alt", "Shift", "Meta"].includes(e.key)) return;
+    
+    const newBind = {
+      key: e.key,
+      alt: e.altKey,
+      ctrl: e.ctrlKey,
+      shift: e.shiftKey,
+    };
+    
+    const newKeybinds = { ...keybinds, [type]: newBind };
+    setKeybinds(newKeybinds);
+    localStorage.setItem("voiceKeybinds", JSON.stringify(newKeybinds));
+    setEditingKeybind(null);
+  };
+
   if (!mounted) return null;
 
   return (
@@ -459,24 +528,42 @@ export default function VoiceChat({ socket, roomId: defaultRoomId, user }: Voice
         <div className="p-3 bg-zinc-900/80 border-t border-zinc-700">
           <div className="flex items-center justify-between mb-2">
             <div className="flex items-center gap-2">
-              <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></div>
+              <div className={`w-2 h-2 rounded-full ${isDeafened ? "bg-red-500" : "bg-green-500"} animate-pulse`}></div>
               <span className="text-xs text-zinc-300 font-medium">
-                {isMuted ? "Muted" : "Connected"}
+                {isDeafened ? "Deafened" : isMuted ? "Muted" : "Connected"}
               </span>
             </div>
-            <div className="text-[10px] text-zinc-600 border border-zinc-700 px-1.5 py-0.5 rounded">ALT+M</div>
+            <button
+              onClick={() => setShowKeybindSettings(true)}
+              className="text-[10px] text-zinc-500 hover:text-zinc-300 border border-zinc-700 hover:border-zinc-600 px-1.5 py-0.5 rounded transition-colors"
+              title="Tus Ayarlari"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 1v6m0 6v6m8.66-9h-6m-6 0H2.34m15.32-6.36l-4.24 4.24m-4.24 0L5.34 5.34m13.32 13.32l-4.24-4.24m-4.24 0l-4.24 4.24"/></svg>
+            </button>
           </div>
 
           <div className="flex items-center justify-center gap-2">
             <button
               onClick={toggleMute}
               className={`p-2.5 rounded-full transition-all ${isMuted ? "bg-red-600 text-white" : "bg-zinc-700 text-zinc-300 hover:text-white hover:bg-zinc-600"}`}
-              title="Toggle Mute (ALT+M)"
+              title={`Mute (${formatKeybind(keybinds.mute)})`}
             >
               {isMuted ? (
                 <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="1" y1="1" x2="23" y2="23"/><path d="M9 9v3a3 3 0 0 0 5.12 2.12M15 9.34V4a3 3 0 0 0-5.94-.6"/></svg>
               ) : (
                 <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
+              )}
+            </button>
+
+            <button
+              onClick={toggleDeafen}
+              className={`p-2.5 rounded-full transition-all ${isDeafened ? "bg-red-600 text-white" : "bg-zinc-700 text-zinc-300 hover:text-white hover:bg-zinc-600"}`}
+              title={`Deafen (${formatKeybind(keybinds.deafen)})`}
+            >
+              {isDeafened ? (
+                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="1" y1="1" x2="23" y2="23"/><path d="M3 14v-4a9 9 0 0 1 9-9v0"/><path d="M21 14v-4a9 9 0 0 0-9-9"/></svg>
+              ) : (
+                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 18v-6a9 9 0 0 1 18 0v6"/><path d="M21 19a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3zM3 19a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H3z"/></svg>
               )}
             </button>
 
@@ -491,7 +578,7 @@ export default function VoiceChat({ socket, roomId: defaultRoomId, user }: Voice
             <button
               onClick={leaveVoice}
               className="p-2.5 rounded-full bg-red-600/20 text-red-400 hover:bg-red-600/40 transition-all"
-              title="Disconnect (ALT+V)"
+              title="Disconnect"
             >
               <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M10.68 13.31a16 16 0 0 0 3.41 2.6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7 2 2 0 0 1 1.72 2v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.42 19.42 0 0 1-3.33-2.67m-2.67-3.34a19.79 19.79 0 0 1-3.07-8.63A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91"/><line x1="23" y1="1" x2="1" y2="23"/></svg>
             </button>
@@ -526,8 +613,76 @@ export default function VoiceChat({ socket, roomId: defaultRoomId, user }: Voice
 
       {/* Audio Players */}
       {peers.map((p) => (
-        <AudioPlayer key={p.peerID} peer={p.peer} volume={p.volume / 100} />
+        <AudioPlayer key={p.peerID} peer={p.peer} volume={isDeafened ? 0 : p.volume / 100} />
       ))}
+
+      {/* Keybind Settings Modal */}
+      {showKeybindSettings && mounted && createPortal(
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50" onClick={() => setShowKeybindSettings(false)}>
+          <div className="bg-zinc-800 rounded-xl p-6 w-80 shadow-2xl border border-zinc-700" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-bold text-white">Tus Ayarlari</h3>
+              <button
+                onClick={() => setShowKeybindSettings(false)}
+                className="text-zinc-500 hover:text-white transition-colors"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+              </button>
+            </div>
+            
+            <div className="space-y-4">
+              {/* Mute Keybind */}
+              <div>
+                <label className="text-xs text-zinc-400 uppercase font-semibold mb-2 block">Mikrofonu Kapat/Ac</label>
+                {editingKeybind === "mute" ? (
+                  <input
+                    type="text"
+                    autoFocus
+                    placeholder="Bir tusa bas..."
+                    className="w-full bg-zinc-900 text-white text-sm rounded-lg px-3 py-2 border-2 border-indigo-500 focus:outline-none"
+                    onKeyDown={(e) => handleKeybindCapture(e, "mute")}
+                    onBlur={() => setEditingKeybind(null)}
+                    readOnly
+                  />
+                ) : (
+                  <button
+                    onClick={() => setEditingKeybind("mute")}
+                    className="w-full bg-zinc-900 text-white text-sm rounded-lg px-3 py-2 border border-zinc-600 hover:border-zinc-500 text-left transition-colors"
+                  >
+                    {formatKeybind(keybinds.mute)}
+                  </button>
+                )}
+              </div>
+              
+              {/* Deafen Keybind */}
+              <div>
+                <label className="text-xs text-zinc-400 uppercase font-semibold mb-2 block">Kulakligi Kapat/Ac</label>
+                {editingKeybind === "deafen" ? (
+                  <input
+                    type="text"
+                    autoFocus
+                    placeholder="Bir tusa bas..."
+                    className="w-full bg-zinc-900 text-white text-sm rounded-lg px-3 py-2 border-2 border-indigo-500 focus:outline-none"
+                    onKeyDown={(e) => handleKeybindCapture(e, "deafen")}
+                    onBlur={() => setEditingKeybind(null)}
+                    readOnly
+                  />
+                ) : (
+                  <button
+                    onClick={() => setEditingKeybind("deafen")}
+                    className="w-full bg-zinc-900 text-white text-sm rounded-lg px-3 py-2 border border-zinc-600 hover:border-zinc-500 text-left transition-colors"
+                  >
+                    {formatKeybind(keybinds.deafen)}
+                  </button>
+                )}
+              </div>
+            </div>
+            
+            <p className="text-[10px] text-zinc-500 mt-4">Tusa tiklayip yeni tusunu girin. Ctrl, Alt, Shift kombinasyonlari desteklenir.</p>
+          </div>
+        </div>,
+        document.body
+      )}
 
       {/* Screen Share Overlay */}
       {mounted &&

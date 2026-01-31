@@ -32,6 +32,8 @@ export default function ChatPage() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [inputValue, setInputValue] = useState("");
   const [isUploading, setIsUploading] = useState(false);
+  const [pastePreview, setPastePreview] = useState<string | null>(null);
+  const [pasteFile, setPasteFile] = useState<File | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -42,6 +44,98 @@ export default function ChatPage() {
   useEffect(() => {
     scrollToBottom();
   }, [messages]);
+
+  // Ctrl+V paste handler for screenshots
+  useEffect(() => {
+    const handlePaste = (e: ClipboardEvent) => {
+      const items = e.clipboardData?.items;
+      if (!items) return;
+
+      for (let i = 0; i < items.length; i++) {
+        if (items[i].type.indexOf("image") !== -1) {
+          const file = items[i].getAsFile();
+          if (file) {
+            e.preventDefault();
+            const previewUrl = URL.createObjectURL(file);
+            setPastePreview(previewUrl);
+            setPasteFile(file);
+          }
+          break;
+        }
+      }
+    };
+
+    window.addEventListener("paste", handlePaste);
+    return () => window.removeEventListener("paste", handlePaste);
+  }, []);
+
+  const uploadPastedImage = async () => {
+    if (!pasteFile || !socket || !user) return;
+
+    setIsUploading(true);
+    const formData = new FormData();
+    // Generate a filename for the pasted image
+    const filename = `screenshot_${Date.now()}.png`;
+    formData.append("file", pasteFile, filename);
+
+    const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001";
+
+    try {
+      const res = await fetch(`${API_URL}/api/upload`, {
+        method: "POST",
+        body: formData,
+      });
+      const data = await res.json();
+
+      if (data.success) {
+        const fullUrl = `${API_URL}${data.url}`;
+
+        socket.emit("send-message", {
+          content: fullUrl,
+          user: user,
+          type: "file",
+          fileUrl: fullUrl,
+          fileName: data.filename,
+        });
+      }
+    } catch (err) {
+      console.error("Upload failed", err);
+      alert("Upload failed");
+    } finally {
+      setIsUploading(false);
+      cancelPaste();
+    }
+  };
+
+  const cancelPaste = () => {
+    if (pastePreview) {
+      URL.revokeObjectURL(pastePreview);
+    }
+    setPastePreview(null);
+    setPasteFile(null);
+  };
+
+  const deleteMessage = async (messageId: number) => {
+    if (!user) return;
+    
+    const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001";
+    
+    try {
+      const res = await fetch(`${API_URL}/api/messages/${messageId}`, {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userId: user.id }),
+      });
+      
+      if (!res.ok) {
+        const data = await res.json();
+        alert(data.error || "Mesaj silinemedi");
+      }
+    } catch (err) {
+      console.error("Delete failed", err);
+      alert("Mesaj silinemedi");
+    }
+  };
 
   useEffect(() => {
     const token = localStorage.getItem("token");
@@ -72,6 +166,10 @@ export default function ChatPage() {
 
     newSocket.on("message-received", (message: Message) => {
       setMessages((prev) => [...prev, message]);
+    });
+
+    newSocket.on("message-deleted", (data: { id: number }) => {
+      setMessages((prev) => prev.filter((m) => m.id !== data.id));
     });
 
     return () => {
@@ -221,7 +319,7 @@ export default function ChatPage() {
             const showHeader = index === 0 || messages[index - 1].user_id !== msg.user_id;
 
             return (
-              <div key={index} className={`flex gap-3 ${isMe ? "flex-row-reverse" : ""}`}>
+              <div key={msg.id || index} className={`group flex gap-3 ${isMe ? "flex-row-reverse" : ""}`}>
                 {showHeader && (
                   <div className={`w-10 h-10 rounded-full flex-shrink-0 flex items-center justify-center font-bold text-white ${isMe ? "bg-gradient-to-br from-indigo-500 to-purple-600" : "bg-gradient-to-br from-emerald-500 to-teal-600"}`}>
                     {msg.username[0].toUpperCase()}
@@ -237,34 +335,48 @@ export default function ChatPage() {
                       </span>
                     </div>
                   )}
-                  <div
-                    className={`px-4 py-2.5 rounded-2xl max-w-md break-words ${
-                      isMe
-                        ? "bg-gradient-to-r from-indigo-600 to-indigo-500 text-white"
-                        : "bg-zinc-800 text-zinc-100"
-                    }`}
-                  >
-                    {msg.type === "file" ? (
-                      msg.content.match(/\.(jpg|jpeg|png|gif)$/i) ? (
-                        <img
-                          src={msg.content}
-                          alt="Uploaded"
-                          className="max-w-full rounded-lg max-h-60 object-cover cursor-pointer hover:opacity-90 transition-opacity"
-                          onClick={() => window.open(msg.content, "_blank")}
-                        />
+                  <div className="flex items-center gap-2">
+                    {isMe && (
+                      <button
+                        onClick={() => deleteMessage(msg.id)}
+                        className="opacity-0 group-hover:opacity-100 p-1.5 text-zinc-500 hover:text-red-400 hover:bg-zinc-800 rounded transition-all"
+                        title="Mesaji Sil"
+                      >
+                        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+                      </button>
+                    )}
+                    <div
+                      className={`px-4 py-2.5 rounded-2xl max-w-md break-words ${
+                        isMe
+                          ? "bg-gradient-to-r from-indigo-600 to-indigo-500 text-white"
+                          : "bg-zinc-800 text-zinc-100"
+                      }`}
+                    >
+                      {msg.type === "file" ? (
+                        msg.content.match(/\.(jpg|jpeg|png|gif)$/i) ? (
+                          <img
+                            src={msg.content}
+                            alt="Uploaded"
+                            className="max-w-full rounded-lg max-h-60 object-cover cursor-pointer hover:opacity-90 transition-opacity"
+                            onClick={() => window.open(msg.content, "_blank")}
+                          />
+                        ) : (
+                          <a
+                            href={msg.content}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="flex items-center gap-2 hover:underline"
+                          >
+                            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+                            Download File
+                          </a>
+                        )
                       ) : (
-                        <a
-                          href={msg.content}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="flex items-center gap-2 hover:underline"
-                        >
-                          <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
-                          Download File
-                        </a>
-                      )
-                    ) : (
-                      msg.content
+                        msg.content
+                      )}
+                    </div>
+                    {!isMe && (
+                      <div className="w-6"></div>
                     )}
                   </div>
                 </div>
@@ -275,6 +387,37 @@ export default function ChatPage() {
         </div>
 
         <div className="p-4 bg-zinc-800/50 border-t border-zinc-700/50">
+          {/* Paste Preview */}
+          {pastePreview && (
+            <div className="mb-3 p-3 bg-zinc-900 rounded-xl border border-zinc-700">
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-xs text-zinc-400">Ekran goruntusu yapistir</span>
+                <button
+                  onClick={cancelPaste}
+                  className="text-zinc-500 hover:text-red-400 transition-colors"
+                  title="Iptal"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                </button>
+              </div>
+              <img src={pastePreview} alt="Paste preview" className="max-h-40 rounded-lg object-contain" />
+              <div className="flex gap-2 mt-2">
+                <button
+                  onClick={uploadPastedImage}
+                  disabled={isUploading}
+                  className="flex-1 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 rounded-lg text-sm font-medium transition-all"
+                >
+                  {isUploading ? "Yukleniyor..." : "Gonder"}
+                </button>
+                <button
+                  onClick={cancelPaste}
+                  className="px-4 py-2 bg-zinc-700 hover:bg-zinc-600 rounded-lg text-sm font-medium transition-all"
+                >
+                  Iptal
+                </button>
+              </div>
+            </div>
+          )}
           <form onSubmit={handleSendMessage} className="flex items-center gap-3">
             <button
               type="button"
