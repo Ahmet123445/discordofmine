@@ -4,6 +4,7 @@ import { useEffect, useState, useRef } from "react";
 import { useRouter } from "next/navigation";
 import MagicCard from "@/components/MagicCard";
 import Particles from "@/components/Particles";
+import { io, Socket } from "socket.io-client";
 
 interface Room {
   id: string;
@@ -31,141 +32,66 @@ export default function RoomsPage() {
   const [joinError, setJoinError] = useState("");
   const [isJoining, setIsJoining] = useState(false);
 
-  // Sound ref
+  // Sound & Socket refs
   const hoverAudioRef = useRef<HTMLAudioElement | null>(null);
-  
-  // Real-time sound effect trigger
-  const playRemoteSound = () => {
-    // Only play if not recently played locally to avoid double audio for sender
-    // Actually, sender plays locally instantly, remote plays via socket.
-    // We can just rely on the audio element being clonable or separate
-    const audio = new Audio("data:audio/wav;base64,UklGRl9vT19XQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YU"); 
-    // Wait, let's use the actual good sound we define below.
-    if (hoverAudioRef.current) {
-        const clone = hoverAudioRef.current.cloneNode() as HTMLAudioElement;
-        clone.volume = 0.25;
-        clone.play().catch(() => {});
-    }
-  };
+  const socketRef = useRef<Socket | null>(null);
+  const lastEmitRef = useRef<number>(0);
 
+  // Initialize Sound and Socket
   useEffect(() => {
-    // High-pitched "Premium" UI Click (Short, crisp, glass-like)
-    // Base64 of a short high-pitch mechanical click
-    const premiumClick = "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAAA"; // Placeholder, real one below
-    // Real data uri for a short high pitch beep/tick
-    const realTick = "data:audio/wav;base64,UklGRlIAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YRAAAAD///////8AAP//AAD//wAA//8AAP//AAD//wAA//8AAP//AAD//wAA//8AAP//";
-    
-    hoverAudioRef.current = new Audio(realTick);
-    hoverAudioRef.current.volume = 0.3;
-
     const token = localStorage.getItem("token");
     if (!token) {
       router.push("/login");
       return;
     }
-    fetchRooms();
-    
-    // Connect to socket for real-time UI events
-    // We need to initialize a socket connection here if not present, 
-    // but usually socket is in ChatPage. Let's make a temporary one or reuse logic.
-    // For simplicity in this file, we will do a fetch to a new endpoint or just use a socket if we had one.
-    // Since we don't have a global socket context easily accessible here without refactor, 
-    // we will create a lightweight socket connection just for this page's presence/events.
-    
-    const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001";
-    // Dynamic import to avoid SSR issues with socket.io-client if any
-    import("socket.io-client").then((io) => {
-        const newSocket = io.default(API_URL);
-        
-        newSocket.on("play-ui-sound", (data: { type: string }) => {
-            if (data.type === 'hover') {
-                playRemoteSound();
-            }
-        });
 
-        // Cleanup
-        return () => newSocket.disconnect();
+    // Initialize Premium Sound (Base64)
+    // Short, crisp glass/mechanical tick
+    const tickSound = "data:audio/wav;base64,UklGRlIAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YRAAAAD///////8AAP//AAD//wAA//8AAP//AAD//wAA//8AAP//AAD//wAA//8AAP//";
+    hoverAudioRef.current = new Audio(tickSound);
+    hoverAudioRef.current.volume = 0.4;
+
+    // Initialize Socket for UI events
+    const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001";
+    
+    // Create socket connection
+    const newSocket = io(API_URL);
+    socketRef.current = newSocket;
+
+    newSocket.on("play-ui-sound", (data: { type: string, userId: string }) => {
+        // Play sound if instructed by server (and not from self, though broadcast handles that)
+        if (data.type === 'hover') {
+            playLocalSound(0.25); // Slightly lower volume for others
+        }
     });
 
+    fetchRooms();
     const interval = setInterval(fetchRooms, 5000);
-    return () => clearInterval(interval);
+
+    return () => {
+      clearInterval(interval);
+      newSocket.disconnect();
+    };
   }, [router]);
 
-  // Throttled emit function
-  const lastEmitRef = useRef<number>(0);
-  
-  const playHoverSound = () => {
-    // 1. Play locally immediately
+  const playLocalSound = (vol = 0.4) => {
     if (hoverAudioRef.current) {
       const clone = hoverAudioRef.current.cloneNode() as HTMLAudioElement;
-      clone.volume = 0.3;
+      clone.volume = vol;
       clone.play().catch(() => {});
     }
-
-    // 2. Emit to others (Throttled: max once per 150ms)
-    const now = Date.now();
-    if (now - lastEmitRef.current > 150) {
-        lastEmitRef.current = now;
-        // We need the socket instance. 
-        // Refactoring to keep socket in state would be better, but let's use a quick emit mechanism
-        // actually, we defined socket inside useEffect which is not accessible here.
-        // Let's move socket to state.
-    }
   };
-  
-  // Refactoring to include socket in state for sending
-  const [socket, setSocket] = useState<any>(null);
 
-  useEffect(() => {
-      // ... sound init ...
-      // High-quality glass tick sound (Base64)
-      const glassTick = "data:audio/wav;base64,UklGRnoGAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YWYGAACAP4A/gD+AP4A/gD+AP4A/gD+AP4A/gD+AP4A/gD+AP4A/gD+AP4A/gD+AP4A/gD+AP4A/gD+AP4A/gD+AP4A/gD+AP4A/gD+AP4A/gD+AP4A/gD+AP4A/gD+AP4A/gD+APw=="; 
-      // The above is generated silence/noise placeholder. I will use the actual functional one from before but slightly modified for "premium".
-      // Actually, sticking to the one that worked is safer, but user asked for "sharper".
-      // I will trust the previous logic but ensure it is robust.
-      
-      const realSound = "data:audio/wav;base64,UklGRi4AAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAEA//8AAP///wAA//8AAP//AA==";
-      hoverAudioRef.current = new Audio(realSound);
-      hoverAudioRef.current.volume = 0.3;
+  const handleHover = () => {
+    // 1. Play locally
+    playLocalSound();
 
-      const token = localStorage.getItem("token");
-      if (!token) {
-        router.push("/login");
-        return;
-      }
-      fetchRooms();
-
-      const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001";
-      import("socket.io-client").then((io) => {
-          const newSocket = io.default(API_URL);
-          setSocket(newSocket);
-
-          newSocket.on("play-ui-sound", (data: { type: string, userId: string }) => {
-             // Don't play if it came from me (though broadcast usually excludes sender, good to be safe)
-             // We don't have easy access to self ID here without parsing localstorage again, 
-             // but broadcast excludes sender by default on server.
-             playRemoteSound();
-          });
-      });
-
-      const interval = setInterval(fetchRooms, 5000);
-      return () => clearInterval(interval);
-  }, [router]);
-
-  // Updated play function with socket
-  const playHoverSoundWithEmit = () => {
-      // Local Play
-      if (hoverAudioRef.current) {
-          hoverAudioRef.current.currentTime = 0;
-          hoverAudioRef.current.play().catch(() => {});
-      }
-
-      // Remote Emit
-      const now = Date.now();
-      if (socket && now - lastEmitRef.current > 150) {
-          lastEmitRef.current = now;
-          socket.emit("ui-interaction", { type: "hover" });
-      }
+    // 2. Emit to others (Throttled 150ms)
+    const now = Date.now();
+    if (now - lastEmitRef.current > 150 && socketRef.current) {
+        lastEmitRef.current = now;
+        socketRef.current.emit("ui-interaction", { type: "hover" });
+    }
   };
 
   const fetchRooms = async () => {
@@ -309,7 +235,7 @@ export default function RoomsPage() {
               className="h-64 cursor-pointer"
               glowColor="255, 255, 255"
               onClick={() => setShowCreateModal(true)}
-              onMouseEnter={playHoverSound}
+              onMouseEnter={handleHover}
             >
               <div className="flex flex-col items-center justify-center h-full gap-4 relative z-10">
                 <div className="w-16 h-16 rounded-full bg-zinc-900 flex items-center justify-center border border-zinc-800">
@@ -326,7 +252,7 @@ export default function RoomsPage() {
                 className="h-64 cursor-pointer"
                 glowColor="99, 102, 241"
                 onClick={() => handleRoomClick(room)}
-              onMouseEnter={playHoverSoundWithEmit}
+                onMouseEnter={handleHover}
               >
                 <div className="flex flex-col h-full justify-between relative z-10">
                   <div>
