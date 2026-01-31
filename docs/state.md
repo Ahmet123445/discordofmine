@@ -3,7 +3,7 @@
 *AI Models: Update this file at the end of every session.*
 
 ## Current Status
-- **Phase:** Deployment Prep
+- **Phase:** Deployment Ready
 - **Last Updated:** 2026-01-31
 
 ## Roadmap / Tasks
@@ -22,16 +22,20 @@
 - [x] Voice Chat (WebRTC)
 - [x] Screen Sharing
 - [x] Voice Controls & Sound Effects
-- [x] File/Image Uploads (Local storage for MVP)
+- [x] File/Image Uploads
 
-### Phase 3: Deployment (Pending)
-- [ ] Configure Environment Variables
-- [ ] Setup `render.yaml` or Build Scripts
-- [ ] Update API URLs to production addresses
+### Phase 3: Deployment (Action Required)
+- [x] Update Code to use `process.env.NEXT_PUBLIC_API_URL`
+- [x] Create `render.yaml` (Optional blueprint)
+- [ ] **User Action:** Connect Render.com to GitHub Repo
+- [ ] **User Action:** Connect Vercel to GitHub Repo
 
 ## Known Issues / Blockers
-- **File Persistence:** Files are stored in `server/uploads`. On Render Free Tier, these will disappear if the server restarts. (User advised "Render backend, Vercel frontend", so this is a known limitation unless we add S3).
-- **API URL:** Still `localhost:3001` in client code.
+- **Ephemeral Storage:** Uploads on Render Free Tier are temporary.
+- **WebRTC NAT:** In some restrictive networks (universities, corporate wifi), P2P connection might fail without a TURN server (using public STUN servers is usually fine for home use).
 
 ## Context Snapshot
-- **Uploads:** Users can click the "Upload" icon next to the input box. Images render as previews, other files as download links.
+- **Codebase:** Fully updated and pushed to `main`.
+- **Environment Variables:**
+  - Client needs `NEXT_PUBLIC_API_URL` pointing to the Backend URL.
+  - Server works with defaults but respects `PORT`.

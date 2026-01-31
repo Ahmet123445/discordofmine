@@ -46,6 +46,9 @@ app.get("/", (req, res) => {
   res.send("DiscordOfMine Server is running");
 });
 
+const usersInVoice = {}; // { roomId: [socketId1, socketId2] }
+const socketToRoom = {}; // { socketId: roomId }
+
 io.on("connection", (socket) => {
   console.log("User connected:", socket.id);
 
@@ -97,13 +100,6 @@ io.on("connection", (socket) => {
       socket.broadcast.to(roomID).emit('user-left-voice', socket.id);
     }
   });
-});
-
-const usersInVoice = {}; // { roomId: [socketId1, socketId2] }
-const socketToRoom = {}; // { socketId: roomId }
-
-io.on("connection", (socket) => {
-  // ... existing chat logic ...
 
   socket.on("join-voice", (roomId) => {
     console.log(`User ${socket.id} joining voice in ${roomId}`);
@@ -140,7 +136,7 @@ io.on("connection", (socket) => {
     }
     delete socketToRoom[socket.id];
   });
-
+});
 
 httpServer.listen(port, () => {
   console.log(`Server running on port ${port}`);
