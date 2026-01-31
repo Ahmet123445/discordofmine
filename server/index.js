@@ -295,3 +295,9 @@ const socketToRoom = {}; // { socketId: roomId }
 httpServer.listen(port, () => {
   console.log(`Server running on port ${port}`);
 });
+
+});
+
+httpServer.listen(port, () => {
+  console.log(`Server running on port ${port}`);
+});
