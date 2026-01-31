@@ -4,37 +4,38 @@ import { useRef, ReactNode } from 'react';
 import '@/app/spotlight.css';
 
 interface SpotlightCardProps {
-  children: ReactNode;
+  children: React.ReactNode;
   className?: string;
   spotlightColor?: string;
   onClick?: () => void;
+  onMouseEnter?: () => void;
 }
 
-const SpotlightCard = ({ children, className = '', spotlightColor = 'rgba(255, 255, 255, 0.25)', onClick }: SpotlightCardProps) => {
-  const divRef = useRef<HTMLDivElement>(null);
-
-  const handleMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (!divRef.current) return;
-    
-    const rect = divRef.current.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
-
-    divRef.current.style.setProperty('--mouse-x', `${x}px`);
-    divRef.current.style.setProperty('--mouse-y', `${y}px`);
-    divRef.current.style.setProperty('--spotlight-color', spotlightColor);
-  };
-
+const SpotlightCard: React.FC<SpotlightCardProps> = ({ 
+  children, 
+  className = "", 
+  spotlightColor = "rgba(255, 255, 255, 0.25)",
+  onClick,
+  onMouseEnter
+}) => {
   return (
     <div 
-      ref={divRef} 
-      onMouseMove={handleMouseMove} 
+      className={`relative overflow-hidden rounded-xl bg-zinc-900 border border-zinc-800 ${className}`}
       onClick={onClick}
-      className={`card-spotlight ${className}`}
+      onMouseEnter={onMouseEnter}
     >
-      {children}
+      <div className="absolute inset-0 z-0 transition-opacity duration-500 opacity-0 hover:opacity-100">
+        <div 
+          className="absolute inset-0 blur-3xl"
+          style={{ background: `radial-gradient(circle at center, ${spotlightColor}, transparent 70%)` }}
+        />
+      </div>
+      <div className="relative z-10 h-full">
+        {children}
+      </div>
     </div>
   );
 };
 
 export default SpotlightCard;
+
