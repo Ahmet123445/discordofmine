@@ -75,11 +75,19 @@ app.get("/", (req, res) => {
   res.send("DiscordOfMine Server is running");
 });
 
-const usersInVoice = {}; // { roomId: [socketId1, socketId2] }
+const usersInVoice = {}; // { roomId: [{ id, username }] }
 const socketToRoom = {}; // { socketId: roomId }
+
+// Broadcast all voice room users to all connected clients
+const broadcastAllVoiceUsers = () => {
+  io.emit("all-rooms-users", usersInVoice);
+};
 
 io.on("connection", (socket) => {
   console.log("User connected:", socket.id);
+  
+  // Send current voice users to new connection
+  socket.emit("all-rooms-users", usersInVoice);
 
   socket.on("join-room", (roomId) => {
     socket.join(roomId);
@@ -127,6 +135,8 @@ io.on("connection", (socket) => {
       usersInVoice[roomID] = room;
       // Notify others to remove this peer
       socket.broadcast.to(roomID).emit('user-left-voice', socket.id);
+      // Broadcast updated room list
+      broadcastAllVoiceUsers();
     }
   });
 
@@ -157,6 +167,9 @@ io.on("connection", (socket) => {
     // Filter out self
     const usersInThisRoom = usersInVoice[roomId].filter(u => u.id !== socket.id);
     socket.emit("all-voice-users", usersInThisRoom);
+    
+    // Broadcast updated room list to everyone
+    broadcastAllVoiceUsers();
   });
 
   socket.on("sending-signal", payload => {
@@ -178,6 +191,8 @@ io.on("connection", (socket) => {
       room = room.filter(u => u.id !== socket.id);
       usersInVoice[roomID] = room;
       socket.broadcast.emit('user-left-voice', socket.id);
+      // Broadcast updated room list
+      broadcastAllVoiceUsers();
     }
     delete socketToRoom[socket.id];
   });

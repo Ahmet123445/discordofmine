@@ -434,6 +434,17 @@ export default function ChatPage() {
                 type="text"
                 value={inputValue}
                 onChange={(e) => setInputValue(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey && inputValue.trim() && socket && user) {
+                    e.preventDefault();
+                    socket.emit("send-message", {
+                      content: inputValue,
+                      user: user,
+                      type: "text",
+                    });
+                    setInputValue("");
+                  }
+                }}
                 placeholder={isUploading ? "Uploading..." : "Message #general"}
                 disabled={isUploading}
                 className="w-full bg-zinc-900 text-white rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-indigo-500/50 border border-zinc-700 placeholder-zinc-500"
