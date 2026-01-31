@@ -2,12 +2,10 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import Link from "next/link";
 
 export default function LoginPage() {
   const router = useRouter();
-  const [isLogin, setIsLogin] = useState(true);
-  const [formData, setFormData] = useState({ username: "", password: "" });
+  const [username, setUsername] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
@@ -17,13 +15,14 @@ export default function LoginPage() {
     setLoading(true);
 
     const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001";
-    const endpoint = isLogin ? `${API_URL}/api/auth/login` : `${API_URL}/api/auth/register`;
+    // Always call login, backend handles creation if needed
+    const endpoint = `${API_URL}/api/auth/login`;
 
     try {
       const res = await fetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(formData),
+        body: JSON.stringify({ username }),
       });
 
       const data = await res.json();
@@ -34,7 +33,8 @@ export default function LoginPage() {
 
       localStorage.setItem("token", data.token);
       localStorage.setItem("user", JSON.stringify(data.user));
-      router.push("/chat");
+      // Redirect to rooms selection
+      router.push("/rooms");
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -43,58 +43,46 @@ export default function LoginPage() {
   };
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-zinc-900 text-zinc-100">
-      <div className="w-full max-w-md p-8 bg-zinc-800 rounded-lg shadow-xl border border-zinc-700">
-        <h2 className="text-2xl font-bold mb-6 text-center text-white">
-          {isLogin ? "Welcome Back" : "Create Account"}
-        </h2>
+    <div className="flex min-h-screen items-center justify-center bg-zinc-950 text-zinc-100">
+      <div className="w-full max-w-md p-8 bg-zinc-900 rounded-2xl shadow-2xl border border-zinc-800">
+        <div className="text-center mb-8">
+          <h1 className="text-3xl font-bold tracking-tight bg-gradient-to-r from-indigo-500 to-purple-500 bg-clip-text text-transparent">
+            V A T A N A S K I
+          </h1>
+          <p className="text-zinc-500 mt-2 text-sm">Ozel iletisim agina hosgeldin.</p>
+        </div>
 
         {error && (
-          <div className="bg-red-900/50 text-red-200 p-3 rounded mb-4 text-sm border border-red-800">
+          <div className="bg-red-500/10 text-red-400 p-3 rounded-lg mb-6 text-sm border border-red-500/20 text-center">
             {error}
           </div>
         )}
 
-        <form onSubmit={handleSubmit} className="space-y-4">
-          <div>
-            <label className="block text-sm font-medium text-zinc-400 mb-1">Username</label>
+        <form onSubmit={handleSubmit} className="space-y-6">
+          <div className="space-y-2">
+            <label className="text-xs font-semibold text-zinc-400 uppercase tracking-wider ml-1">Kullanici Adi</label>
             <input
               type="text"
               required
-              className="w-full bg-zinc-900 border border-zinc-600 rounded p-2 text-white focus:outline-none focus:border-blue-500 transition-colors"
-              value={formData.username}
-              onChange={(e) => setFormData({ ...formData, username: e.target.value })}
-            />
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium text-zinc-400 mb-1">Password</label>
-            <input
-              type="password"
-              required
-              className="w-full bg-zinc-900 border border-zinc-600 rounded p-2 text-white focus:outline-none focus:border-blue-500 transition-colors"
-              value={formData.password}
-              onChange={(e) => setFormData({ ...formData, password: e.target.value })}
+              placeholder="Isminiz..."
+              className="w-full bg-zinc-950 border border-zinc-800 rounded-xl p-3.5 text-white placeholder-zinc-600 focus:outline-none focus:ring-2 focus:ring-indigo-500/50 focus:border-indigo-500 transition-all"
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
             />
           </div>
 
           <button
             type="submit"
             disabled={loading}
-            className="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-2 px-4 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            className="w-full bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white font-semibold py-3.5 px-4 rounded-xl transition-all disabled:opacity-50 disabled:cursor-not-allowed shadow-lg shadow-indigo-500/20 active:scale-[0.98]"
           >
-            {loading ? "Please wait..." : isLogin ? "Login" : "Register"}
+            {loading ? "Giris Yapiliyor..." : "Giris Yap"}
           </button>
         </form>
-
-        <div className="mt-6 text-center text-sm text-zinc-400">
-          <button
-            onClick={() => setIsLogin(!isLogin)}
-            className="hover:text-blue-400 underline transition-colors"
-          >
-            {isLogin ? "Need an account? Register" : "Have an account? Login"}
-          </button>
-        </div>
+        
+        <p className="text-center text-xs text-zinc-600 mt-6">
+          Sifre gerekmez. Sadece isminizi girin.
+        </p>
       </div>
     </div>
   );

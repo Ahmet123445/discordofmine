@@ -22,10 +22,13 @@ app.use("/uploads", express.static(path.join(process.cwd(), "uploads")));
 app.use("/api/auth", authRoutes);
 app.use("/api/upload", uploadRoutes);
 
-// History Endpoint
+// --- API Endpoints ---
+
+// Get Messages (Filtered by Room)
 app.get("/api/messages", (req, res) => {
   try {
-    const messages = db.prepare("SELECT * FROM messages ORDER BY created_at ASC LIMIT 50").all();
+    const roomId = req.query.roomId || "general";
+    const messages = db.prepare("SELECT * FROM messages WHERE room_id = ? ORDER BY created_at ASC LIMIT 50").all(roomId);
     res.json(messages);
   } catch (err) {
     console.error(err);
@@ -53,7 +56,7 @@ app.delete("/api/messages/:id", (req, res) => {
     db.prepare("DELETE FROM messages WHERE id = ?").run(id);
     
     // Broadcast deletion to all clients
-    io.emit("message-deleted", { id: Number(id) });
+    io.emit("message-deleted", { id: Number(id), roomId: message.room_id });
     
     res.json({ success: true });
   } catch (err) {
@@ -61,6 +64,39 @@ app.delete("/api/messages/:id", (req, res) => {
     res.status(500).json({ error: "Failed to delete message" });
   }
 });
+
+// Get Rooms
+app.get("/api/rooms", (req, res) => {
+  try {
+    const rooms = db.prepare("SELECT * FROM rooms ORDER BY created_at ASC").all();
+    res.json(rooms);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to fetch rooms" });
+  }
+});
+
+// Create Room
+app.post("/api/rooms", (req, res) => {
+  try {
+    const { name, userId } = req.body;
+    if (!name) return res.status(400).json({ error: "Room name required" });
+
+    const id = name.toLowerCase().replace(/[^a-z0-9]/g, "-") + "-" + Date.now().toString().slice(-4);
+    
+    const stmt = db.prepare("INSERT INTO rooms (id, name, created_by) VALUES (?, ?, ?)");
+    stmt.run(id, name, userId || 0);
+    
+    const newRoom = { id, name, created_by: userId || 0 };
+    io.emit("room-created", newRoom); // Notify clients
+    res.status(201).json(newRoom);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to create room" });
+  }
+});
+
+// --- Socket.io ---
 
 const httpServer = new HttpServer(app);
 const io = new SocketIOServer(httpServer, {
@@ -72,7 +108,7 @@ const io = new SocketIOServer(httpServer, {
 
 // Health check
 app.get("/", (req, res) => {
-  res.send("DiscordOfMine Server is running");
+  res.send("V A T A N A S K I Server is running");
 });
 
 const usersInVoice = {}; // { roomId: [{ id, username }] }
@@ -89,22 +125,19 @@ io.on("connection", (socket) => {
   // Send current voice users to new connection
   socket.emit("all-rooms-users", usersInVoice);
 
+  // Join a Text/Socket Room
   socket.on("join-room", (roomId) => {
     socket.join(roomId);
-    console.log(`User ${socket.id} joined room ${roomId}`);
+    console.log(`User ${socket.id} joined text room ${roomId}`);
   });
 
   socket.on("send-message", (data) => {
-    const { content, user, type = "text", fileUrl, fileName } = data;
+    const { content, user, type = "text", fileUrl, fileName, roomId = "general" } = data;
     
     // Save to DB
     try {
-      // Note: We might need to alter table if we want dedicated columns for fileUrl, 
-      // but for now we can embed it in content or handle it via type.
-      // Let's assume content stores the text OR the file URL if type is 'file'
-      
-      const stmt = db.prepare("INSERT INTO messages (content, user_id, username, type) VALUES (?, ?, ?, ?)");
-      const info = stmt.run(content, user.id, user.username, type);
+      const stmt = db.prepare("INSERT INTO messages (content, user_id, username, type, room_id) VALUES (?, ?, ?, ?, ?)");
+      const info = stmt.run(content, user.id, user.username, type, roomId);
       
       const message = {
         id: info.lastInsertRowid,
@@ -112,13 +145,14 @@ io.on("connection", (socket) => {
         user_id: user.id,
         username: user.username,
         type,
-        fileUrl, // Pass through for real-time clients
+        fileUrl,
         fileName,
+        room_id: roomId,
         created_at: new Date().toISOString()
       };
 
-      // Broadcast
-      io.emit("message-received", message);
+      // Broadcast to specific room
+      io.to(roomId).emit("message-received", message);
       
     } catch (err) {
       console.error("Error saving message:", err);
@@ -142,7 +176,6 @@ io.on("connection", (socket) => {
 
   socket.on("join-voice", (data) => {
     // data can be just roomId (string) or object { roomId, user }
-    // Handle legacy calls just in case, though we will update client
     const roomId = typeof data === 'object' ? data.roomId : data;
     const userData = typeof data === 'object' ? data.user : { username: "Unknown" };
 
@@ -162,9 +195,11 @@ io.on("connection", (socket) => {
     }
     
     socketToRoom[socket.id] = roomId;
+    
+    // Join socket room for signaling
+    socket.join(roomId);
 
     // Send existing users to the new joiner
-    // Filter out self
     const usersInThisRoom = usersInVoice[roomId].filter(u => u.id !== socket.id);
     socket.emit("all-voice-users", usersInThisRoom);
     
@@ -190,10 +225,10 @@ io.on("connection", (socket) => {
     if (room) {
       room = room.filter(u => u.id !== socket.id);
       usersInVoice[roomID] = room;
-      socket.broadcast.emit('user-left-voice', socket.id);
-      // Broadcast updated room list
+      socket.broadcast.to(roomID).emit('user-left-voice', socket.id); // Broadcast to room only
       broadcastAllVoiceUsers();
     }
+    if (roomID) socket.leave(roomID); // Leave socket room
     delete socketToRoom[socket.id];
   });
 
