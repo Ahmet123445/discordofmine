@@ -334,16 +334,11 @@ export default function VoiceChat({ socket, roomId, user }: VoiceChatProps) {
 
       {/* Screen Share Overlay */}
       {incomingStreams.length > 0 && createPortal(
-        <div className="fixed top-4 right-4 z-50 flex flex-col gap-4 w-96 max-w-[90vw]">
+        <>
           {incomingStreams.map((item) => (
-            <div key={item.id + item.stream.id} className="bg-zinc-800 rounded-lg overflow-hidden border border-zinc-700 shadow-2xl relative">
-              <div className="absolute top-2 left-2 bg-black/60 px-2 py-1 rounded text-xs text-white z-10">
-                User {item.id.substring(0, 4)}...
-              </div>
-              <VideoPlayer stream={item.stream} />
-            </div>
+             <VideoPlayer key={item.id + item.stream.id} stream={item.stream} />
           ))}
-        </div>,
+        </>,
         document.body
       )}
     </>
@@ -352,10 +347,17 @@ export default function VoiceChat({ socket, roomId, user }: VoiceChatProps) {
 
 const AudioPlayer = ({ peer, volume = 1 }: { peer: any, volume?: number }) => {
   const ref = useRef<HTMLAudioElement>(null);
+  
   useEffect(() => {
     peer.on("stream", (stream: MediaStream) => {
-      if (stream.getAudioTracks().length > 0) {
-        if (ref.current) ref.current.srcObject = stream;
+      // Create a new stream with just the audio tracks to ensure clean playback
+      const audioTracks = stream.getAudioTracks();
+      if (audioTracks.length > 0) {
+        const audioStream = new MediaStream(audioTracks);
+        if (ref.current) {
+          ref.current.srcObject = audioStream;
+          ref.current.play().catch(e => console.error("Audio autoplay failed:", e));
+        }
       }
     });
   }, [peer]);
@@ -366,13 +368,85 @@ const AudioPlayer = ({ peer, volume = 1 }: { peer: any, volume?: number }) => {
     }
   }, [volume]);
 
-  return <audio ref={ref} autoPlay />;
+  return <audio ref={ref} autoPlay playsInline controls={false} style={{ display: 'none' }} />;
 };
 
 const VideoPlayer = ({ stream }: { stream: MediaStream }) => {
   const ref = useRef<HTMLVideoElement>(null);
+  const [isExpanded, setIsExpanded] = useState(false);
+  const [position, setPosition] = useState({ x: 20, y: 20 });
+  const [isDragging, setIsDragging] = useState(false);
+  const dragRef = useRef({ startX: 0, startY: 0, initialX: 0, initialY: 0 });
+
   useEffect(() => {
     if (ref.current) ref.current.srcObject = stream;
   }, [stream]);
-  return <video ref={ref} autoPlay playsInline className="w-full h-auto bg-black" />;
+
+  const handleMouseDown = (e: React.MouseEvent) => {
+    // Only drag if not clicking controls (like expand button)
+    if ((e.target as HTMLElement).tagName === 'BUTTON') return;
+    
+    setIsDragging(true);
+    dragRef.current = {
+      startX: e.clientX,
+      startY: e.clientY,
+      initialX: position.x,
+      initialY: position.y
+    };
+  };
+
+  useEffect(() => {
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!isDragging) return;
+      const dx = e.clientX - dragRef.current.startX;
+      const dy = e.clientY - dragRef.current.startY;
+      setPosition({
+        x: dragRef.current.initialX - dx, // Inverted because right: 20px
+        y: dragRef.current.initialY + dy
+      });
+    };
+
+    const handleMouseUp = () => setIsDragging(false);
+
+    if (isDragging) {
+      window.addEventListener('mousemove', handleMouseMove);
+      window.addEventListener('mouseup', handleMouseUp);
+    }
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [isDragging]);
+
+  return (
+    <div 
+      className={`fixed z-50 bg-black rounded-lg overflow-hidden shadow-2xl border border-zinc-700 transition-all duration-200 ${
+        isExpanded 
+          ? "inset-4 w-auto h-auto cursor-default" 
+          : "w-96 cursor-move hover:shadow-indigo-500/20"
+      }`}
+      style={!isExpanded ? { right: `${position.x}px`, top: `${position.y}px` } : {}}
+      onMouseDown={!isExpanded ? handleMouseDown : undefined}
+    >
+      <div className="absolute top-2 right-2 z-20 flex gap-2">
+        <button 
+          onClick={() => setIsExpanded(!isExpanded)}
+          className="p-1.5 bg-black/60 hover:bg-black/80 rounded text-white backdrop-blur-sm transition-colors"
+        >
+          {isExpanded ? (
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M8 3v3a2 2 0 0 1-2 2H3m18 0h-3a2 2 0 0 1-2-2V3m0 18v-3a2 2 0 0 1 2-2h3M3 16h3a2 2 0 0 1 2 2v3"/></svg>
+          ) : (
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>
+          )}
+        </button>
+      </div>
+      
+      <video 
+        ref={ref} 
+        autoPlay 
+        playsInline 
+        className="w-full h-full object-contain bg-black"
+      />
+    </div>
+  );
 };
