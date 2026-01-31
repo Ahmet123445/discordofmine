@@ -3,12 +3,8 @@
 import { useEffect, useRef, useState } from "react";
 import { Socket } from "socket.io-client";
 import { createPortal } from "react-dom";
-
-// Dynamic import for simple-peer (it accesses window/navigator immediately)
-let Peer: any;
-if (typeof window !== "undefined") {
-  Peer = require("simple-peer");
-}
+// @ts-ignore
+import Peer from "simple-peer";
 
 interface VoiceChatProps {
   socket: Socket | null;

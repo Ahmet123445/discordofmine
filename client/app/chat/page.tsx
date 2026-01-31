@@ -3,7 +3,13 @@
 import { useEffect, useState, useRef } from "react";
 import { useRouter } from "next/navigation";
 import io, { Socket } from "socket.io-client";
-import VoiceChat from "@/components/VoiceChat";
+import dynamic from "next/dynamic";
+
+// Dynamically import VoiceChat to prevent SSR issues with WebRTC/SimplePeer
+const VoiceChat = dynamic(() => import("@/components/VoiceChat"), {
+  ssr: false,
+  loading: () => <div className="p-3 bg-zinc-900 border-t border-zinc-700 text-xs text-zinc-500">Loading Voice Module...</div>
+});
 
 interface Message {
   id: number;
