@@ -3,6 +3,10 @@ import { Server as HttpServer } from "http";
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
+import db from "./db.js";
+import authRoutes from "./routes/auth.js";
+import uploadRoutes from "./routes/upload.js";
+import path from "path";
 
 dotenv.config();
 
@@ -12,10 +16,27 @@ const port = process.env.PORT || 3001;
 app.use(cors());
 app.use(express.json());
 
+// Serve uploaded files statically
+app.use("/uploads", express.static(path.join(process.cwd(), "uploads")));
+
+app.use("/api/auth", authRoutes);
+app.use("/api/upload", uploadRoutes);
+
+// History Endpoint
+app.get("/api/messages", (req, res) => {
+  try {
+    const messages = db.prepare("SELECT * FROM messages ORDER BY created_at ASC LIMIT 50").all();
+    res.json(messages);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to fetch messages" });
+  }
+});
+
 const httpServer = new HttpServer(app);
 const io = new SocketIOServer(httpServer, {
   cors: {
-    origin: "*", // TODO: Restrict this in production
+    origin: "*", 
     methods: ["GET", "POST"]
   }
 });
@@ -28,10 +49,98 @@ app.get("/", (req, res) => {
 io.on("connection", (socket) => {
   console.log("User connected:", socket.id);
 
+  socket.on("join-room", (roomId) => {
+    socket.join(roomId);
+    console.log(`User ${socket.id} joined room ${roomId}`);
+  });
+
+  socket.on("send-message", (data) => {
+    const { content, user, type = "text", fileUrl, fileName } = data;
+    
+    // Save to DB
+    try {
+      // Note: We might need to alter table if we want dedicated columns for fileUrl, 
+      // but for now we can embed it in content or handle it via type.
+      // Let's assume content stores the text OR the file URL if type is 'file'
+      
+      const stmt = db.prepare("INSERT INTO messages (content, user_id, username, type) VALUES (?, ?, ?, ?)");
+      const info = stmt.run(content, user.id, user.username, type);
+      
+      const message = {
+        id: info.lastInsertRowid,
+        content,
+        user_id: user.id,
+        username: user.username,
+        type,
+        fileUrl, // Pass through for real-time clients
+        fileName,
+        created_at: new Date().toISOString()
+      };
+
+      // Broadcast
+      io.emit("message-received", message);
+      
+    } catch (err) {
+      console.error("Error saving message:", err);
+    }
+  });
+
   socket.on("disconnect", () => {
     console.log("User disconnected:", socket.id);
+    // Remove user from voice list if they were in it
+    const roomID = socketToRoom[socket.id];
+    let room = usersInVoice[roomID];
+    if (room) {
+      room = room.filter(id => id !== socket.id);
+      usersInVoice[roomID] = room;
+      // Notify others to remove this peer
+      socket.broadcast.to(roomID).emit('user-left-voice', socket.id);
+    }
   });
 });
+
+const usersInVoice = {}; // { roomId: [socketId1, socketId2] }
+const socketToRoom = {}; // { socketId: roomId }
+
+io.on("connection", (socket) => {
+  // ... existing chat logic ...
+
+  socket.on("join-voice", (roomId) => {
+    console.log(`User ${socket.id} joining voice in ${roomId}`);
+    
+    // Add to voice list
+    if (!usersInVoice[roomId]) {
+      usersInVoice[roomId] = [];
+    }
+    
+    // Send existing users to the new joiner
+    const usersInThisRoom = usersInVoice[roomId];
+    socket.emit("all-voice-users", usersInThisRoom);
+    
+    // Add new user to list
+    usersInVoice[roomId].push(socket.id);
+    socketToRoom[socket.id] = roomId;
+  });
+
+  socket.on("sending-signal", payload => {
+    io.to(payload.userToSignal).emit('user-joined-voice', { signal: payload.signal, callerID: payload.callerID });
+  });
+
+  socket.on("returning-signal", payload => {
+    io.to(payload.callerID).emit('receiving-returned-signal', { signal: payload.signal, id: socket.id });
+  });
+
+  socket.on("leave-voice", () => {
+    const roomID = socketToRoom[socket.id];
+    let room = usersInVoice[roomID];
+    if (room) {
+      room = room.filter(id => id !== socket.id);
+      usersInVoice[roomID] = room;
+      socket.broadcast.emit('user-left-voice', socket.id);
+    }
+    delete socketToRoom[socket.id];
+  });
+
 
 httpServer.listen(port, () => {
   console.log(`Server running on port ${port}`);
