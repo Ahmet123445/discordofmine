@@ -94,32 +94,48 @@ io.on("connection", (socket) => {
     const roomID = socketToRoom[socket.id];
     let room = usersInVoice[roomID];
     if (room) {
-      room = room.filter(id => id !== socket.id);
+      room = room.filter(u => u.id !== socket.id);
       usersInVoice[roomID] = room;
       // Notify others to remove this peer
       socket.broadcast.to(roomID).emit('user-left-voice', socket.id);
     }
   });
 
-  socket.on("join-voice", (roomId) => {
-    console.log(`User ${socket.id} joining voice in ${roomId}`);
+  socket.on("join-voice", (data) => {
+    // data can be just roomId (string) or object { roomId, user }
+    // Handle legacy calls just in case, though we will update client
+    const roomId = typeof data === 'object' ? data.roomId : data;
+    const userData = typeof data === 'object' ? data.user : { username: "Unknown" };
+
+    console.log(`User ${socket.id} (${userData.username}) joining voice in ${roomId}`);
     
     // Add to voice list
     if (!usersInVoice[roomId]) {
       usersInVoice[roomId] = [];
     }
     
-    // Send existing users to the new joiner
-    const usersInThisRoom = usersInVoice[roomId];
-    socket.emit("all-voice-users", usersInThisRoom);
+    // Check if user is already in (prevent duplicates)
+    const existingIndex = usersInVoice[roomId].findIndex(u => u.id === socket.id);
+    if (existingIndex !== -1) {
+       usersInVoice[roomId][existingIndex] = { id: socket.id, username: userData.username };
+    } else {
+       usersInVoice[roomId].push({ id: socket.id, username: userData.username });
+    }
     
-    // Add new user to list
-    usersInVoice[roomId].push(socket.id);
     socketToRoom[socket.id] = roomId;
+
+    // Send existing users to the new joiner
+    // Filter out self
+    const usersInThisRoom = usersInVoice[roomId].filter(u => u.id !== socket.id);
+    socket.emit("all-voice-users", usersInThisRoom);
   });
 
   socket.on("sending-signal", payload => {
-    io.to(payload.userToSignal).emit('user-joined-voice', { signal: payload.signal, callerID: payload.callerID });
+    io.to(payload.userToSignal).emit('user-joined-voice', { 
+        signal: payload.signal, 
+        callerID: payload.callerID,
+        username: payload.username // Pass username through signal
+    });
   });
 
   socket.on("returning-signal", payload => {
@@ -130,12 +146,13 @@ io.on("connection", (socket) => {
     const roomID = socketToRoom[socket.id];
     let room = usersInVoice[roomID];
     if (room) {
-      room = room.filter(id => id !== socket.id);
+      room = room.filter(u => u.id !== socket.id);
       usersInVoice[roomID] = room;
       socket.broadcast.emit('user-left-voice', socket.id);
     }
     delete socketToRoom[socket.id];
   });
+
 });
 
 httpServer.listen(port, () => {

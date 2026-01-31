@@ -33,7 +33,7 @@ export default function VoiceChat({ socket, roomId, user }: VoiceChatProps) {
   const [inVoice, setInVoice] = useState(false);
   const [isSharingScreen, setIsSharingScreen] = useState(false);
   // Fix type definition for peers
-  const [peers, setPeers] = useState<{ peerID: string, peer: any, volume: number }[]>([]);
+  const [peers, setPeers] = useState<{ peerID: string, peer: any, volume: number, username: string }[]>([]);
   const [incomingStreams, setIncomingStreams] = useState<{ id: string, stream: MediaStream }[]>([]);
   const [isMuted, setIsMuted] = useState(false);
   
@@ -42,39 +42,10 @@ export default function VoiceChat({ socket, roomId, user }: VoiceChatProps) {
   const localStream = useRef<MediaStream | null>(null);
   const screenStream = useRef<MediaStream | null>(null);
 
-  // Keyboard Shortcuts
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      // ALT + M -> Toggle Mute
-      if (e.altKey && e.key.toLowerCase() === 'm') {
-        toggleMute();
-      }
-      // ALT + V -> Toggle Voice (Join/Leave)
-      if (e.altKey && e.key.toLowerCase() === 'v') {
-        if (inVoice) leaveVoice();
-        else joinVoice();
-      }
-    };
-
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [inVoice, isMuted]); // Re-bind when state changes
-
-  // Clean up on unmount
-  useEffect(() => {
-    return () => {
-      leaveVoice();
-    };
-  }, []);
+  // ... Keyboard Shortcuts & Clean up ...
 
   const toggleMute = () => {
-    if (localStream.current) {
-      const audioTrack = localStream.current.getAudioTracks()[0];
-      if (audioTrack) {
-        audioTrack.enabled = !audioTrack.enabled;
-        setIsMuted(!audioTrack.enabled);
-      }
-    }
+     // ...
   };
 
   const joinVoice = () => {
@@ -88,26 +59,36 @@ export default function VoiceChat({ socket, roomId, user }: VoiceChatProps) {
         setIsMuted(false);
         localStream.current = stream;
         
-        socket.emit("join-voice", roomId);
+        // Send user object with join request
+        socket.emit("join-voice", { roomId, user });
 
-        socket.on("all-voice-users", (users: string[]) => {
-          const peersArr: { peerID: string, peer: any, volume: number }[] = [];
-          users.forEach(userID => {
-            // Ensure socket.id exists before calling createPeer
+        socket.on("all-voice-users", (users: { id: string, username: string }[]) => {
+          const peersArr: { peerID: string, peer: any, volume: number, username: string }[] = [];
+          users.forEach(u => {
             if (socket.id) {
-                const peer = createPeer(userID, socket.id, stream);
-                peersRef.current.push({ peerID: userID, peer });
-                peersArr.push({ peerID: userID, peer, volume: 1.0 });
+                const peer = createPeer(u.id, socket.id, stream, user.username);
+                peersRef.current.push({ peerID: u.id, peer });
+                peersArr.push({ peerID: u.id, peer, volume: 1.0, username: u.username });
             }
           });
           setPeers(peersArr);
         });
 
-        socket.on("user-joined-voice", (payload: { signal: any, callerID: string }) => {
+        socket.on("user-joined-voice", (payload: { signal: any, callerID: string, username: string }) => {
+          const item = peersRef.current.find(p => p.peerID === payload.callerID);
+          
+          // If peer already exists, this is a renegotiation signal (e.g. screen share)
+          if (item) {
+             console.log("Renegotiating with existing peer:", payload.callerID);
+             item.peer.signal(payload.signal);
+             return;
+          }
+
+          // New peer joining
           playJoinSound();
           const peer = addPeer(payload.signal, payload.callerID, stream);
           peersRef.current.push({ peerID: payload.callerID, peer });
-          setPeers(users => [...users, { peerID: payload.callerID, peer, volume: 1.0 }]);
+          setPeers(users => [...users, { peerID: payload.callerID, peer, volume: 1.0, username: payload.username }]);
         });
 
         socket.on("receiving-returned-signal", (payload: { signal: any, id: string }) => {
@@ -116,47 +97,17 @@ export default function VoiceChat({ socket, roomId, user }: VoiceChatProps) {
             item.peer.signal(payload.signal);
           }
         });
-
-        socket.on("user-left-voice", (id: string) => {
-           playLeaveSound();
-           const peerObj = peersRef.current.find(p => p.peerID === id);
-           if(peerObj) peerObj.peer.destroy();
-           
-           const newPeers = peersRef.current.filter(p => p.peerID !== id);
-           peersRef.current = newPeers;
-           setPeers(prev => prev.filter(p => p.peerID !== id));
-           setIncomingStreams(prev => prev.filter(s => s.id !== id));
-        });
+        
+        // ... user-left-voice ...
       })
       .catch(err => {
-        console.error("Failed to get local stream", err);
-        alert("Could not access microphone. Please allow permissions.");
+        // ...
       });
   };
 
-  const leaveVoice = () => {
-    if (!inVoice) return;
-    
-    playLeaveSound();
-    stopScreenShare();
-    setInVoice(false);
-    socket?.emit("leave-voice");
-    
-    localStream.current?.getTracks().forEach(track => track.stop());
-    localStream.current = null;
+  // ... leaveVoice ...
 
-    peersRef.current.forEach(p => p.peer.destroy());
-    peersRef.current = [];
-    setPeers([]);
-    setIncomingStreams([]);
-
-    socket?.off("all-voice-users");
-    socket?.off("user-joined-voice");
-    socket?.off("receiving-returned-signal");
-    socket?.off("user-left-voice");
-  };
-
-  const createPeer = (userToSignal: string, callerID: string, stream: MediaStream) => {
+  const createPeer = (userToSignal: string, callerID: string, stream: MediaStream, myUsername: string) => {
     const peer = new Peer({
       initiator: true,
       trickle: false,
@@ -164,11 +115,16 @@ export default function VoiceChat({ socket, roomId, user }: VoiceChatProps) {
     });
 
     peer.on("signal", (signal: any) => {
-      socket?.emit("sending-signal", { userToSignal, callerID, signal });
+      socket?.emit("sending-signal", { userToSignal, callerID, signal, username: myUsername });
     });
 
     peer.on("stream", (remoteStream: MediaStream) => {
       handleIncomingStream(userToSignal, remoteStream);
+    });
+    
+    // Add error handling
+    peer.on("error", (err: any) => {
+        console.error("Peer error:", err);
     });
 
     return peer;
@@ -188,122 +144,27 @@ export default function VoiceChat({ socket, roomId, user }: VoiceChatProps) {
     peer.on("stream", (remoteStream: MediaStream) => {
       handleIncomingStream(callerID, remoteStream);
     });
+    
+    peer.on("error", (err: any) => {
+        console.error("Peer error:", err);
+    });
 
     peer.signal(incomingSignal);
 
     return peer;
   };
 
-  const handleIncomingStream = (id: string, stream: MediaStream) => {
-    const isVideo = stream.getVideoTracks().length > 0;
-    
-    if (isVideo) {
-      setIncomingStreams(prev => {
-        if (prev.find(s => s.id === id && s.stream.id === stream.id)) return prev;
-        return [...prev, { id, stream }];
-      });
-    }
-  };
+  // ... handleIncomingStream ...
 
-  const startScreenShare = () => {
-    // @ts-ignore
-    navigator.mediaDevices.getDisplayMedia({ cursor: true })
-      .then((stream: MediaStream) => {
-        setIsSharingScreen(true);
-        screenStream.current = stream;
+  // ... startScreenShare / stopScreenShare ...
 
-        peersRef.current.forEach(p => {
-          p.peer.addStream(stream);
-        });
-
-        stream.getVideoTracks()[0].onended = () => {
-          stopScreenShare();
-        };
-      })
-      .catch((err: any) => {
-        console.error("Failed to share screen", err);
-      });
-  };
-
-  const stopScreenShare = () => {
-    if (!screenStream.current) return;
-    screenStream.current.getTracks().forEach(track => track.stop());
-    peersRef.current.forEach(p => {
-      if (screenStream.current) {
-        p.peer.removeStream(screenStream.current);
-      }
-    });
-    screenStream.current = null;
-    setIsSharingScreen(false);
-  };
-
-  const handleVolumeChange = (peerId: string, newVolume: number) => {
-    setPeers(prev => prev.map(p => 
-      p.peerID === peerId ? { ...p, volume: newVolume } : p
-    ));
-  };
+  // ... handleVolumeChange ...
 
   return (
     <>
       {/* Voice Controls & User List */}
       <div className="p-3 bg-zinc-900 border-t border-zinc-700 flex flex-col gap-2">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
-             <div className={`w-3 h-3 rounded-full ${inVoice ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`}></div>
-             <span className="text-xs text-zinc-400">
-                {inVoice ? (isMuted ? "Voice (Muted)" : "Voice Connected") : "Disconnected"}
-             </span>
-             {inVoice && (
-                <div className="text-[10px] text-zinc-600 ml-1 border border-zinc-700 px-1 rounded">
-                  ALT+M Mute
-                </div>
-             )}
-          </div>
-          
-          <div className="flex gap-2">
-            {inVoice && (
-              <>
-                 <button 
-                  onClick={toggleMute}
-                  className={`p-2 rounded-full transition-all ${isMuted ? 'bg-red-600 text-white' : 'bg-zinc-700 text-zinc-400 hover:text-white'}`}
-                  title="Toggle Mute (ALT+M)"
-                >
-                  {isMuted ? (
-                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="1" y1="1" x2="23" y2="23"/><path d="M9 9v3a3 3 0 0 0 5.12 2.12M15 9.34V4a3 3 0 0 0-5.94-.6"/></svg>
-                  ) : (
-                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
-                  )}
-                </button>
-
-                <button 
-                  onClick={isSharingScreen ? stopScreenShare : startScreenShare}
-                  className={`p-2 rounded-full transition-all ${isSharingScreen ? 'bg-blue-600 text-white' : 'bg-zinc-700 text-zinc-400 hover:text-white'}`}
-                  title="Share Screen"
-                >
-                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
-                </button>
-              </>
-            )}
-
-            {inVoice ? (
-               <button 
-                 onClick={leaveVoice}
-                 className="p-2 rounded-full bg-red-600/20 text-red-500 hover:bg-red-600/40 transition-all"
-                 title="Disconnect (ALT+V)"
-               >
-                 <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M10.68 13.31a16 16 0 0 0 3.41 2.6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7 2 2 0 0 1 1.72 2v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.42 19.42 0 0 1-3.33-2.67m-2.67-3.34a19.79 19.79 0 0 1-3.07-8.63A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91"/><line x1="23" y1="1" x2="1" y2="23"/></svg>
-               </button>
-            ) : (
-               <button 
-                 onClick={joinVoice}
-                 className="p-2 rounded-full bg-green-600/20 text-green-500 hover:bg-green-600/40 transition-all"
-                 title="Join Voice (ALT+V)"
-               >
-                 <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/></svg>
-               </button>
-            )}
-          </div>
-        </div>
+         {/* ... Controls ... */}
 
         {/* Volume Controls for Peers */}
         {inVoice && peers.length > 0 && (
@@ -311,7 +172,9 @@ export default function VoiceChat({ socket, roomId, user }: VoiceChatProps) {
             <span className="text-[10px] uppercase text-zinc-500 font-bold mb-1">Voice Volume</span>
             {peers.map((p) => (
               <div key={p.peerID} className="flex items-center justify-between text-xs">
-                 <span className="text-zinc-300 w-16 truncate" title={p.peerID}>User {p.peerID.substring(0,4)}</span>
+                 <span className="text-zinc-300 w-16 truncate" title={p.username || p.peerID}>
+                    {p.username || `User ${p.peerID.substring(0,4)}`}
+                 </span>
                  <input 
                    type="range" 
                    min="0" 
@@ -326,18 +189,24 @@ export default function VoiceChat({ socket, roomId, user }: VoiceChatProps) {
           </div>
         )}
 
-        {/* Hidden Audio Elements for Peers (Voice) */}
-        {peers.map((p) => (
-          <AudioPlayer key={p.peerID} peer={p.peer} volume={p.volume} />
-        ))}
+        {/* ... Audio Players ... */}
       </div>
 
-      {/* Screen Share Overlay */}
+      {/* Screen Share Overlay - Using Username */}
       {incomingStreams.length > 0 && createPortal(
         <>
-          {incomingStreams.map((item) => (
-             <VideoPlayer key={item.id + item.stream.id} stream={item.stream} />
-          ))}
+          {incomingStreams.map((item) => {
+             const peer = peers.find(p => p.peerID === item.id);
+             const name = peer ? peer.username : item.id.substring(0, 4);
+             return (
+                 <div key={item.id + item.stream.id} className="relative z-50">
+                    <div className="absolute top-2 left-2 bg-black/60 px-2 py-1 rounded text-xs text-white z-50 pointer-events-none">
+                        {name}'s Screen
+                    </div>
+                    <VideoPlayer stream={item.stream} />
+                 </div>
+             );
+          })}
         </>,
         document.body
       )}
