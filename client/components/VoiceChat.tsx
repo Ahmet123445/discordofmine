@@ -93,9 +93,12 @@ export default function VoiceChat({ socket, roomId, user }: VoiceChatProps) {
         socket.on("all-voice-users", (users: string[]) => {
           const peersArr: { peerID: string, peer: any, volume: number }[] = [];
           users.forEach(userID => {
-            const peer = createPeer(userID, socket.id, stream);
-            peersRef.current.push({ peerID: userID, peer });
-            peersArr.push({ peerID: userID, peer, volume: 1.0 });
+            // Ensure socket.id exists before calling createPeer
+            if (socket.id) {
+                const peer = createPeer(userID, socket.id, stream);
+                peersRef.current.push({ peerID: userID, peer });
+                peersArr.push({ peerID: userID, peer, volume: 1.0 });
+            }
           });
           setPeers(peersArr);
         });
