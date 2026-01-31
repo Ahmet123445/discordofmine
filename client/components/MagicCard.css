@@ -41,12 +41,12 @@
   content: '';
   position: absolute;
   inset: 0;
-  padding: 1px;
+  padding: 2px; /* Increased border thickness for stronger glow visibility */
   background: radial-gradient(
     var(--glow-radius) circle at var(--glow-x) var(--glow-y),
-    rgba(132, 0, 255, calc(var(--glow-intensity) * 0.8)) 0%,
-    rgba(132, 0, 255, calc(var(--glow-intensity) * 0.4)) 30%,
-    transparent 60%
+    rgba(132, 0, 255, calc(var(--glow-intensity) * 1.0)) 0%,
+    rgba(132, 0, 255, calc(var(--glow-intensity) * 0.6)) 40%,
+    transparent 70%
   );
   border-radius: inherit;
   -webkit-mask:

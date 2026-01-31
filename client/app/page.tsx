@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import GridScan from "@/components/GridScan";
+import LightRays from "@/components/LightRays";
 
 export default function Home() {
   const router = useRouter();
@@ -16,7 +16,6 @@ export default function Home() {
     setLoading(true);
 
     const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001";
-    // Always call login, backend handles creation if needed
     const endpoint = `${API_URL}/api/auth/login`;
 
     try {
@@ -34,7 +33,6 @@ export default function Home() {
 
       localStorage.setItem("token", data.token);
       localStorage.setItem("user", JSON.stringify(data.user));
-      // Redirect to rooms selection
       router.push("/rooms");
     } catch (err: any) {
       setError(err.message);
@@ -46,17 +44,20 @@ export default function Home() {
   return (
     <div className="relative w-full h-screen bg-black overflow-hidden flex items-center justify-center font-sans">
       <div className="absolute inset-0">
-        <GridScan
-          sensitivity={0.55}
-          lineThickness={1}
-          linesColor="#392e4e"
-          gridScale={0.1}
-          scanColor="#FF9FFC"
-          scanOpacity={0.4}
-          enablePost
-          bloomIntensity={0.6}
-          chromaticAberration={0.002}
-          noiseIntensity={0.01}
+        <LightRays
+          raysOrigin="top-center"
+          raysColor="#ffffff"
+          raysSpeed={1}
+          lightSpread={0.5}
+          rayLength={3}
+          followMouse={true}
+          mouseInfluence={0.1}
+          noiseAmount={0}
+          distortion={0}
+          className="custom-rays"
+          pulsating={false}
+          fadeDistance={1}
+          saturation={1}
         />
       </div>
 
