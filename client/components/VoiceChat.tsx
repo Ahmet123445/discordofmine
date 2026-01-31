@@ -280,17 +280,40 @@ export default function VoiceChat({ socket, roomId: defaultRoomId, user }: Voice
   const stopScreenShare = () => {
     if (!screenStream.current) return;
     
-    // Stop all tracks
+    // Stop all tracks immediately
     screenStream.current.getTracks().forEach((track) => {
       track.stop();
+      track.enabled = false;
+    });
+
+    // Remove tracks from peers
+    peersRef.current.forEach((p) => {
+      try {
+        const senders = p.peer._pc?.getSenders?.() || [];
+        senders.forEach((sender: RTCRtpSender) => {
+          if (sender.track?.kind === 'video') {
+            p.peer._pc?.removeTrack?.(sender);
+          }
+        });
+      } catch (e) {
+        // Ignore errors when removing tracks
+      }
+    });
+
+    // Clear all incoming streams and stop their tracks
+    setIncomingStreams((prev) => {
+      prev.forEach((s) => {
+        s.stream.getTracks().forEach((track) => {
+          track.stop();
+          track.enabled = false;
+        });
+      });
+      return [];
     });
 
     // Clear state
     screenStream.current = null;
     setIsSharingScreen(false);
-    
-    // Remove from incoming streams if showing own screen
-    setIncomingStreams([]);
   };
 
   const handleVolumeChange = (peerId: string, newVolume: number) => {
@@ -373,16 +396,57 @@ export default function VoiceChat({ socket, roomId: defaultRoomId, user }: Voice
               </button>
               
               {/* Show connected users under the room */}
-              {currentRoom === room.id && peers.length > 0 && (
+              {currentRoom === room.id && (
                 <div className="ml-6 mt-1 space-y-1">
-                  {peers.map((p) => (
-                    <div key={p.peerID} className="flex items-center gap-2 text-xs text-zinc-400 py-0.5">
-                      <div className="w-4 h-4 rounded-full bg-indigo-600 flex items-center justify-center text-[10px] font-bold text-white">
-                        {(p.username || "?")[0].toUpperCase()}
-                      </div>
-                      <span>{p.username || `User ${p.peerID.substring(0, 4)}`}</span>
+                  {/* Show myself first */}
+                  <div className="flex items-center gap-2 text-xs text-zinc-300 py-0.5">
+                    <div className="w-5 h-5 rounded-full bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center text-[10px] font-bold text-white">
+                      {user.username[0].toUpperCase()}
                     </div>
-                  ))}
+                    <span className="flex-1 truncate">{user.username}</span>
+                    <div className="flex items-center gap-1">
+                      {/* Microphone status */}
+                      {isMuted ? (
+                        <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-red-400">
+                          <line x1="1" y1="1" x2="23" y2="23"/><path d="M9 9v3a3 3 0 0 0 5.12 2.12M15 9.34V4a3 3 0 0 0-5.94-.6"/>
+                        </svg>
+                      ) : (
+                        <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-green-400">
+                          <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+                        </svg>
+                      )}
+                      {/* Screen share status */}
+                      {isSharingScreen && (
+                        <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-indigo-400">
+                          <rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/>
+                        </svg>
+                      )}
+                    </div>
+                  </div>
+                  {/* Show other users */}
+                  {peers.map((p) => {
+                    const isScreenSharing = incomingStreams.some((s) => s.id === p.peerID);
+                    return (
+                      <div key={p.peerID} className="flex items-center gap-2 text-xs text-zinc-400 py-0.5">
+                        <div className="w-5 h-5 rounded-full bg-gradient-to-br from-emerald-500 to-teal-600 flex items-center justify-center text-[10px] font-bold text-white">
+                          {(p.username || "?")[0].toUpperCase()}
+                        </div>
+                        <span className="flex-1 truncate">{p.username || `User ${p.peerID.substring(0, 4)}`}</span>
+                        <div className="flex items-center gap-1">
+                          {/* Headphone icon (connected) */}
+                          <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-green-400">
+                            <path d="M3 18v-6a9 9 0 0 1 18 0v6"/><path d="M21 19a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3zM3 19a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H3z"/>
+                          </svg>
+                          {/* Screen share status */}
+                          {isScreenSharing && (
+                            <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-indigo-400">
+                              <rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/>
+                            </svg>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
               )}
             </div>
@@ -473,7 +537,18 @@ export default function VoiceChat({ socket, roomId: defaultRoomId, user }: Voice
             {incomingStreams.map((item) => {
               const peerData = peers.find((p) => p.peerID === item.id);
               const name = peerData ? peerData.username : item.id.substring(0, 4);
-              return <VideoPlayer key={item.id + item.stream.id} stream={item.stream} name={name} />;
+              return (
+                <VideoPlayer
+                  key={item.id + item.stream.id}
+                  stream={item.stream}
+                  name={name}
+                  onClose={() => {
+                    // Stop stream tracks to free memory
+                    item.stream.getTracks().forEach((track) => track.stop());
+                    setIncomingStreams((prev) => prev.filter((s) => s.id !== item.id || s.stream.id !== item.stream.id));
+                  }}
+                />
+              );
             })}
           </>,
           document.body
@@ -519,7 +594,7 @@ const AudioPlayer = ({ peer, volume = 1 }: { peer: any; volume?: number }) => {
   return <audio ref={ref} autoPlay playsInline style={{ display: "none" }} />;
 };
 
-const VideoPlayer = ({ stream, name }: { stream: MediaStream; name: string }) => {
+const VideoPlayer = ({ stream, name, onClose }: { stream: MediaStream; name: string; onClose: () => void }) => {
   const ref = useRef<HTMLVideoElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const [isExpanded, setIsExpanded] = useState(false);
@@ -532,6 +607,13 @@ const VideoPlayer = ({ stream, name }: { stream: MediaStream; name: string }) =>
 
   useEffect(() => {
     if (ref.current) ref.current.srcObject = stream;
+    
+    // Cleanup when component unmounts or stream changes
+    return () => {
+      if (ref.current) {
+        ref.current.srcObject = null;
+      }
+    };
   }, [stream]);
 
   const handleMouseDown = (e: React.MouseEvent) => {
@@ -613,16 +695,26 @@ const VideoPlayer = ({ stream, name }: { stream: MediaStream; name: string }) =>
           </div>
           <span className="text-xs text-white font-medium">{name}&apos;s Screen</span>
         </div>
-        <button
-          onClick={() => setIsExpanded(!isExpanded)}
-          className="p-1.5 bg-black/40 hover:bg-black/60 rounded text-white transition-colors"
-        >
-          {isExpanded ? (
-            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M8 3v3a2 2 0 0 1-2 2H3m18 0h-3a2 2 0 0 1-2-2V3m0 18v-3a2 2 0 0 1 2-2h3M3 16h3a2 2 0 0 1 2 2v3"/></svg>
-          ) : (
-            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>
-          )}
-        </button>
+        <div className="flex items-center gap-1">
+          <button
+            onClick={() => setIsExpanded(!isExpanded)}
+            className="p-1.5 bg-black/40 hover:bg-black/60 rounded text-white transition-colors"
+            title={isExpanded ? "Kucult" : "Buyut"}
+          >
+            {isExpanded ? (
+              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M8 3v3a2 2 0 0 1-2 2H3m18 0h-3a2 2 0 0 1-2-2V3m0 18v-3a2 2 0 0 1 2-2h3M3 16h3a2 2 0 0 1 2 2v3"/></svg>
+            ) : (
+              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>
+            )}
+          </button>
+          <button
+            onClick={onClose}
+            className="p-1.5 bg-red-600/60 hover:bg-red-600 rounded text-white transition-colors"
+            title="Kapat"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
+        </div>
       </div>
       
       <video ref={ref} autoPlay playsInline className="w-full h-full object-contain bg-black" />
