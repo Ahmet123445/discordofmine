@@ -117,10 +117,11 @@ app.post("/api/rooms", (req, res) => {
 
     const id = name.toLowerCase().replace(/[^a-z0-9]/g, "-") + "-" + Date.now().toString().slice(-4);
     
-    const stmt = db.prepare("INSERT INTO rooms (id, name, created_by, password) VALUES (?, ?, ?, ?)");
-    stmt.run(id, name, userId || 0, password || null);
+    const createdAt = new Date().toISOString();
+    const stmt = db.prepare("INSERT INTO rooms (id, name, created_by, password, created_at) VALUES (?, ?, ?, ?, ?)");
+    stmt.run(id, name, userId || 0, password || null, createdAt);
     
-    const newRoom = { id, name, created_by: userId || 0, isPrivate: !!password };
+    const newRoom = { id, name, created_by: userId || 0, isPrivate: !!password, created_at: createdAt };
     io.emit("room-created", newRoom); // Notify clients
     res.status(201).json(newRoom);
   } catch (err) {
@@ -163,20 +164,58 @@ const socketToRoom = {}; // { socketId: roomId }
         users: uniqueNames
       };
     }
+    // Also include voice users in stats if not already counted (simple merge)
+    for (const [roomId, users] of Object.entries(usersInVoice)) {
+        if (!stats[roomId]) {
+            stats[roomId] = { count: 0, users: [] };
+        }
+        // Voice users might be different objects {id, username}
+        const voiceNames = users.map(u => u.username);
+        // Merge unique
+        const allUsers = [...new Set([...stats[roomId].users, ...voiceNames])];
+        stats[roomId].count = allUsers.length;
+        stats[roomId].users = allUsers;
+    }
     return stats;
   };
+
+  // Cleanup Empty Rooms (Every 30 seconds)
+  setInterval(() => {
+      try {
+          const rooms = db.prepare("SELECT * FROM rooms").all();
+          const stats = getRoomStats();
+          const now = Date.now();
+          const TIMEOUT = 30 * 1000; // 30 seconds grace period for new rooms
+
+          rooms.forEach(room => {
+              const activeCount = stats[room.id]?.count || 0;
+              const createdAt = new Date(room.created_at).getTime(); // Assuming created_at is valid date string or timestamp
+              
+              // If room is empty AND older than TIMEOUT
+              // Note: SQLite CURRENT_TIMESTAMP is UTC string. node-sqlite3 returns string.
+              // Let's ensure date parsing is safe.
+              let createdTime = createdAt;
+              if (isNaN(createdTime)) {
+                  // Fallback if db format issue, assumes recently created if invalid to prevent instant delete
+                  createdTime = now; 
+              }
+
+              if (activeCount === 0 && (now - createdTime > TIMEOUT)) {
+                  console.log(`Deleting empty room: ${room.name} (${room.id})`);
+                  db.prepare("DELETE FROM rooms WHERE id = ?").run(room.id);
+                  io.emit("room-deleted", room.id); // Notify clients to remove from UI immediately
+              }
+          });
+      } catch (err) {
+          console.error("Cleanup error:", err);
+      }
+  }, 30000); // Check every 30s
 
   io.on("connection", (socket) => {
     console.log("User connected:", socket.id);
     
     // Send current voice users to new connection
     socket.emit("all-rooms-users", usersInVoice);
-
-    socket.on("ui-interaction", (data) => {
-    // Broadcast to everyone else (excluding sender)
-    // Rate limit check could happen here too, but client-side is mostly enough for UI feedback
-    socket.broadcast.emit("play-ui-sound", { type: data.type, userId: socket.id });
-  });
 
   // Join a Text/Socket Room
   socket.on("join-room", (data) => {
