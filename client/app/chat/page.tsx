@@ -4,6 +4,7 @@ import { useEffect, useState, useRef, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import io, { Socket } from "socket.io-client";
 import dynamic from "next/dynamic";
+import LinkPreview from "@/components/LinkPreview";
 
 const VoiceChat = dynamic(() => import("@/components/VoiceChat"), {
   ssr: false,
@@ -39,6 +40,10 @@ function ChatContent() {
   const [isUploading, setIsUploading] = useState(false);
   const [pastePreview, setPastePreview] = useState<string | null>(null);
   const [pasteFile, setPasteFile] = useState<File | null>(null);
+  const [showSettings, setShowSettings] = useState(false);
+  const [newUsername, setNewUsername] = useState("");
+  const [usernameError, setUsernameError] = useState("");
+  const [isUpdatingUsername, setIsUpdatingUsername] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -284,6 +289,50 @@ function ChatContent() {
     }
   };
 
+  const updateUsername = async () => {
+    if (!user || !newUsername.trim()) return;
+    
+    if (newUsername.trim().length < 2) {
+      setUsernameError("En az 2 karakter olmali");
+      return;
+    }
+    
+    if (newUsername.length > 20) {
+      setUsernameError("En fazla 20 karakter olmali");
+      return;
+    }
+    
+    setIsUpdatingUsername(true);
+    setUsernameError("");
+    
+    const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001";
+    
+    try {
+      const res = await fetch(`${API_URL}/api/users/${user.id}/username`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: newUsername.trim() }),
+      });
+      
+      const data = await res.json();
+      
+      if (res.ok && data.success) {
+        const updatedUser = { ...user, username: data.username };
+        setUser(updatedUser);
+        localStorage.setItem("user", JSON.stringify(updatedUser));
+        setShowSettings(false);
+        setNewUsername("");
+      } else {
+        setUsernameError(data.error || "Guncelleme basarisiz");
+      }
+    } catch (err) {
+      console.error("Username update failed:", err);
+      setUsernameError("Baglanti hatasi");
+    } finally {
+      setIsUpdatingUsername(false);
+    }
+  };
+
   if (!user || !roomId) return null;
 
   // Extract display name from roomId (simple heuristic)
@@ -351,6 +400,19 @@ function ChatContent() {
                 </div>
               </div>
             </div>
+            <button
+              onClick={() => {
+                setNewUsername(user.username);
+                setUsernameError("");
+                setShowSettings(true);
+              }}
+              className="p-2 text-zinc-500 hover:text-white hover:bg-zinc-800 rounded-lg transition-colors"
+              title="Ayarlar"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="12" r="3"/><path d="M12 1v6m0 6v6m8.66-9h-6m-6 0H2.34"/>
+              </svg>
+            </button>
           </div>
         </div>
       </div>
@@ -433,7 +495,7 @@ function ChatContent() {
                           </a>
                         )
                       ) : (
-                        msg.content
+                        <MessageContent content={msg.content} isMe={isMe} />
                       )}
                     </div>
                   </div>
@@ -523,6 +585,112 @@ function ChatContent() {
           </form>
         </div>
       </div>
+
+      {/* Settings Modal */}
+      {showSettings && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4" onClick={() => setShowSettings(false)}>
+          <div className="bg-zinc-900 border border-zinc-700 rounded-xl w-full max-w-sm p-6 shadow-2xl" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-6">
+              <h2 className="text-xl font-bold text-white">Ayarlar</h2>
+              <button
+                onClick={() => setShowSettings(false)}
+                className="text-zinc-500 hover:text-white transition-colors"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+                </svg>
+              </button>
+            </div>
+
+            {/* Username Change */}
+            <div className="space-y-4">
+              <div>
+                <label className="text-xs text-zinc-400 uppercase font-semibold mb-2 block">Kullanici Adi</label>
+                <input
+                  type="text"
+                  value={newUsername}
+                  onChange={(e) => setNewUsername(e.target.value)}
+                  placeholder="Yeni kullanici adi"
+                  maxLength={20}
+                  className="w-full bg-zinc-800 text-white rounded-lg px-4 py-3 border border-zinc-600 focus:outline-none focus:border-indigo-500 transition-colors"
+                />
+                {usernameError && (
+                  <p className="text-red-400 text-xs mt-2">{usernameError}</p>
+                )}
+                <p className="text-zinc-500 text-xs mt-2">{newUsername.length}/20 karakter</p>
+              </div>
+
+              <button
+                onClick={updateUsername}
+                disabled={isUpdatingUsername || !newUsername.trim() || newUsername === user?.username}
+                className="w-full py-3 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg text-white font-medium transition-colors"
+              >
+                {isUpdatingUsername ? "Guncelleniyor..." : "Kaydet"}
+              </button>
+            </div>
+
+            {/* Divider */}
+            <div className="border-t border-zinc-700 my-6"></div>
+
+            {/* Logout */}
+            <button
+              onClick={() => {
+                localStorage.clear();
+                router.push("/");
+              }}
+              className="w-full py-3 bg-red-600/20 hover:bg-red-600/40 text-red-400 rounded-lg font-medium transition-colors flex items-center justify-center gap-2"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/>
+              </svg>
+              Cikis Yap
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Helper component to render message content with link detection
+function MessageContent({ content, isMe }: { content: string; isMe: boolean }) {
+  // URL regex pattern
+  const urlRegex = /(https?:\/\/[^\s]+)/g;
+  const urlMatches = content.match(urlRegex);
+  const urls: string[] = urlMatches ? urlMatches : [];
+  
+  if (urls.length === 0) {
+    return <>{content}</>;
+  }
+
+  // Split content by URLs and render with link previews
+  const parts = content.split(urlRegex);
+  
+  return (
+    <div>
+      {parts.map((part, index) => {
+        if (part && urls.includes(part)) {
+          return (
+            <span key={index}>
+              <a
+                href={part}
+                target="_blank"
+                rel="noopener noreferrer"
+                className={`underline hover:opacity-80 ${isMe ? "text-indigo-200" : "text-indigo-400"}`}
+              >
+                {part.length > 50 ? part.substring(0, 50) + "..." : part}
+              </a>
+            </span>
+          );
+        }
+        return <span key={index}>{part}</span>;
+      })}
+      {/* Show preview for first URL only */}
+      {urls.length > 0 && (
+        <div className={`mt-2 ${isMe ? "-mx-2" : ""}`}>
+          <LinkPreview url={urls[0]} />
+        </div>
+      )}
     </div>
   );
 }

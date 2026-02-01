@@ -24,6 +24,39 @@ app.use("/api/upload", uploadRoutes);
 
 // --- API Endpoints ---
 
+// Update Username
+app.put("/api/users/:id/username", (req, res) => {
+  try {
+    const { id } = req.params;
+    const { username } = req.body;
+    
+    if (!username || username.trim().length < 2) {
+      return res.status(400).json({ error: "Username must be at least 2 characters" });
+    }
+    
+    if (username.length > 20) {
+      return res.status(400).json({ error: "Username must be 20 characters or less" });
+    }
+    
+    // Check if username is taken
+    const existing = db.prepare("SELECT id FROM users WHERE username = ? AND id != ?").get(username.trim(), id);
+    if (existing) {
+      return res.status(409).json({ error: "Username already taken" });
+    }
+    
+    // Update username
+    db.prepare("UPDATE users SET username = ? WHERE id = ?").run(username.trim(), id);
+    
+    // Also update username in existing messages
+    db.prepare("UPDATE messages SET username = ? WHERE user_id = ?").run(username.trim(), id);
+    
+    res.json({ success: true, username: username.trim() });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to update username" });
+  }
+});
+
 // Get Messages (Filtered by Room)
 app.get("/api/messages", (req, res) => {
   try {
@@ -64,6 +97,94 @@ app.delete("/api/messages/:id", (req, res) => {
     res.status(500).json({ error: "Failed to delete message" });
   }
 });
+
+// Link Preview - Fetch metadata from URL
+app.get("/api/link-preview", async (req, res) => {
+  try {
+    const { url } = req.query;
+    if (!url) return res.status(400).json({ error: "URL required" });
+
+    // Validate URL
+    let parsedUrl;
+    try {
+      parsedUrl = new URL(url);
+    } catch {
+      return res.status(400).json({ error: "Invalid URL" });
+    }
+
+    // Fetch the page
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+
+    const response = await fetch(url, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (compatible; LinkPreview/1.0)",
+        "Accept": "text/html"
+      },
+      signal: controller.signal
+    });
+    clearTimeout(timeout);
+
+    if (!response.ok) {
+      return res.status(404).json({ error: "Could not fetch URL" });
+    }
+
+    const html = await response.text();
+
+    // Parse meta tags
+    const getMetaContent = (name) => {
+      const ogMatch = html.match(new RegExp(`<meta[^>]*property=["']og:${name}["'][^>]*content=["']([^"']*)["']`, "i"));
+      if (ogMatch) return ogMatch[1];
+      
+      const ogMatch2 = html.match(new RegExp(`<meta[^>]*content=["']([^"']*)["'][^>]*property=["']og:${name}["']`, "i"));
+      if (ogMatch2) return ogMatch2[1];
+      
+      const twitterMatch = html.match(new RegExp(`<meta[^>]*name=["']twitter:${name}["'][^>]*content=["']([^"']*)["']`, "i"));
+      if (twitterMatch) return twitterMatch[1];
+      
+      return null;
+    };
+
+    const titleMatch = html.match(/<title[^>]*>([^<]*)<\/title>/i);
+    const title = getMetaContent("title") || (titleMatch ? titleMatch[1].trim() : null);
+    const description = getMetaContent("description") || 
+      html.match(/<meta[^>]*name=["']description["'][^>]*content=["']([^"']*)["']/i)?.[1];
+    const image = getMetaContent("image");
+    const siteName = getMetaContent("site_name") || parsedUrl.hostname.replace("www.", "");
+    
+    // Get favicon
+    const faviconMatch = html.match(/<link[^>]*rel=["'](?:icon|shortcut icon)["'][^>]*href=["']([^"']*)["']/i);
+    let favicon = faviconMatch ? faviconMatch[1] : null;
+    if (favicon && !favicon.startsWith("http")) {
+      favicon = new URL(favicon, parsedUrl.origin).href;
+    }
+
+    res.json({
+      title: title ? decodeHTMLEntities(title) : null,
+      description: description ? decodeHTMLEntities(description) : null,
+      image,
+      siteName,
+      favicon: favicon || `${parsedUrl.origin}/favicon.ico`
+    });
+
+  } catch (err) {
+    console.error("Link preview error:", err.message);
+    res.status(500).json({ error: "Failed to fetch preview" });
+  }
+});
+
+// Helper to decode HTML entities
+function decodeHTMLEntities(text) {
+  const entities = {
+    '&amp;': '&',
+    '&lt;': '<',
+    '&gt;': '>',
+    '&quot;': '"',
+    '&#39;': "'",
+    '&nbsp;': ' '
+  };
+  return text.replace(/&[^;]+;/g, (entity) => entities[entity] || entity);
+}
 
 // Get Rooms with stats
 app.get("/api/rooms", (req, res) => {
