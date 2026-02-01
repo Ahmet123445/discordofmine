@@ -7,6 +7,7 @@ import db from "./db.js";
 import authRoutes from "./routes/auth.js";
 import uploadRoutes from "./routes/upload.js";
 import path from "path";
+import MusicBot from "./musicBot.js";
 
 dotenv.config();
 
@@ -52,10 +53,6 @@ app.put("/api/users/:id/username", (req, res) => {
     
     res.json({ success: true, username: username.trim() });
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Failed to update username" });
-  }
-});
     console.error(err);
     res.status(500).json({ error: "Failed to update username" });
   }
@@ -197,6 +194,9 @@ const socketToTextRoom = {}; // { socketId: roomId } for text
   const broadcastAllVoiceUsers = () => {
     io.emit("all-rooms-users", usersInVoice);
   };
+
+const musicBot = new MusicBot(io, broadcastAllVoiceUsers);
+
 
   // Helper to get active users count per room for the rooms API
   const getRoomStats = () => {
@@ -367,29 +367,138 @@ const socketToTextRoom = {}; // { socketId: roomId } for text
     console.log(`[Join] User ${socket.id} (${username}) joined room ${roomId}. Total in room: ${currentCount}`);
   });
 
-  socket.on("send-message", (data) => {
+  socket.on("send-message", async (data) => {
     const { content, user, type = "text", fileUrl, fileName, roomId = "general" } = data;
     
+    // --- Music Bot Commands ---
+    if (content.startsWith("!play ")) {
+        const url = content.split(" ")[1];
+        // Find which voice room the user is in
+        const voiceRoomId = socketToRoom[socket.id];
+        
+        if (!voiceRoomId) {
+            // Send error message back to user (only to sender)
+            socket.emit("message-received", {
+                id: Date.now(),
+                content: "❌ You must be in a voice channel to use the music bot.",
+                user_id: 0,
+                username: "System",
+                type: "text",
+                room_id: roomId,
+                created_at: new Date().toISOString()
+            });
+            return;
+        }
+
+        // Add Bot to Voice List (Visual) if not already there
+        if (!usersInVoice[voiceRoomId]) usersInVoice[voiceRoomId] = [];
+        const botExists = usersInVoice[voiceRoomId].find(u => u.id === "music-bot");
+        
+        if (!botExists) {
+            // Remove bot from other rooms first if it was playing elsewhere
+            for (const rId in usersInVoice) {
+                if (rId !== voiceRoomId) {
+                    usersInVoice[rId] = usersInVoice[rId].filter(u => u.id !== "music-bot");
+                    if (usersInVoice[rId].length === 0) delete usersInVoice[rId];
+                }
+            }
+            
+            usersInVoice[voiceRoomId].push({ id: "music-bot", username: "🎵 Music Bot" });
+            broadcastAllVoiceUsers();
+        }
+
+        // Send "Searching..." message
+        io.to(roomId).emit("message-received", {
+            id: Date.now(),
+            content: `🔍 Searching for music...`,
+            user_id: 0,
+            username: "🎵 Music Bot",
+            type: "text",
+            room_id: roomId,
+            created_at: new Date().toISOString()
+        });
+
+        // Start playing
+        musicBot.play(url, voiceRoomId).then(() => {
+             io.to(roomId).emit("message-received", {
+                id: Date.now() + 1,
+                content: `▶️ Playing music in voice channel!`,
+                user_id: 0,
+                username: "🎵 Music Bot",
+                type: "text",
+                room_id: roomId,
+                created_at: new Date().toISOString()
+            });
+
+            // Connect to all existing users in the room
+            // We need to initiate because they are already there
+            const users = usersInVoice[voiceRoomId];
+            users.forEach(u => {
+                if (u.id !== "music-bot") {
+                    musicBot.initiateConnection(u.id);
+                }
+            });
+
+        }).catch(err => {
+             console.error(err);
+             io.to(roomId).emit("message-received", {
+                id: Date.now() + 1,
+                content: `❌ Error playing music. Check server logs.`,
+                user_id: 0,
+                username: "🎵 Music Bot",
+                type: "text",
+                room_id: roomId,
+                created_at: new Date().toISOString()
+            });
+        });
+    }
+
+    if (content === "!stop") {
+        musicBot.stopMusic();
+        musicBot.leave();
+        
+        // Remove from visual list
+        for (const rId in usersInVoice) {
+            usersInVoice[rId] = usersInVoice[rId].filter(u => u.id !== "music-bot");
+             // Notify clients in that room to remove peer
+             io.to(rId).emit('user-left-voice', "music-bot");
+        }
+        broadcastAllVoiceUsers();
+
+        io.to(roomId).emit("message-received", {
+            id: Date.now(),
+            content: `⏹️ Music stopped and bot disconnected.`,
+            user_id: 0,
+            username: "🎵 Music Bot",
+            type: "text",
+            room_id: roomId,
+            created_at: new Date().toISOString()
+        });
+        return; // Don't save !stop command to DB
+    }
+
     // Save to DB
     try {
-      const stmt = db.prepare("INSERT INTO messages (content, user_id, username, type, room_id) VALUES (?, ?, ?, ?, ?)");
-      const info = stmt.run(content, user.id, user.username, type, roomId);
-      
-      const message = {
-        id: Number(info.lastInsertRowid),
-        content,
-        user_id: Number(user.id), // Ensure it's a number
-        username: user.username,
-        type,
-        fileUrl,
-        fileName,
-        room_id: roomId,
-        created_at: new Date().toISOString()
-      };
+      if (!content.startsWith("!play")) { // Don't save play commands to DB to keep chat clean? Or save them. Let's save them.
+          const stmt = db.prepare("INSERT INTO messages (content, user_id, username, type, room_id) VALUES (?, ?, ?, ?, ?)");
+          const info = stmt.run(content, user.id, user.username, type, roomId);
+          
+          const message = {
+            id: Number(info.lastInsertRowid),
+            content,
+            user_id: Number(user.id), // Ensure it's a number
+            username: user.username,
+            type,
+            fileUrl,
+            fileName,
+            room_id: roomId,
+            created_at: new Date().toISOString()
+          };
 
-      // Broadcast to specific room
-      io.to(roomId).emit("message-received", message);
-      console.log(`Message sent to room ${roomId} by user ${user.id}: ${content.substring(0, 50)}`);
+          // Broadcast to specific room
+          io.to(roomId).emit("message-received", message);
+          console.log(`Message sent to room ${roomId} by user ${user.id}: ${content.substring(0, 50)}`);
+      }
       
     } catch (err) {
       console.error("Error saving message:", err);
@@ -458,6 +567,10 @@ const socketToTextRoom = {}; // { socketId: roomId } for text
   });
 
   socket.on("sending-signal", payload => {
+    if (payload.userToSignal === "music-bot") {
+        musicBot.handleSignal(socket.id, payload.signal);
+        return;
+    }
     io.to(payload.userToSignal).emit('user-joined-voice', { 
         signal: payload.signal, 
         callerID: payload.callerID,
