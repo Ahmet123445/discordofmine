@@ -58,16 +58,38 @@ class MusicBot {
             console.log(`[MusicBot] Fetching info for: ${url}`);
             
             // Validate URL
-            const validation = await play.validate(url);
-            if (!validation) {
-                console.error("[MusicBot] Invalid URL");
-                return;
+            let streamUrl = url;
+            let streamType = 'youtube'; // Default fallback
+
+            // Try to find on SoundCloud first to avoid YouTube "Sign in" blocking
+            try {
+                // If it is a URL, get the video info to find the title
+                if (url.startsWith("http")) {
+                   const yt_info = await play.video_info(url);
+                   const title = yt_info.video_details.title;
+                   console.log(`[MusicBot] Found title: ${title}. Searching on SoundCloud to bypass limits...`);
+                   
+                   const sc_results = await play.search(title, { source: { soundcloud: "tracks" }, limit: 1 });
+                   if (sc_results.length > 0) {
+                       streamUrl = sc_results[0].url;
+                       console.log(`[MusicBot] Playing from SoundCloud: ${sc_results[0].title}`);
+                   }
+                } else {
+                    // It is a search query
+                    const sc_results = await play.search(url, { source: { soundcloud: "tracks" }, limit: 1 });
+                    if (sc_results.length > 0) {
+                       streamUrl = sc_results[0].url;
+                       console.log(`[MusicBot] Playing from SoundCloud: ${sc_results[0].title}`);
+                    }
+                }
+            } catch (fallbackErr) {
+                console.log("[MusicBot] SoundCloud fallback failed, trying direct YouTube...", fallbackErr.message);
             }
 
-            // Get Stream with discord optimization
-            const streamInfo = await play.stream(url, {
+            // Get Stream
+            const streamInfo = await play.stream(streamUrl, {
                 discordPlayerCompatibility: true,
-                quality: 2 // High quality
+                quality: 2
             });
             console.log(`[MusicBot] Stream Type: ${streamInfo.type}`);
 
