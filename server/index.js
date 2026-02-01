@@ -215,14 +215,16 @@ const musicBot = new MusicBot(io, broadcastAllVoiceUsers);
     }
     
     // Method 2: Include voice users in stats
+    // Voice room format examples: "myroom-1234-general", "myroom-1234-gaming"
+    // Server ID format: "myroom-1234"
     for (const [voiceRoomId, users] of Object.entries(usersInVoice)) {
-        if (users.length === 0) continue;
+        if (!users || users.length === 0) continue;
         
-        // Voice room format: "serverId-channelName" -> extract "serverId"
-        const parts = voiceRoomId.split('-');
-        parts.pop(); // Remove last part (channel name)
-        const serverId = parts.join('-');
+        // Extract server ID by removing the last segment (channel name)
+        const lastDashIndex = voiceRoomId.lastIndexOf('-');
+        if (lastDashIndex === -1) continue;
         
+        const serverId = voiceRoomId.substring(0, lastDashIndex);
         if (!serverId) continue;
         
         if (!stats[serverId]) {
@@ -230,7 +232,10 @@ const musicBot = new MusicBot(io, broadcastAllVoiceUsers);
         }
         
         // Filter out music bot from display count
-        const voiceNames = users.filter(u => u.id !== "music-bot").map(u => u.username);
+        const voiceNames = users
+            .filter(u => u && u.id !== "music-bot" && u.username)
+            .map(u => u.username);
+        
         const allUsers = [...new Set([...stats[serverId].users, ...voiceNames])];
         stats[serverId].count = allUsers.length;
         stats[serverId].users = allUsers;
@@ -240,23 +245,30 @@ const musicBot = new MusicBot(io, broadcastAllVoiceUsers);
     try {
         const adapterRooms = io.sockets.adapter.rooms;
         for (const [roomId, socketSet] of adapterRooms.entries()) {
-            if (roomId.length > 30) continue; // Skip socket IDs
+            // Skip socket IDs (they are long random strings)
+            if (roomId.length > 30 || roomId.includes('=')) continue;
             
+            // Extract server ID if this is a voice channel room
             let targetRoomId = roomId;
-            if (roomId.includes('-general') || roomId.includes('-gaming')) {
-                const parts = roomId.split('-');
-                parts.pop();
-                targetRoomId = parts.join('-');
+            const lastDash = roomId.lastIndexOf('-');
+            if (lastDash > 0) {
+                const suffix = roomId.substring(lastDash + 1);
+                // Common voice channel suffixes
+                if (['general', 'gaming', 'music', 'chill'].includes(suffix.toLowerCase())) {
+                    targetRoomId = roomId.substring(0, lastDash);
+                }
             }
             
             const socketsInRoom = socketSet.size;
-            if (socketsInRoom > 0 && !stats[targetRoomId]) {
-                stats[targetRoomId] = {
-                    count: socketsInRoom,
-                    users: [`${socketsInRoom} online`]
-                };
-            } else if (socketsInRoom > 0 && stats[targetRoomId]) {
-                stats[targetRoomId].count = Math.max(stats[targetRoomId].count, socketsInRoom);
+            if (socketsInRoom > 0) {
+                if (!stats[targetRoomId]) {
+                    stats[targetRoomId] = {
+                        count: socketsInRoom,
+                        users: [`${socketsInRoom} online`]
+                    };
+                } else {
+                    stats[targetRoomId].count = Math.max(stats[targetRoomId].count, socketsInRoom);
+                }
             }
         }
     } catch (err) {

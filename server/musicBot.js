@@ -290,16 +290,26 @@ class MusicBot {
             
             // Process complete frames
             while (audioBuffer.length >= FRAME_SIZE) {
-                const frame = audioBuffer.slice(0, FRAME_SIZE);
+                // Extract exactly FRAME_SIZE bytes
+                const frameData = audioBuffer.slice(0, FRAME_SIZE);
                 audioBuffer = audioBuffer.slice(FRAME_SIZE);
                 
                 if (packetCount < 3) {
-                    console.log(`[FFmpeg] Sending frame: ${frame.length} bytes`);
+                    console.log(`[FFmpeg] Sending frame: ${frameData.length} bytes`);
                 }
                 packetCount++;
                 
                 try {
-                    const samples = new Int16Array(frame.buffer, frame.byteOffset, frame.length / 2);
+                    // CRITICAL: Create a NEW ArrayBuffer and copy data into it
+                    // Buffer.slice() returns a view, not a copy, so frame.buffer points to original
+                    const arrayBuffer = new ArrayBuffer(FRAME_SIZE);
+                    const view = new Uint8Array(arrayBuffer);
+                    for (let i = 0; i < FRAME_SIZE; i++) {
+                        view[i] = frameData[i];
+                    }
+                    
+                    const samples = new Int16Array(arrayBuffer);
+                    
                     this.audioSource.onData({
                         samples,
                         sampleRate: 48000,
