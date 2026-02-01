@@ -1,6 +1,6 @@
-import { nonstandard } from '@roamhq/wrtc';
+import pkg from '@roamhq/wrtc';
+const { nonstandard } = pkg;
 import Peer from 'simple-peer';
-import wrtc from '@roamhq/wrtc';
 import play from 'play-dl';
 import ffmpeg from 'ffmpeg-static';
 import { spawn } from 'child_process';
@@ -71,7 +71,7 @@ class MusicBot {
             // Initialize WebRTC Audio Source
             this.audioSource = new RTCAudioSource();
             const track = this.audioSource.createTrack();
-            const mediaStream = new wrtc.MediaStream([track]);
+            const mediaStream = new pkg.MediaStream([track]);
 
             // Start FFMPEG to convert stream to PCM
             this.startFFmpeg(streamInfo.stream, streamInfo.type);
@@ -171,7 +171,7 @@ class MusicBot {
 
         const peer = new Peer({
             initiator: true,
-            wrtc: wrtc,
+            wrtc: pkg,
             stream: this.currentStream || null
         });
 
@@ -213,7 +213,7 @@ class MusicBot {
             // Create new peer for this user (User initiated)
             const peer = new Peer({
                 initiator: false,
-                wrtc: wrtc,
+                wrtc: pkg,
                 stream: this.currentStream || null // Attach stream if playing
             });
 
