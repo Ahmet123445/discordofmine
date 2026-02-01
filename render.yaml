@@ -11,7 +11,7 @@ services:
       - key: JWT_SECRET
         generateValue: true
       - key: NODE_VERSION
-        value: 18.17.0
+        value: 20.10.0
 
   - type: web
     name: discordofmine-client
@@ -20,6 +20,8 @@ services:
     buildCommand: cd client && npm install && npm run build
     startCommand: cd client && npm start
     envVars:
+      - key: NODE_VERSION
+        value: 20.10.0
       - key: NEXT_PUBLIC_API_URL
         fromService:
           type: web
