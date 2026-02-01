@@ -171,19 +171,35 @@ const socketToTextRoom = {}; // { socketId: roomId } for text
       }
     }
     
-    // Method 2: Also include voice users in stats (merge with text users)
-    for (const [roomId, users] of Object.entries(usersInVoice)) {
-        if (users.length === 0) continue; // Skip empty voice rooms
+    // Method 2: Also include voice users in stats
+    // Voice room IDs are in format "serverId-channelId" (e.g., "gaming-1234-general")
+    // But we need to map them back to just "serverId" (e.g., "gaming-1234")
+    for (const [voiceRoomId, users] of Object.entries(usersInVoice)) {
+        if (users.length === 0) continue;
         
-        if (!stats[roomId]) {
-            stats[roomId] = { count: 0, users: [] };
+        // Extract the server ID from voice room ID
+        // Voice room format: "gaming-1234-general" or "gaming-1234-gaming"
+        // Server ID format: "gaming-1234"
+        // We need to find which server this voice room belongs to
+        const parts = voiceRoomId.split('-');
+        // Remove the last part (channel name like "general" or "gaming")
+        parts.pop();
+        const serverId = parts.join('-');
+        
+        if (!serverId) continue;
+        
+        if (!stats[serverId]) {
+            stats[serverId] = { count: 0, users: [] };
         }
+        
         // Voice users are objects {id, username}
         const voiceNames = users.map(u => u.username);
         // Merge unique
-        const allUsers = [...new Set([...stats[roomId].users, ...voiceNames])];
-        stats[roomId].count = allUsers.length;
-        stats[roomId].users = allUsers;
+        const allUsers = [...new Set([...stats[serverId].users, ...voiceNames])];
+        stats[serverId].count = allUsers.length;
+        stats[serverId].users = allUsers;
+        
+        console.log(`[getRoomStats] Voice room ${voiceRoomId} -> Server ${serverId}: ${voiceNames.length} users`);
     }
     
     // Method 3: Fallback - Also check Socket.io's internal room tracking
@@ -194,23 +210,32 @@ const socketToTextRoom = {}; // { socketId: roomId } for text
             // Skip socket IDs (they also appear as room names in Socket.io)
             if (roomId.length > 30) continue; // Socket IDs are long strings
             
+            // Check if this is a voice room (contains -general, -gaming, etc.)
+            // and extract the server ID
+            let targetRoomId = roomId;
+            if (roomId.includes('-general') || roomId.includes('-gaming')) {
+                const parts = roomId.split('-');
+                parts.pop();
+                targetRoomId = parts.join('-');
+            }
+            
             const socketsInRoom = socketSet.size;
-            if (socketsInRoom > 0 && !stats[roomId]) {
+            if (socketsInRoom > 0 && !stats[targetRoomId]) {
                 // Room has connected sockets but we don't have user info
-                // At least mark it as having users
-                stats[roomId] = {
+                stats[targetRoomId] = {
                     count: socketsInRoom,
                     users: [`${socketsInRoom} connected`]
                 };
-            } else if (socketsInRoom > 0 && stats[roomId]) {
+            } else if (socketsInRoom > 0 && stats[targetRoomId]) {
                 // Update count to be at least the socket count
-                stats[roomId].count = Math.max(stats[roomId].count, socketsInRoom);
+                stats[targetRoomId].count = Math.max(stats[targetRoomId].count, socketsInRoom);
             }
         }
     } catch (err) {
         console.log("[getRoomStats] Could not check adapter rooms:", err.message);
     }
     
+    console.log("[getRoomStats] Final stats:", JSON.stringify(stats));
     return stats;
   };
 
