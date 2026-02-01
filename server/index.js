@@ -157,25 +157,34 @@ const socketToRoom = {}; // { socketId: roomId }
   // Helper to get active users count per room for the rooms API
   const getRoomStats = () => {
     const stats = {};
+    
+    // Count text/presence users
     for (const [roomId, users] of Object.entries(usersInRoom)) {
-      const uniqueNames = [...new Set(Object.values(users))]; // unique usernames
-      stats[roomId] = {
-        count: uniqueNames.length,
-        users: uniqueNames
-      };
+      const userValues = Object.values(users);
+      if (userValues.length > 0) {
+        const uniqueNames = [...new Set(userValues)];
+        stats[roomId] = {
+          count: uniqueNames.length,
+          users: uniqueNames
+        };
+      }
     }
-    // Also include voice users in stats if not already counted (simple merge)
+    
+    // Also include voice users in stats (merge with text users)
     for (const [roomId, users] of Object.entries(usersInVoice)) {
+        if (users.length === 0) continue; // Skip empty voice rooms
+        
         if (!stats[roomId]) {
             stats[roomId] = { count: 0, users: [] };
         }
-        // Voice users might be different objects {id, username}
+        // Voice users are objects {id, username}
         const voiceNames = users.map(u => u.username);
         // Merge unique
         const allUsers = [...new Set([...stats[roomId].users, ...voiceNames])];
         stats[roomId].count = allUsers.length;
         stats[roomId].users = allUsers;
     }
+    
     return stats;
   };
 
@@ -187,25 +196,43 @@ const socketToRoom = {}; // { socketId: roomId }
           const now = Date.now();
           const TIMEOUT = 30 * 1000; // 30 seconds grace period for new rooms
 
+          // Debug: Log current state
+          console.log(`[Cleanup] Checking ${rooms.length} rooms. Active stats:`, JSON.stringify(stats));
+
           rooms.forEach(room => {
               const activeCount = stats[room.id]?.count || 0;
-              const createdAt = new Date(room.created_at).getTime(); // Assuming created_at is valid date string or timestamp
+              const createdAt = new Date(room.created_at).getTime();
               
-              // If room is empty AND older than TIMEOUT
-              // Note: SQLite CURRENT_TIMESTAMP is UTC string. node-sqlite3 returns string.
-              // Let's ensure date parsing is safe.
               let createdTime = createdAt;
               if (isNaN(createdTime)) {
-                  // Fallback if db format issue, assumes recently created if invalid to prevent instant delete
                   createdTime = now; 
               }
 
+              const ageSeconds = Math.floor((now - createdTime) / 1000);
+              
+              // Only delete if room is empty AND older than TIMEOUT
               if (activeCount === 0 && (now - createdTime > TIMEOUT)) {
-                  console.log(`Deleting empty room: ${room.name} (${room.id})`);
+                  console.log(`[Cleanup] Deleting empty room: ${room.name} (${room.id}), age: ${ageSeconds}s`);
                   db.prepare("DELETE FROM rooms WHERE id = ?").run(room.id);
-                  io.emit("room-deleted", room.id); // Notify clients to remove from UI immediately
+                  io.emit("room-deleted", room.id);
+              } else if (activeCount > 0) {
+                  console.log(`[Cleanup] Room ${room.name} has ${activeCount} active users - keeping`);
               }
           });
+          
+          // Clean up empty usersInRoom entries
+          for (const roomId in usersInRoom) {
+              if (Object.keys(usersInRoom[roomId]).length === 0) {
+                  delete usersInRoom[roomId];
+              }
+          }
+          
+          // Clean up empty usersInVoice entries
+          for (const roomId in usersInVoice) {
+              if (usersInVoice[roomId].length === 0) {
+                  delete usersInVoice[roomId];
+              }
+          }
       } catch (err) {
           console.error("Cleanup error:", err);
       }
@@ -224,7 +251,6 @@ const socketToRoom = {}; // { socketId: roomId }
     const username = typeof data === 'object' ? data.username : "Anonymous";
 
     socket.join(roomId);
-    console.log(`User ${socket.id} (${username}) joined text room ${roomId}`);
     
     // Track user in room
     if (!usersInRoom[roomId]) {
@@ -232,10 +258,8 @@ const socketToRoom = {}; // { socketId: roomId }
     }
     usersInRoom[roomId][socket.id] = username;
     
-    // Store mapping for disconnect
-    // Note: socketToRoom is used for voice, we might need another map or just reuse it carefully.
-    // Since a user might be in text room X and voice room Y, let's keep text tracking separate or assume they are the same.
-    // For now, let's just track it in usersInRoom.
+    const currentCount = Object.keys(usersInRoom[roomId]).length;
+    console.log(`[Join] User ${socket.id} (${username}) joined room ${roomId}. Total in room: ${currentCount}`);
   });
 
   socket.on("send-message", (data) => {
@@ -273,7 +297,9 @@ const socketToRoom = {}; // { socketId: roomId }
     // Remove from text rooms
     for (const roomId in usersInRoom) {
       if (usersInRoom[roomId][socket.id]) {
+        const username = usersInRoom[roomId][socket.id];
         delete usersInRoom[roomId][socket.id];
+        console.log(`[Disconnect] Removed ${username} from text room ${roomId}. Remaining: ${Object.keys(usersInRoom[roomId]).length}`);
       }
     }
 
@@ -281,13 +307,16 @@ const socketToRoom = {}; // { socketId: roomId }
     const roomID = socketToRoom[socket.id];
     let room = usersInVoice[roomID];
     if (room) {
+      const username = room.find(u => u.id === socket.id)?.username;
       room = room.filter(u => u.id !== socket.id);
       usersInVoice[roomID] = room;
+      console.log(`[Disconnect] Removed ${username} from voice room ${roomID}. Remaining: ${room.length}`);
       // Notify others to remove this peer
       socket.broadcast.to(roomID).emit('user-left-voice', socket.id);
       // Broadcast updated room list
       broadcastAllVoiceUsers();
     }
+    delete socketToRoom[socket.id];
   });
 
   socket.on("join-voice", (data) => {
