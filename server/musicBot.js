@@ -64,8 +64,11 @@ class MusicBot {
                 return;
             }
 
-            // Get Stream
-            const streamInfo = await play.stream(url);
+            // Get Stream with discord optimization
+            const streamInfo = await play.stream(url, {
+                discordPlayerCompatibility: true,
+                quality: 2 // High quality
+            });
             console.log(`[MusicBot] Stream Type: ${streamInfo.type}`);
 
             // Initialize WebRTC Audio Source
@@ -143,18 +146,28 @@ class MusicBot {
         inputStream.pipe(this.ffmpegProcess.stdin);
 
         // Read output from ffmpeg and feed to RTCAudioSource
+        let packetCount = 0;
         this.ffmpegProcess.stdout.on('data', (chunk) => {
             if (this.audioSource) {
+                // Log first few packets to confirm data is flowing
+                if (packetCount < 5) {
+                    console.log(`[FFmpeg] Received chunk size: ${chunk.length} bytes`);
+                }
+                packetCount++;
+                
                 const samples = new Int16Array(chunk.buffer, chunk.byteOffset, chunk.length / 2);
                 this.audioSource.onData({
                     samples,
-                    sampleRate: 48000
+                    sampleRate: 48000,
+                    bitsPerSample: 16,
+                    channelCount: 2 // Explicitly state stereo
                 });
             }
         });
 
         this.ffmpegProcess.stderr.on('data', (data) => {
-            // console.log(`[FFmpeg] ${data}`); // Uncomment for debugging
+             // Uncomment to see ffmpeg errors
+             // console.log(`[FFmpeg Error] ${data.toString()}`); 
         });
 
         this.ffmpegProcess.on('close', (code) => {
