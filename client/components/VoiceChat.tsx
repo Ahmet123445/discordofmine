@@ -40,8 +40,6 @@ export default function VoiceChat({ socket, roomId: serverId, user }: VoiceChatP
   const [hiddenStreams, setHiddenStreams] = useState<Set<string>>(new Set());
   const [isMuted, setIsMuted] = useState(false);
   const [isDeafened, setIsDeafened] = useState(false);
-  const [isSpeaking, setIsSpeaking] = useState(false);
-  const [speakingPeers, setSpeakingPeers] = useState<Set<string>>(new Set());
   const [mounted, setMounted] = useState(false);
   const [showAddRoom, setShowAddRoom] = useState(false);
   const [showKeybindSettings, setShowKeybindSettings] = useState(false);
@@ -67,8 +65,6 @@ export default function VoiceChat({ socket, roomId: serverId, user }: VoiceChatP
   const screenStream = useRef<MediaStream | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const mixedAudioStreamRef = useRef<MediaStream | null>(null);
-  const localAnalyserRef = useRef<AnalyserNode | null>(null);
-  const speakingCheckInterval = useRef<NodeJS.Timeout | null>(null);
 
   // Load Peer dynamically on mount
   useEffect(() => {
@@ -179,30 +175,6 @@ export default function VoiceChat({ socket, roomId: serverId, user }: VoiceChatP
         setIsMuted(false);
         localStream.current = stream;
 
-        // Setup local speaking detection
-        try {
-          const audioContext = new AudioContext();
-          const analyser = audioContext.createAnalyser();
-          const source = audioContext.createMediaStreamSource(stream);
-          source.connect(analyser);
-          analyser.fftSize = 512;
-          localAnalyserRef.current = analyser;
-          
-          const dataArray = new Uint8Array(analyser.frequencyBinCount);
-          
-          speakingCheckInterval.current = setInterval(() => {
-            if (localAnalyserRef.current && !isMuted) {
-              localAnalyserRef.current.getByteFrequencyData(dataArray);
-              const average = dataArray.reduce((a, b) => a + b, 0) / dataArray.length;
-              setIsSpeaking(average > 15); // Threshold for speaking
-            } else {
-              setIsSpeaking(false);
-            }
-          }, 100);
-        } catch (e) {
-          console.error("Failed to setup speaking detection:", e);
-        }
-
         // Join the namespaced room
         socket.emit("join-voice", { roomId: namespacedRoomId, user });
 
@@ -259,16 +231,7 @@ export default function VoiceChat({ socket, roomId: serverId, user }: VoiceChatP
     stopScreenShare();
     setInVoice(false);
     setCurrentInternalRoomId(null);
-    setIsSpeaking(false);
-    setSpeakingPeers(new Set());
     socket?.emit("leave-voice");
-
-    // Cleanup speaking detection
-    if (speakingCheckInterval.current) {
-      clearInterval(speakingCheckInterval.current);
-      speakingCheckInterval.current = null;
-    }
-    localAnalyserRef.current = null;
 
     localStream.current?.getTracks().forEach((track) => track.stop());
     localStream.current = null;
@@ -633,8 +596,8 @@ export default function VoiceChat({ socket, roomId: serverId, user }: VoiceChatP
               {isMyRoom && (
                 <div className="ml-6 mt-1 space-y-1">
                   {/* Show myself first */}
-                  <div className={`flex items-center gap-2 text-xs py-0.5 px-1 rounded transition-all ${isSpeaking && !isMuted ? "bg-green-500/10 text-green-300" : "text-zinc-300"}`}>
-                    <div className={`w-5 h-5 rounded-full bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center text-[10px] font-bold text-white ring-2 transition-all ${isSpeaking && !isMuted ? "ring-green-400" : "ring-transparent"}`}>
+                  <div className="flex items-center gap-2 text-xs py-0.5 px-1 rounded text-zinc-300">
+                    <div className="w-5 h-5 rounded-full bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center text-[10px] font-bold text-white">
                       {user.username[0].toUpperCase()}
                     </div>
                     <span className="flex-1 truncate">{user.username}</span>
@@ -645,16 +608,16 @@ export default function VoiceChat({ socket, roomId: serverId, user }: VoiceChatP
                           <line x1="1" y1="1" x2="23" y2="23"/><path d="M9 9v3a3 3 0 0 0 5.12 2.12M15 9.34V4a3 3 0 0 0-5.94-.6"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
                         </svg>
                       ) : (
-                        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={isSpeaking ? "text-green-400" : "text-zinc-500"}>
+                        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-zinc-500">
                           <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
                         </svg>
                       )}
                       {/* Headphone/Deafen status */}
-                      {isDeafened ? (
+                      {isDeafened && (
                         <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-red-500">
                           <line x1="1" y1="1" x2="23" y2="23"/><path d="M3 14v-4a9 9 0 0 1 9-9v0"/><path d="M21 14v-4a9 9 0 0 0-9-9"/>
                         </svg>
-                      ) : null}
+                      )}
                       {/* Screen share status */}
                       {isSharingScreen && (
                         <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-indigo-400">
@@ -669,18 +632,17 @@ export default function VoiceChat({ socket, roomId: serverId, user }: VoiceChatP
                     const streamItem = incomingStreams.find((s) => s.id === p.peerID);
                     const streamKey = streamItem ? `${streamItem.id}-${streamItem.stream.id}` : "";
                     const isHidden = hiddenStreams.has(streamKey);
-                    const isPeerSpeaking = speakingPeers.has(p.peerID);
                     
                     return (
-                      <div key={p.peerID} className={`flex items-center gap-2 text-xs py-0.5 px-1 rounded transition-all ${isPeerSpeaking ? "bg-green-500/10 text-green-300" : "text-zinc-400"}`}>
-                        <div className={`w-5 h-5 rounded-full bg-gradient-to-br from-emerald-500 to-teal-600 flex items-center justify-center text-[10px] font-bold text-white ring-2 transition-all ${isPeerSpeaking ? "ring-green-400" : "ring-transparent"}`}>
+                      <div key={p.peerID} className="flex items-center gap-2 text-xs py-0.5 px-1 rounded text-zinc-400">
+                        <div className="w-5 h-5 rounded-full bg-gradient-to-br from-emerald-500 to-teal-600 flex items-center justify-center text-[10px] font-bold text-white">
                           {(p.username || "?")[0].toUpperCase()}
                         </div>
                         <span className="flex-1 truncate">{p.username || `User ${p.peerID.substring(0, 4)}`}</span>
                         <div className="flex items-center gap-1.5">
-                          {/* Mic indicator - shows green when speaking, grey otherwise */}
-                          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={isPeerSpeaking ? "text-green-400" : "text-zinc-500"}>
-                            <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+                          {/* Connected indicator */}
+                          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-green-500">
+                            <path d="M3 18v-6a9 9 0 0 1 18 0v6"/><path d="M21 19a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3zM3 19a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H3z"/>
                           </svg>
                           {/* Screen share status - clickable to show/hide */}
                           {isScreenSharing && (
@@ -825,19 +787,7 @@ export default function VoiceChat({ socket, roomId: serverId, user }: VoiceChatP
         <AudioPlayer
           key={p.peerID}
           peer={p.peer}
-          peerId={p.peerID}
           volume={isDeafened ? 0 : p.volume / 100}
-          onSpeakingChange={(peerId, speaking) => {
-            setSpeakingPeers((prev) => {
-              const next = new Set(prev);
-              if (speaking) {
-                next.add(peerId);
-              } else {
-                next.delete(peerId);
-              }
-              return next;
-            });
-          }}
         />
       ))}
 
@@ -941,10 +891,8 @@ export default function VoiceChat({ socket, roomId: serverId, user }: VoiceChatP
   );
 }
 
-const AudioPlayer = ({ peer, volume = 1, peerId, onSpeakingChange }: { peer: any; volume?: number; peerId: string; onSpeakingChange?: (peerId: string, speaking: boolean) => void }) => {
+const AudioPlayer = ({ peer, volume = 1 }: { peer: any; volume?: number }) => {
   const ref = useRef<HTMLAudioElement>(null);
-  const analyserRef = useRef<AnalyserNode | null>(null);
-  const intervalRef = useRef<NodeJS.Timeout | null>(null);
 
   useEffect(() => {
     const handler = (stream: MediaStream) => {
@@ -954,30 +902,6 @@ const AudioPlayer = ({ peer, volume = 1, peerId, onSpeakingChange }: { peer: any
         if (ref.current) {
           ref.current.srcObject = audioStream;
           ref.current.play().catch(() => {});
-        }
-        
-        // Setup speaking detection for this peer
-        if (onSpeakingChange) {
-          try {
-            const audioContext = new AudioContext();
-            const analyser = audioContext.createAnalyser();
-            const source = audioContext.createMediaStreamSource(audioStream);
-            source.connect(analyser);
-            analyser.fftSize = 512;
-            analyserRef.current = analyser;
-            
-            const dataArray = new Uint8Array(analyser.frequencyBinCount);
-            
-            intervalRef.current = setInterval(() => {
-              if (analyserRef.current) {
-                analyserRef.current.getByteFrequencyData(dataArray);
-                const average = dataArray.reduce((a, b) => a + b, 0) / dataArray.length;
-                onSpeakingChange(peerId, average > 15);
-              }
-            }, 100);
-          } catch (e) {
-            console.error("Failed to setup peer speaking detection:", e);
-          }
         }
       }
     };
@@ -990,14 +914,8 @@ const AudioPlayer = ({ peer, volume = 1, peerId, onSpeakingChange }: { peer: any
     
     return () => {
       peer.off("stream", handler);
-      if (intervalRef.current) {
-        clearInterval(intervalRef.current);
-      }
-      if (onSpeakingChange) {
-        onSpeakingChange(peerId, false);
-      }
     };
-  }, [peer, peerId, onSpeakingChange]);
+  }, [peer]);
 
   useEffect(() => {
     if (ref.current) {
