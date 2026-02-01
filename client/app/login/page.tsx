@@ -4,7 +4,7 @@ import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import Hyperspeed from "@/components/Hyperspeed";
 
-export default function Home() {
+export default function LoginPage() {
   const router = useRouter();
   const [username, setUsername] = useState("");
   const [error, setError] = useState("");
