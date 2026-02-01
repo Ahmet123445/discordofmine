@@ -147,7 +147,8 @@ app.get("/", (req, res) => {
 
 const usersInVoice = {}; // { roomId: [{ id, username }] }
 const usersInRoom = {}; // { roomId: { socketId: username } } for text/presence
-const socketToRoom = {}; // { socketId: roomId }
+const socketToRoom = {}; // { socketId: roomId } for voice
+const socketToTextRoom = {}; // { socketId: roomId } for text
 
   // Broadcast all voice room users to all connected clients
   const broadcastAllVoiceUsers = () => {
@@ -158,7 +159,7 @@ const socketToRoom = {}; // { socketId: roomId }
   const getRoomStats = () => {
     const stats = {};
     
-    // Count text/presence users
+    // Method 1: Count text/presence users from usersInRoom
     for (const [roomId, users] of Object.entries(usersInRoom)) {
       const userValues = Object.values(users);
       if (userValues.length > 0) {
@@ -170,7 +171,7 @@ const socketToRoom = {}; // { socketId: roomId }
       }
     }
     
-    // Also include voice users in stats (merge with text users)
+    // Method 2: Also include voice users in stats (merge with text users)
     for (const [roomId, users] of Object.entries(usersInVoice)) {
         if (users.length === 0) continue; // Skip empty voice rooms
         
@@ -183,6 +184,31 @@ const socketToRoom = {}; // { socketId: roomId }
         const allUsers = [...new Set([...stats[roomId].users, ...voiceNames])];
         stats[roomId].count = allUsers.length;
         stats[roomId].users = allUsers;
+    }
+    
+    // Method 3: Fallback - Also check Socket.io's internal room tracking
+    // This helps if server restarted but clients are still connected
+    try {
+        const adapterRooms = io.sockets.adapter.rooms;
+        for (const [roomId, socketSet] of adapterRooms.entries()) {
+            // Skip socket IDs (they also appear as room names in Socket.io)
+            if (roomId.length > 30) continue; // Socket IDs are long strings
+            
+            const socketsInRoom = socketSet.size;
+            if (socketsInRoom > 0 && !stats[roomId]) {
+                // Room has connected sockets but we don't have user info
+                // At least mark it as having users
+                stats[roomId] = {
+                    count: socketsInRoom,
+                    users: [`${socketsInRoom} connected`]
+                };
+            } else if (socketsInRoom > 0 && stats[roomId]) {
+                // Update count to be at least the socket count
+                stats[roomId].count = Math.max(stats[roomId].count, socketsInRoom);
+            }
+        }
+    } catch (err) {
+        console.log("[getRoomStats] Could not check adapter rooms:", err.message);
     }
     
     return stats;
@@ -250,7 +276,18 @@ const socketToRoom = {}; // { socketId: roomId }
     const roomId = typeof data === 'object' ? data.roomId : data;
     const username = typeof data === 'object' ? data.username : "Anonymous";
 
+    // Leave previous text room if any
+    const previousRoom = socketToTextRoom[socket.id];
+    if (previousRoom && previousRoom !== roomId) {
+      if (usersInRoom[previousRoom] && usersInRoom[previousRoom][socket.id]) {
+        delete usersInRoom[previousRoom][socket.id];
+        console.log(`[Join] User ${socket.id} left previous room ${previousRoom}`);
+      }
+      socket.leave(previousRoom);
+    }
+
     socket.join(roomId);
+    socketToTextRoom[socket.id] = roomId;
     
     // Track user in room
     if (!usersInRoom[roomId]) {
@@ -294,14 +331,14 @@ const socketToRoom = {}; // { socketId: roomId }
   socket.on("disconnect", () => {
     console.log("User disconnected:", socket.id);
     
-    // Remove from text rooms
-    for (const roomId in usersInRoom) {
-      if (usersInRoom[roomId][socket.id]) {
-        const username = usersInRoom[roomId][socket.id];
-        delete usersInRoom[roomId][socket.id];
-        console.log(`[Disconnect] Removed ${username} from text room ${roomId}. Remaining: ${Object.keys(usersInRoom[roomId]).length}`);
-      }
+    // Remove from text room using socketToTextRoom mapping
+    const textRoomId = socketToTextRoom[socket.id];
+    if (textRoomId && usersInRoom[textRoomId] && usersInRoom[textRoomId][socket.id]) {
+      const username = usersInRoom[textRoomId][socket.id];
+      delete usersInRoom[textRoomId][socket.id];
+      console.log(`[Disconnect] Removed ${username} from text room ${textRoomId}. Remaining: ${Object.keys(usersInRoom[textRoomId]).length}`);
     }
+    delete socketToTextRoom[socket.id];
 
     // Remove user from voice list if they were in it
     const roomID = socketToRoom[socket.id];
