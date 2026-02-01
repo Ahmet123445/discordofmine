@@ -181,6 +181,9 @@ export default function VoiceChat({ socket, roomId: serverId, user }: VoiceChatP
         socket.on("all-voice-users", (users: { id: string; username: string }[]) => {
           const peersArr: { peerID: string; peer: any; volume: number; username: string }[] = [];
           users.forEach((u) => {
+            // Skip music-bot - it will initiate connection to us, not the other way around
+            if (u.id === "music-bot") return;
+            
             if (socket.id) {
               const peer = createPeer(u.id, socket.id, stream, user.username);
               peersRef.current.push({ peerID: u.id, peer });
