@@ -63,6 +63,8 @@ export default function VoiceChat({ socket, roomId: serverId, user }: VoiceChatP
   const peersRef = useRef<{ peerID: string; peer: any }[]>([]);
   const localStream = useRef<MediaStream | null>(null);
   const screenStream = useRef<MediaStream | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const mixedAudioStreamRef = useRef<MediaStream | null>(null);
 
   // Load Peer dynamically on mount
   useEffect(() => {
@@ -335,27 +337,73 @@ export default function VoiceChat({ socket, roomId: serverId, user }: VoiceChatP
         setIsSharingScreen(true);
         screenStream.current = stream;
 
-        // Sadece video track'ini peer'lara ekle (mikrofon zaten var)
         const videoTrack = stream.getVideoTracks()[0];
-        
-        peersRef.current.forEach((p) => {
-          // Video track ekle
-          if (videoTrack) {
-            p.peer.addTrack(videoTrack, stream);
-          }
-          // Ekran sesini de ekle (isteğe bağlı)
-          const screenAudioTrack = stream.getAudioTracks()[0];
-          if (screenAudioTrack) {
-            p.peer.addTrack(screenAudioTrack, stream);
-          }
-        });
+        const screenAudioTrack = stream.getAudioTracks()[0];
+        const micTrack = localStream.current?.getAudioTracks()[0];
 
-        // Mikrofon hala açık olduğundan emin ol
-        if (localStream.current && !isMuted) {
-          const micTrack = localStream.current.getAudioTracks()[0];
-          if (micTrack) {
+        // Ekran sesi varsa ve mikrofon varsa, ikisini birleştir
+        if (screenAudioTrack && micTrack && !isMuted) {
+          try {
+            // Web Audio API ile sesleri birleştir
+            const audioContext = new AudioContext();
+            audioContextRef.current = audioContext;
+            
+            const destination = audioContext.createMediaStreamDestination();
+            
+            // Mikrofon kaynağı
+            const micSource = audioContext.createMediaStreamSource(new MediaStream([micTrack]));
+            micSource.connect(destination);
+            
+            // Ekran ses kaynağı
+            const screenSource = audioContext.createMediaStreamSource(new MediaStream([screenAudioTrack]));
+            screenSource.connect(destination);
+            
+            // Birleştirilmiş ses stream'i
+            const mixedAudioTrack = destination.stream.getAudioTracks()[0];
+            mixedAudioStreamRef.current = destination.stream;
+            
+            peersRef.current.forEach((p) => {
+              // Video track ekle
+              if (videoTrack) {
+                p.peer.addTrack(videoTrack, stream);
+              }
+              
+              // Mevcut mikrofon track'ini bul ve birleştirilmiş ile değiştir
+              try {
+                const senders = p.peer._pc?.getSenders?.() || [];
+                const audioSender = senders.find((s: RTCRtpSender) => s.track?.kind === 'audio');
+                if (audioSender && mixedAudioTrack) {
+                  audioSender.replaceTrack(mixedAudioTrack);
+                }
+              } catch (e) {
+                console.error("Failed to replace audio track:", e);
+              }
+            });
+            
+            console.log("Screen share started with mixed audio (mic + screen)");
+          } catch (e) {
+            console.error("Failed to mix audio:", e);
+            // Fallback: sadece video ekle
+            peersRef.current.forEach((p) => {
+              if (videoTrack) {
+                p.peer.addTrack(videoTrack, stream);
+              }
+            });
+          }
+        } else {
+          // Ekran sesi yok veya mikrofon kapalı - sadece video ekle
+          peersRef.current.forEach((p) => {
+            if (videoTrack) {
+              p.peer.addTrack(videoTrack, stream);
+            }
+          });
+          
+          // Mikrofon hala açık olduğundan emin ol
+          if (localStream.current && !isMuted && micTrack) {
             micTrack.enabled = true;
           }
+          
+          console.log("Screen share started without screen audio");
         }
 
         if (videoTrack) {
@@ -372,11 +420,24 @@ export default function VoiceChat({ socket, roomId: serverId, user }: VoiceChatP
   const stopScreenShare = () => {
     if (!screenStream.current) return;
     
+    // Ekran stream'ini durdur
     screenStream.current.getTracks().forEach((track) => {
       track.stop();
       track.enabled = false;
     });
 
+    // Audio context'i kapat
+    if (audioContextRef.current) {
+      try {
+        audioContextRef.current.close();
+      } catch (e) {
+        console.error("Failed to close audio context:", e);
+      }
+      audioContextRef.current = null;
+    }
+    mixedAudioStreamRef.current = null;
+
+    // Video track'i kaldır ve mikrofon track'ine geri dön
     peersRef.current.forEach((p) => {
       try {
         const senders = p.peer._pc?.getSenders?.() || [];
@@ -385,7 +446,18 @@ export default function VoiceChat({ socket, roomId: serverId, user }: VoiceChatP
             p.peer._pc?.removeTrack?.(sender);
           }
         });
-      } catch (e) { }
+        
+        // Orijinal mikrofon track'ine geri dön
+        const micTrack = localStream.current?.getAudioTracks()[0];
+        if (micTrack) {
+          const audioSender = senders.find((s: RTCRtpSender) => s.track?.kind === 'audio');
+          if (audioSender) {
+            audioSender.replaceTrack(micTrack);
+          }
+        }
+      } catch (e) {
+        console.error("Failed to restore audio track:", e);
+      }
     });
 
     setIncomingStreams((prev) => {
@@ -400,6 +472,7 @@ export default function VoiceChat({ socket, roomId: serverId, user }: VoiceChatP
 
     screenStream.current = null;
     setIsSharingScreen(false);
+    console.log("Screen share stopped, restored original mic track");
   };
 
   const handleVolumeChange = (peerId: string, newVolume: number) => {
