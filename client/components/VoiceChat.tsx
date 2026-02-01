@@ -40,6 +40,7 @@ export default function VoiceChat({ socket, roomId: serverId, user }: VoiceChatP
   const [hiddenStreams, setHiddenStreams] = useState<Set<string>>(new Set());
   const [isMuted, setIsMuted] = useState(false);
   const [isDeafened, setIsDeafened] = useState(false);
+  const [isNoiseSuppressed, setIsNoiseSuppressed] = useState(false);
   const [mounted, setMounted] = useState(false);
   const [showAddRoom, setShowAddRoom] = useState(false);
   const [showKeybindSettings, setShowKeybindSettings] = useState(false);
@@ -65,6 +66,9 @@ export default function VoiceChat({ socket, roomId: serverId, user }: VoiceChatP
   const screenStream = useRef<MediaStream | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const mixedAudioStreamRef = useRef<MediaStream | null>(null);
+  const noiseSuppressionRef = useRef<any>(null);
+  const cleanStreamRef = useRef<MediaStream | null>(null);
+  const originalStreamRef = useRef<MediaStream | null>(null);
 
   // Load Peer dynamically on mount
   useEffect(() => {
@@ -154,6 +158,88 @@ export default function VoiceChat({ socket, roomId: serverId, user }: VoiceChatP
     setIsDeafened((prev) => !prev);
   };
 
+  // Toggle Noise Suppression using RNNoise
+  const toggleNoiseSuppression = async () => {
+    if (!localStream.current) return;
+    
+    const newState = !isNoiseSuppressed;
+    setIsNoiseSuppressed(newState);
+    
+    if (newState) {
+      // Enable noise suppression
+      try {
+        const { default: createRnnoiseProcessor } = await import("@jitsi/rnnoise-wasm");
+        
+        const audioContext = new AudioContext({ sampleRate: 48000 });
+        const source = audioContext.createMediaStreamSource(localStream.current);
+        
+        // Load RNNoise WASM module
+        const rnnoise = await createRnnoiseProcessor(audioContext);
+        noiseSuppressionRef.current = { audioContext, rnnoise, source };
+        
+        // Create destination for clean audio
+        const destination = audioContext.createMediaStreamDestination();
+        
+        // Connect: source -> rnnoise -> destination
+        source.connect(rnnoise);
+        rnnoise.connect(destination);
+        
+        cleanStreamRef.current = destination.stream;
+        originalStreamRef.current = localStream.current;
+        
+        // Replace track in all peers
+        const cleanTrack = destination.stream.getAudioTracks()[0];
+        peersRef.current.forEach((p) => {
+          try {
+            const senders = p.peer._pc?.getSenders?.() || [];
+            const audioSender = senders.find((s: RTCRtpSender) => s.track?.kind === "audio");
+            if (audioSender && cleanTrack) {
+              audioSender.replaceTrack(cleanTrack);
+            }
+          } catch (e) {
+            console.error("Failed to replace track with clean audio:", e);
+          }
+        });
+        
+        console.log("Noise suppression enabled");
+      } catch (err) {
+        console.error("Failed to enable noise suppression:", err);
+        setIsNoiseSuppressed(false);
+      }
+    } else {
+      // Disable noise suppression - restore original track
+      try {
+        if (originalStreamRef.current) {
+          const originalTrack = originalStreamRef.current.getAudioTracks()[0];
+          peersRef.current.forEach((p) => {
+            try {
+              const senders = p.peer._pc?.getSenders?.() || [];
+              const audioSender = senders.find((s: RTCRtpSender) => s.track?.kind === "audio");
+              if (audioSender && originalTrack) {
+                audioSender.replaceTrack(originalTrack);
+              }
+            } catch (e) {
+              console.error("Failed to restore original track:", e);
+            }
+          });
+        }
+        
+        // Cleanup
+        if (noiseSuppressionRef.current) {
+          noiseSuppressionRef.current.rnnoise?.disconnect();
+          noiseSuppressionRef.current.source?.disconnect();
+          noiseSuppressionRef.current.audioContext?.close();
+          noiseSuppressionRef.current = null;
+        }
+        cleanStreamRef.current = null;
+        
+        console.log("Noise suppression disabled");
+      } catch (err) {
+        console.error("Failed to disable noise suppression:", err);
+      }
+    }
+  };
+
   useEffect(() => {
     // Re-render audio players when deafen state changes
   }, [isDeafened]);
@@ -235,6 +321,19 @@ export default function VoiceChat({ socket, roomId: serverId, user }: VoiceChatP
     setInVoice(false);
     setCurrentInternalRoomId(null);
     socket?.emit("leave-voice");
+
+    // Cleanup noise suppression
+    if (noiseSuppressionRef.current) {
+      try {
+        noiseSuppressionRef.current.rnnoise?.disconnect();
+        noiseSuppressionRef.current.source?.disconnect();
+        noiseSuppressionRef.current.audioContext?.close();
+      } catch (e) {}
+      noiseSuppressionRef.current = null;
+    }
+    cleanStreamRef.current = null;
+    originalStreamRef.current = null;
+    setIsNoiseSuppressed(false);
 
     localStream.current?.getTracks().forEach((track) => track.stop());
     localStream.current = null;
@@ -739,6 +838,18 @@ export default function VoiceChat({ socket, roomId: serverId, user }: VoiceChatP
               ) : (
                 <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 18v-6a9 9 0 0 1 18 0v6"/><path d="M21 19a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3zM3 19a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H3z"/></svg>
               )}
+            </button>
+
+            <button
+              onClick={toggleNoiseSuppression}
+              className={`p-2.5 rounded-full transition-all ${isNoiseSuppressed ? "bg-green-600 text-white" : "bg-zinc-700 text-zinc-300 hover:text-white hover:bg-zinc-600"}`}
+              title="Gurultu Engelleme"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/>
+                <circle cx="12" cy="12" r="3"/>
+                {isNoiseSuppressed && <path d="M2 2l20 20" strokeWidth="3"/>}
+              </svg>
             </button>
 
             <button
