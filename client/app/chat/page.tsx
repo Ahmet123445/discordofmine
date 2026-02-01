@@ -213,11 +213,25 @@ function ChatContent() {
       setMessages((prev) => prev.filter((m) => m.id !== data.id));
     });
 
+    newSocket.on("user-updated", (data: { id: number; username: string }) => {
+      // Update username in messages
+      setMessages((prev) => prev.map((m) => 
+        m.user_id === data.id ? { ...m, username: data.username } : m
+      ));
+      
+      // Update current user if it's me (just in case)
+      if (user && user.id === data.id && user.username !== data.username) {
+        const updatedUser = { ...user, username: data.username };
+        setUser(updatedUser);
+        localStorage.setItem("user", JSON.stringify(updatedUser));
+      }
+    });
+
     return () => {
       setIsConnected(false);
       newSocket.disconnect();
     };
-  }, [router, roomId]);
+  }, [router, roomId, user]);
 
   const handleSendMessage = (e: React.FormEvent) => {
     e.preventDefault();
@@ -320,6 +334,12 @@ function ChatContent() {
         const updatedUser = { ...user, username: data.username };
         setUser(updatedUser);
         localStorage.setItem("user", JSON.stringify(updatedUser));
+        
+        // Notify socket server
+        if (socket && socket.connected) {
+          socket.emit("update-username", { username: data.username });
+        }
+        
         setShowSettings(false);
         setNewUsername("");
       } else {

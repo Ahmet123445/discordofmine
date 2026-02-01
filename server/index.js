@@ -50,6 +50,34 @@ app.put("/api/users/:id/username", (req, res) => {
     // Also update username in existing messages
     db.prepare("UPDATE messages SET username = ? WHERE user_id = ?").run(username.trim(), id);
     
+    // Broadcast user update
+    io.emit("user-updated", { id: Number(id), username: username.trim() });
+    
+    // Update usersInVoice if this user is in voice
+    // This is expensive O(N) but N is small (number of rooms)
+    let voiceUpdated = false;
+    for (const roomId in usersInVoice) {
+      const roomUsers = usersInVoice[roomId];
+      const userIndex = roomUsers.findIndex(u => u.id === id || Number(u.id) === Number(id)); // Check type safety
+      
+      if (userIndex !== -1) {
+        // We found the user, but we can't update 'socket.id' based on user.id easily here 
+        // because usersInVoice stores { id: socket.id, username }
+        // Wait, usersInVoice actually stores { id: peerID, username } where peerID IS socket.id usually?
+        // Let's check how join-voice works.
+        // join-voice: usersInVoice[roomId].push({ id: socket.id, username: user.username });
+        
+        // So we need to find the user by their DB ID, which is NOT stored in usersInVoice directly!
+        // usersInVoice only has socket ID.
+        // But we have socketToRoom map.
+        // We need to know which socket belongs to this user ID.
+        // We don't have a map for userId -> socketId.
+        
+        // Alternative: Client sends "update-voice-user" socket event after updating username.
+        // That is much cleaner.
+      }
+    }
+    
     res.json({ success: true, username: username.trim() });
   } catch (err) {
     console.error(err);
@@ -62,7 +90,13 @@ app.get("/api/messages", (req, res) => {
   try {
     const roomId = req.query.roomId || "general";
     const messages = db.prepare("SELECT * FROM messages WHERE room_id = ? ORDER BY created_at ASC LIMIT 50").all(roomId);
-    res.json(messages);
+    // Ensure user_id is always a number
+    const normalizedMessages = messages.map(msg => ({
+      ...msg,
+      id: Number(msg.id),
+      user_id: Number(msg.user_id)
+    }));
+    res.json(normalizedMessages);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Failed to fetch messages" });
@@ -454,9 +488,9 @@ const socketToTextRoom = {}; // { socketId: roomId } for text
       const info = stmt.run(content, user.id, user.username, type, roomId);
       
       const message = {
-        id: info.lastInsertRowid,
+        id: Number(info.lastInsertRowid),
         content,
-        user_id: user.id,
+        user_id: Number(user.id), // Ensure it's a number
         username: user.username,
         type,
         fileUrl,
@@ -467,10 +501,51 @@ const socketToTextRoom = {}; // { socketId: roomId } for text
 
       // Broadcast to specific room
       io.to(roomId).emit("message-received", message);
-      console.log(`Message sent to room ${roomId}: ${content}`);
+      console.log(`Message sent to room ${roomId} by user ${user.id}: ${content.substring(0, 50)}`);
       
     } catch (err) {
       console.error("Error saving message:", err);
+    }
+  });
+
+  socket.on("update-username", (data) => {
+    const { username } = data;
+    if (!username) return;
+    
+    // Update usersInRoom (Text)
+    const textRoomId = socketToTextRoom[socket.id];
+    if (textRoomId && usersInRoom[textRoomId] && usersInRoom[textRoomId][socket.id]) {
+      usersInRoom[textRoomId][socket.id] = username;
+    }
+    
+    // Update usersInVoice (Voice)
+    const voiceRoomId = socketToRoom[socket.id];
+    if (voiceRoomId && usersInVoice[voiceRoomId]) {
+      const userIndex = usersInVoice[voiceRoomId].findIndex(u => u.id === socket.id);
+      if (userIndex !== -1) {
+        usersInVoice[voiceRoomId][userIndex].username = username;
+        // Broadcast new voice list
+        io.emit("all-rooms-users", usersInVoice);
+      }
+    }
+  });
+
+  socket.on("voice-state-update", (data) => {
+    const { muted, deafened } = data;
+    const voiceRoomId = socketToRoom[socket.id];
+    
+    if (voiceRoomId && usersInVoice[voiceRoomId]) {
+      const userIndex = usersInVoice[voiceRoomId].findIndex(u => u.id === socket.id);
+      if (userIndex !== -1) {
+        // Update user state
+        usersInVoice[voiceRoomId][userIndex] = {
+          ...usersInVoice[voiceRoomId][userIndex],
+          isMuted: muted,
+          isDeafened: deafened
+        };
+        // Broadcast new voice list
+        io.emit("all-rooms-users", usersInVoice);
+      }
     }
   });
 
