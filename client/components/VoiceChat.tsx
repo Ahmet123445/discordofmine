@@ -327,22 +327,42 @@ export default function VoiceChat({ socket, roomId: serverId, user }: VoiceChatP
   };
 
   const startScreenShare = () => {
-    if (!PeerClass) return;
+    if (!PeerClass || !localStream.current) return;
+    
     navigator.mediaDevices
       .getDisplayMedia({ video: true, audio: true })
       .then((stream: MediaStream) => {
         setIsSharingScreen(true);
         screenStream.current = stream;
 
+        // Sadece video track'ini peer'lara ekle (mikrofon zaten var)
+        const videoTrack = stream.getVideoTracks()[0];
+        
         peersRef.current.forEach((p) => {
-          stream.getTracks().forEach((track) => {
-            p.peer.addTrack(track, stream);
-          });
+          // Video track ekle
+          if (videoTrack) {
+            p.peer.addTrack(videoTrack, stream);
+          }
+          // Ekran sesini de ekle (isteğe bağlı)
+          const screenAudioTrack = stream.getAudioTracks()[0];
+          if (screenAudioTrack) {
+            p.peer.addTrack(screenAudioTrack, stream);
+          }
         });
 
-        stream.getVideoTracks()[0].onended = () => {
-          stopScreenShare();
-        };
+        // Mikrofon hala açık olduğundan emin ol
+        if (localStream.current && !isMuted) {
+          const micTrack = localStream.current.getAudioTracks()[0];
+          if (micTrack) {
+            micTrack.enabled = true;
+          }
+        }
+
+        if (videoTrack) {
+          videoTrack.onended = () => {
+            stopScreenShare();
+          };
+        }
       })
       .catch((err: any) => {
         console.error("Failed to share screen", err);
