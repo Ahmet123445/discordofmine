@@ -12,20 +12,12 @@ export default function HomePage() {
   const [tipIndex, setTipIndex] = useState(0);
 
   const tips = [
-    "Ilk girisinde sunucuya baglanmak 30 sn surebilir",
-    "Ucretsiz sunucu olustur, arkadaslarinla konus",
-    "HD kalitesinde ekran paylasma ozelligi",
-    "Guvenli ve sifreli sesli iletisim",
-    "Sifresiz, hizli giris sistemi"
+    "İlk girişinizde sunucuya bağlanmak 30 sn sürebilir",
+    "Ücretsiz sunucu oluştur, arkadaşlarınla konuş",
+    "HD kalitesinde ekran paylaşma özelliği",
+    "Güvenli ve şifreli sesli iletişim",
+    "Şifresiz, hızlı giriş sistemi"
   ];
-
-  useEffect(() => {
-    // Check if already logged in
-    const token = localStorage.getItem("token");
-    if (token) {
-      router.push("/rooms");
-    }
-  }, [router]);
 
   useEffect(() => {
     const interval = setInterval(() => {
@@ -77,7 +69,7 @@ export default function HomePage() {
         <div className="text-center mb-10">
           {/* Main Title */}
           <h1 className="text-5xl md:text-6xl font-black tracking-tight text-white mb-4 drop-shadow-2xl">
-            Sesli Sohbet
+            Voice Chat
           </h1>
           
           {/* Tip Slider */}
@@ -115,7 +107,7 @@ export default function HomePage() {
             <input
               type="text"
               required
-              placeholder="Kullanici adi girin"
+              placeholder="Kullanıcı adı giriniz"
               className="relative w-full bg-black/80 text-white rounded-2xl px-6 py-4 text-center text-lg placeholder-zinc-500 focus:outline-none focus:ring-2 focus:ring-purple-500/50 transition-all border border-white/10 backdrop-blur-sm"
               value={username}
               onChange={(e) => setUsername(e.target.value)}
@@ -128,7 +120,7 @@ export default function HomePage() {
             className="group relative w-full py-4 bg-gradient-to-r from-purple-600 to-pink-600 text-white font-bold rounded-2xl hover:from-purple-500 hover:to-pink-500 transition-all disabled:opacity-50 disabled:cursor-not-allowed active:scale-[0.98] shadow-xl shadow-purple-500/25"
           >
             <span className="relative z-10 text-lg">
-              {loading ? "Baglaniyor..." : "Giris Yap"}
+              {loading ? "Bağlanıyor..." : "Connect"}
             </span>
           </button>
         </form>
@@ -140,9 +132,9 @@ export default function HomePage() {
               Sunucu aktif
             </span>
             <span>•</span>
-            <span>Sifre gerektirmez</span>
+            <span>Şifre gerektirmez</span>
             <span>•</span>
-            <span>Ucretsiz</span>
+            <span>Ücretsiz</span>
           </div>
           
           <p className="text-[11px] text-zinc-600">
