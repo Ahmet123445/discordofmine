@@ -11,7 +11,6 @@ const { RTCAudioSource } = nonstandard;
 let soundcloudReady = false;
 (async () => {
     try {
-        // Get a free SoundCloud client ID
         const clientId = await play.getFreeClientID();
         await play.setToken({
             soundcloud: {
@@ -22,7 +21,6 @@ let soundcloudReady = false;
         console.log("[MusicBot] SoundCloud initialized successfully");
     } catch (err) {
         console.error("[MusicBot] Failed to initialize SoundCloud:", err.message);
-        // Fallback: try YouTube search (works for search, not stream)
     }
 })();
 
@@ -30,7 +28,7 @@ class MusicBot {
     constructor(io, broadcastRoomUpdate) {
         this.io = io;
         this.broadcastRoomUpdate = broadcastRoomUpdate;
-        this.peers = {}; // { socketId: SimplePeer }
+        this.peers = {};
         this.currentRoom = null;
         this.audioSource = null;
         this.ffmpegProcess = null;
@@ -38,35 +36,35 @@ class MusicBot {
         this.botId = "music-bot";
         this.botName = "Music Bot";
         
-        // Queue system
         this.queue = [];
         this.currentTrack = null;
         this.textRoomId = null;
+        this.currentStream = null;
+        this.streamReady = false;
     }
 
-    // Join a voice room
     join(roomId) {
         if (this.currentRoom === roomId) return;
         if (this.currentRoom) this.leave();
-
         console.log(`[MusicBot] Joining room ${roomId}`);
         this.currentRoom = roomId;
     }
 
     leave() {
         if (!this.currentRoom) return;
-        
         console.log(`[MusicBot] Leaving room ${this.currentRoom}`);
         this.stopMusic();
         this.queue = [];
         this.currentTrack = null;
+        this.streamReady = false;
         
-        Object.values(this.peers).forEach(peer => peer.destroy());
+        Object.values(this.peers).forEach(peer => {
+            try { peer.destroy(); } catch(e) {}
+        });
         this.peers = {};
         this.currentRoom = null;
     }
 
-    // Send a message to the text channel
     sendMessage(content) {
         if (this.textRoomId) {
             this.io.to(this.textRoomId).emit("message-received", {
@@ -81,13 +79,11 @@ class MusicBot {
         }
     }
 
-    // Add to queue - tries SoundCloud first, then YouTube search with SoundCloud stream
     async addToQueue(query, textRoomId, voiceRoomId) {
         this.textRoomId = textRoomId;
         this.join(voiceRoomId);
         
         try {
-            // Extract search query from YouTube URL if needed
             let searchQuery = query;
             
             if (query.includes("youtube.com") || query.includes("youtu.be")) {
@@ -96,24 +92,20 @@ class MusicBot {
                     .replace(/[&?].*$/g, '')
                     .replace(/[-_]/g, ' ')
                     .trim();
-                    
-                if (searchQuery.length < 3) {
-                    searchQuery = query;
-                }
+                if (searchQuery.length < 3) searchQuery = query;
             }
 
             this.sendMessage(`Araniyor: ${searchQuery}`);
             
             let track = null;
             
-            // Method 1: Try SoundCloud search if ready
+            // Try SoundCloud
             if (soundcloudReady) {
                 try {
                     const scResults = await play.search(searchQuery, { 
                         source: { soundcloud: "tracks" }, 
                         limit: 1 
                     });
-                    
                     if (scResults.length > 0) {
                         track = {
                             title: scResults[0].name || scResults[0].title || searchQuery,
@@ -127,52 +119,30 @@ class MusicBot {
                 }
             }
             
-            // Method 2: Try YouTube search and find on SoundCloud by title
+            // Try YouTube search -> SoundCloud
             if (!track) {
                 try {
                     const ytResults = await play.search(searchQuery, { 
                         source: { youtube: "video" }, 
                         limit: 1 
                     });
-                    
                     if (ytResults.length > 0) {
                         const ytTitle = ytResults[0].title;
-                        console.log(`[MusicBot] Found on YouTube: ${ytTitle}, searching SoundCloud...`);
-                        
-                        // Now search SoundCloud with the exact title
+                        console.log(`[MusicBot] Found on YouTube: ${ytTitle}`);
                         const scResults = await play.search(ytTitle, { 
                             source: { soundcloud: "tracks" }, 
                             limit: 1 
                         });
-                        
                         if (scResults.length > 0) {
                             track = {
                                 title: scResults[0].name || scResults[0].title || ytTitle,
                                 url: scResults[0].url,
                                 duration: scResults[0].durationInSec || 0
                             };
-                            console.log(`[MusicBot] Found matching track on SoundCloud: ${track.title}`);
                         }
                     }
                 } catch (ytErr) {
-                    console.log("[MusicBot] YouTube search failed:", ytErr.message);
-                }
-            }
-            
-            // Method 3: Direct YouTube stream (might fail due to IP blocking)
-            if (!track && query.includes("youtube")) {
-                try {
-                    const validation = await play.validate(query);
-                    if (validation) {
-                        track = {
-                            title: searchQuery,
-                            url: query,
-                            duration: 0
-                        };
-                        console.log(`[MusicBot] Trying direct YouTube stream`);
-                    }
-                } catch (e) {
-                    console.log("[MusicBot] Direct YouTube validation failed");
+                    console.log("[MusicBot] YouTube fallback failed:", ytErr.message);
                 }
             }
             
@@ -193,54 +163,58 @@ class MusicBot {
             }
         } catch (err) {
             console.error("[MusicBot] Add to queue error:", err.message);
-            this.sendMessage(`Hata: Sarki bulunamadi veya kaynaga ulasilamadi.`);
+            this.sendMessage(`Hata: ${err.message}`);
             return false;
         }
     }
 
-    // Play next track in queue
     async playNext() {
         if (this.queue.length === 0) {
             this.sendMessage("Sira bitti.");
             this.isPlaying = false;
+            this.streamReady = false;
             return;
         }
 
         this.currentTrack = this.queue[0];
         
         try {
-            console.log(`[MusicBot] Playing: ${this.currentTrack.title} from ${this.currentTrack.url}`);
+            console.log(`[MusicBot] Playing: ${this.currentTrack.title}`);
+            console.log(`[MusicBot] URL: ${this.currentTrack.url}`);
             
-            // Get stream from SoundCloud
             const streamInfo = await play.stream(this.currentTrack.url, {
                 discordPlayerCompatibility: true
             });
-
             console.log(`[MusicBot] Stream type: ${streamInfo.type}`);
 
-            // Initialize WebRTC Audio Source
+            // Create audio source
             this.audioSource = new RTCAudioSource();
-            const track = this.audioSource.createTrack();
-            const mediaStream = new pkg.MediaStream([track]);
-            this.currentStream = mediaStream;
-
-            // Start FFMPEG
+            const audioTrack = this.audioSource.createTrack();
+            this.currentStream = new pkg.MediaStream([audioTrack]);
+            
+            // Start FFmpeg
             this.startFFmpeg(streamInfo.stream);
-
+            
             this.isPlaying = true;
+            this.streamReady = true;
+            
+            console.log(`[MusicBot] Stream ready, connecting to ${Object.keys(this.peers).length} peers`);
 
-            // Add stream to existing peers
-            Object.values(this.peers).forEach(peer => {
+            // Add stream to all existing peers
+            for (const [peerId, peer] of Object.entries(this.peers)) {
                 try {
-                    peer.addStream(this.currentStream);
+                    if (peer.connected || peer._pc) {
+                        peer.addStream(this.currentStream);
+                        console.log(`[MusicBot] Added stream to peer ${peerId}`);
+                    }
                 } catch (e) {
-                    console.error("Error adding stream to peer:", e.message);
+                    console.error(`[MusicBot] Error adding stream to ${peerId}:`, e.message);
                 }
-            });
+            }
 
         } catch (err) {
             console.error("[MusicBot] Play error:", err.message);
-            this.sendMessage(`Calinamadi: ${this.currentTrack.title}`);
+            this.sendMessage(`Calinamadi: ${this.currentTrack?.title || 'Unknown'}`);
             this.queue.shift();
             if (this.queue.length > 0) {
                 await this.playNext();
@@ -248,25 +222,19 @@ class MusicBot {
         }
     }
 
-    // Skip current track
     skip() {
         if (this.queue.length === 0) {
             this.sendMessage("Sirada sarki yok.");
             return;
         }
-        
         const skipped = this.queue.shift();
         this.sendMessage(`Atlandi: ${skipped.title}`);
         this.stopMusic();
         this.playNext();
     }
 
-    // Show queue
     getQueueList() {
-        if (this.queue.length === 0) {
-            return "Sira bos.";
-        }
-        
+        if (this.queue.length === 0) return "Sira bos.";
         let list = "Siradaki sarkilar:\n";
         this.queue.forEach((track, index) => {
             const prefix = index === 0 ? "(Simdi)" : `#${index + 1}`;
@@ -275,21 +243,22 @@ class MusicBot {
         return list;
     }
 
-    // Stop music
     stopMusic() {
+        console.log("[MusicBot] Stopping music");
         if (this.ffmpegProcess) {
-            this.ffmpegProcess.kill('SIGKILL');
+            try {
+                this.ffmpegProcess.kill('SIGKILL');
+            } catch(e) {}
             this.ffmpegProcess = null;
         }
         this.audioSource = null;
         this.isPlaying = false;
+        this.streamReady = false;
         
         if (this.currentStream) {
-            Object.values(this.peers).forEach(peer => {
-                try {
-                    peer.removeStream(this.currentStream);
-                } catch (e) {}
-            });
+            for (const peer of Object.values(this.peers)) {
+                try { peer.removeStream(this.currentStream); } catch (e) {}
+            }
             this.currentStream = null;
         }
     }
@@ -305,7 +274,6 @@ class MusicBot {
         ];
 
         this.ffmpegProcess = spawn(ffmpeg, args);
-
         inputStream.pipe(this.ffmpegProcess.stdin);
 
         let packetCount = 0;
@@ -327,7 +295,7 @@ class MusicBot {
         });
 
         this.ffmpegProcess.stderr.on('data', (data) => {
-            // Debug: console.log(`[FFmpeg] ${data}`);
+            // Debug only
         });
 
         this.ffmpegProcess.on('close', (code) => {
@@ -337,18 +305,26 @@ class MusicBot {
                 this.playNext();
             }
         });
+
+        this.ffmpegProcess.on('error', (err) => {
+            console.error(`[FFmpeg] Error: ${err.message}`);
+        });
     }
 
-    // Initiate connection to a user
     initiateConnection(userSocketId) {
-        if (!this.currentRoom || this.peers[userSocketId]) return;
+        if (!this.currentRoom) return;
+        if (this.peers[userSocketId]) {
+            console.log(`[MusicBot] Already connected to ${userSocketId}`);
+            return;
+        }
 
-        console.log(`[MusicBot] Connecting to ${userSocketId}`);
+        console.log(`[MusicBot] Initiating connection to ${userSocketId}, streamReady: ${this.streamReady}`);
 
         const peer = new Peer({
             initiator: true,
+            trickle: false,  // IMPORTANT: Match client settings
             wrtc: pkg,
-            stream: this.currentStream || null,
+            stream: this.streamReady ? this.currentStream : undefined,
             config: {
                 iceServers: [
                     { urls: 'stun:stun.l.google.com:19302' },
@@ -360,6 +336,7 @@ class MusicBot {
         this.peers[userSocketId] = peer;
 
         peer.on('signal', (signal) => {
+            console.log(`[MusicBot] Sending signal to ${userSocketId}`);
             this.io.to(userSocketId).emit('user-joined-voice', {
                 signal: signal,
                 callerID: this.botId,
@@ -369,29 +346,48 @@ class MusicBot {
 
         peer.on('connect', () => {
             console.log(`[MusicBot] Connected to ${userSocketId}`);
+            // If stream wasn't ready before, add it now
+            if (this.streamReady && this.currentStream) {
+                try {
+                    peer.addStream(this.currentStream);
+                    console.log(`[MusicBot] Added stream after connect to ${userSocketId}`);
+                } catch(e) {
+                    console.log(`[MusicBot] Stream already added or error: ${e.message}`);
+                }
+            }
         });
 
         peer.on('close', () => {
-            console.log(`[MusicBot] Disconnected from ${userSocketId}`);
+            console.log(`[MusicBot] Peer closed: ${userSocketId}`);
             delete this.peers[userSocketId];
         });
 
         peer.on('error', (err) => {
             console.error(`[MusicBot] Peer error ${userSocketId}:`, err.message);
+            delete this.peers[userSocketId];
         });
     }
 
-    // Handle incoming signal
     handleSignal(userSocketId, signal) {
-        if (!this.currentRoom) return;
+        if (!this.currentRoom) {
+            console.log(`[MusicBot] Ignoring signal, not in room`);
+            return;
+        }
+
+        console.log(`[MusicBot] Handling signal from ${userSocketId}`);
 
         if (this.peers[userSocketId]) {
-            this.peers[userSocketId].signal(signal);
+            try {
+                this.peers[userSocketId].signal(signal);
+            } catch(e) {
+                console.error(`[MusicBot] Signal error: ${e.message}`);
+            }
         } else {
             const peer = new Peer({
                 initiator: false,
+                trickle: false,  // IMPORTANT: Match client settings
                 wrtc: pkg,
-                stream: this.currentStream || null,
+                stream: this.streamReady ? this.currentStream : undefined,
                 config: {
                     iceServers: [
                         { urls: 'stun:stun.l.google.com:19302' },
@@ -403,6 +399,7 @@ class MusicBot {
             this.peers[userSocketId] = peer;
 
             peer.on('signal', (outSignal) => {
+                console.log(`[MusicBot] Returning signal to ${userSocketId}`);
                 this.io.to(userSocketId).emit('receiving-returned-signal', {
                     signal: outSignal,
                     id: this.botId
@@ -410,7 +407,12 @@ class MusicBot {
             });
 
             peer.on('connect', () => {
-                console.log(`[MusicBot] Connected to ${userSocketId}`);
+                console.log(`[MusicBot] Connected to ${userSocketId} (responder)`);
+                if (this.streamReady && this.currentStream) {
+                    try {
+                        peer.addStream(this.currentStream);
+                    } catch(e) {}
+                }
             });
 
             peer.on('close', () => {
@@ -419,15 +421,20 @@ class MusicBot {
 
             peer.on('error', (err) => {
                 console.error(`[MusicBot] Peer error:`, err.message);
+                delete this.peers[userSocketId];
             });
 
-            peer.signal(signal);
+            try {
+                peer.signal(signal);
+            } catch(e) {
+                console.error(`[MusicBot] Initial signal error: ${e.message}`);
+            }
         }
     }
 
     removePeer(socketId) {
         if (this.peers[socketId]) {
-            this.peers[socketId].destroy();
+            try { this.peers[socketId].destroy(); } catch(e) {}
             delete this.peers[socketId];
         }
     }

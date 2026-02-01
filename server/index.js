@@ -446,15 +446,31 @@ const musicBot = new MusicBot(io, broadcastAllVoiceUsers);
         musicBot.stopMusic();
         musicBot.leave();
         
+        // Remove bot from ALL voice rooms
         for (const rId in usersInVoice) {
+            const hadBot = usersInVoice[rId].some(u => u.id === "music-bot");
             usersInVoice[rId] = usersInVoice[rId].filter(u => u.id !== "music-bot");
-            io.to(rId).emit('user-left-voice', "music-bot");
+            
+            if (hadBot) {
+                // Notify users in that room that bot left
+                io.to(rId).emit('user-left-voice', "music-bot");
+            }
+            
+            // Clean up empty rooms
+            if (usersInVoice[rId].length === 0) {
+                delete usersInVoice[rId];
+            }
         }
+        
+        // Broadcast updated list to everyone
         broadcastAllVoiceUsers();
+        
+        // Also send to the text room
+        io.emit("all-rooms-users", usersInVoice);
 
         io.to(roomId).emit("message-received", {
             id: Date.now(),
-            content: "Muzik durduruldu.",
+            content: "Muzik durduruldu ve bot ayrildi.",
             user_id: 0,
             username: "Music Bot",
             type: "text",
