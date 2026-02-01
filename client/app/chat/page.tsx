@@ -33,6 +33,7 @@ function ChatContent() {
 
   const [user, setUser] = useState<{ id: number; username: string } | null>(null);
   const [socket, setSocket] = useState<Socket | null>(null);
+  const [isConnected, setIsConnected] = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
   const [inputValue, setInputValue] = useState("");
   const [isUploading, setIsUploading] = useState(false);
@@ -180,8 +181,19 @@ function ChatContent() {
 
     newSocket.on("connect", () => {
       console.log("Connected to socket server");
+      setIsConnected(true);
       // Join specific text room with username for tracking
       newSocket.emit("join-room", { roomId, username: parsedUser.username });
+    });
+
+    newSocket.on("disconnect", () => {
+      console.log("Disconnected from socket server");
+      setIsConnected(false);
+    });
+
+    newSocket.on("connect_error", (error) => {
+      console.error("Socket connection error:", error);
+      setIsConnected(false);
     });
 
     newSocket.on("message-received", (message: Message) => {
@@ -197,14 +209,33 @@ function ChatContent() {
     });
 
     return () => {
+      setIsConnected(false);
       newSocket.disconnect();
     };
   }, [router, roomId]);
 
   const handleSendMessage = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!inputValue.trim() || !socket || !user || !roomId) return;
+    if (!inputValue.trim()) return;
+    
+    if (!socket || !socket.connected) {
+      console.error("Cannot send message: socket not connected");
+      alert("Bağlantı kesildi, lütfen sayfayı yenileyin.");
+      return;
+    }
+    
+    if (!user) {
+      console.error("Cannot send message: user not set");
+      alert("Kullanıcı bilgisi bulunamadı, lütfen tekrar giriş yapın.");
+      return;
+    }
+    
+    if (!roomId) {
+      console.error("Cannot send message: roomId not set");
+      return;
+    }
 
+    console.log("Sending message:", { content: inputValue, user, roomId });
     socket.emit("send-message", {
       content: inputValue,
       user: user,
@@ -311,11 +342,13 @@ function ChatContent() {
                 <div className="w-9 h-9 rounded-full bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center font-bold text-white shadow-lg">
                   {user.username[0].toUpperCase()}
                 </div>
-                <div className="absolute -bottom-0.5 -right-0.5 w-3.5 h-3.5 bg-green-500 rounded-full border-2 border-zinc-900"></div>
+                <div className={`absolute -bottom-0.5 -right-0.5 w-3.5 h-3.5 rounded-full border-2 border-zinc-900 ${isConnected ? "bg-green-500" : "bg-yellow-500 animate-pulse"}`}></div>
               </div>
               <div>
                 <div className="text-sm font-medium text-white">{user.username}</div>
-                <div className="text-xs text-zinc-500">Online</div>
+                <div className={`text-xs ${isConnected ? "text-green-400" : "text-yellow-400"}`}>
+                  {isConnected ? "Online" : "Baglaniyor..."}
+                </div>
               </div>
             </div>
           </div>
@@ -456,26 +489,33 @@ function ChatContent() {
                 value={inputValue}
                 onChange={(e) => setInputValue(e.target.value)}
                 onKeyDown={(e) => {
-                  if (e.key === "Enter" && !e.shiftKey && inputValue.trim() && socket && user) {
+                  if (e.key === "Enter" && !e.shiftKey && inputValue.trim()) {
                     e.preventDefault();
-                    socket.emit("send-message", {
-                      content: inputValue,
-                      user: user,
-                      type: "text",
-                      roomId,
-                    });
-                    setInputValue("");
+                    handleSendMessage(e as unknown as React.FormEvent);
                   }
                 }}
-                placeholder={isUploading ? "Uploading..." : `Message #${roomDisplayName.toLowerCase()}`}
-                disabled={isUploading}
-                className="w-full bg-zinc-950 text-white rounded-xl px-4 py-3.5 focus:outline-none focus:ring-2 focus:ring-indigo-500/50 border border-zinc-800 placeholder-zinc-600 shadow-inner"
+                placeholder={
+                  !isConnected 
+                    ? "Bağlanıyor..." 
+                    : isUploading 
+                    ? "Uploading..." 
+                    : `Message #${roomDisplayName.toLowerCase()}`
+                }
+                disabled={isUploading || !isConnected}
+                className={`w-full bg-zinc-950 text-white rounded-xl px-4 py-3.5 focus:outline-none focus:ring-2 focus:ring-indigo-500/50 border placeholder-zinc-600 shadow-inner ${
+                  isConnected ? "border-zinc-800" : "border-yellow-600/50"
+                }`}
               />
+              {!isConnected && (
+                <div className="absolute right-3 top-1/2 -translate-y-1/2">
+                  <div className="w-2 h-2 bg-yellow-500 rounded-full animate-pulse" title="Bağlanıyor..."></div>
+                </div>
+              )}
             </div>
 
             <button
               type="submit"
-              disabled={!inputValue.trim() || isUploading}
+              disabled={!inputValue.trim() || isUploading || !isConnected}
               className="p-3 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed rounded-xl text-white transition-all shadow-lg shadow-indigo-500/20"
             >
               <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
