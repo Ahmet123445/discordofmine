@@ -7,6 +7,25 @@ import { spawn } from 'child_process';
 
 const { RTCAudioSource } = nonstandard;
 
+// Initialize SoundCloud client ID on startup
+let soundcloudReady = false;
+(async () => {
+    try {
+        // Get a free SoundCloud client ID
+        const clientId = await play.getFreeClientID();
+        await play.setToken({
+            soundcloud: {
+                client_id: clientId
+            }
+        });
+        soundcloudReady = true;
+        console.log("[MusicBot] SoundCloud initialized successfully");
+    } catch (err) {
+        console.error("[MusicBot] Failed to initialize SoundCloud:", err.message);
+        // Fallback: try YouTube search (works for search, not stream)
+    }
+})();
+
 class MusicBot {
     constructor(io, broadcastRoomUpdate) {
         this.io = io;
@@ -62,7 +81,7 @@ class MusicBot {
         }
     }
 
-    // Add to queue - ONLY uses SoundCloud (no YouTube API calls)
+    // Add to queue - tries SoundCloud first, then YouTube search with SoundCloud stream
     async addToQueue(query, textRoomId, voiceRoomId) {
         this.textRoomId = textRoomId;
         this.join(voiceRoomId);
@@ -72,7 +91,6 @@ class MusicBot {
             let searchQuery = query;
             
             if (query.includes("youtube.com") || query.includes("youtu.be")) {
-                // Just extract and clean for search - don't call YouTube API
                 searchQuery = query
                     .replace(/https?:\/\/(www\.)?(youtube\.com|youtu\.be|music\.youtube\.com)\/(watch\?v=|shorts\/)?/gi, '')
                     .replace(/[&?].*$/g, '')
@@ -80,28 +98,88 @@ class MusicBot {
                     .trim();
                     
                 if (searchQuery.length < 3) {
-                    searchQuery = query; // Use original if cleanup failed
+                    searchQuery = query;
                 }
             }
 
             this.sendMessage(`Araniyor: ${searchQuery}`);
             
-            // Search ONLY on SoundCloud (no IP blocking)
-            const results = await play.search(searchQuery, { 
-                source: { soundcloud: "tracks" }, 
-                limit: 1 
-            });
+            let track = null;
             
-            if (results.length === 0) {
+            // Method 1: Try SoundCloud search if ready
+            if (soundcloudReady) {
+                try {
+                    const scResults = await play.search(searchQuery, { 
+                        source: { soundcloud: "tracks" }, 
+                        limit: 1 
+                    });
+                    
+                    if (scResults.length > 0) {
+                        track = {
+                            title: scResults[0].name || scResults[0].title || searchQuery,
+                            url: scResults[0].url,
+                            duration: scResults[0].durationInSec || 0
+                        };
+                        console.log(`[MusicBot] Found on SoundCloud: ${track.title}`);
+                    }
+                } catch (scErr) {
+                    console.log("[MusicBot] SoundCloud search failed:", scErr.message);
+                }
+            }
+            
+            // Method 2: Try YouTube search and find on SoundCloud by title
+            if (!track) {
+                try {
+                    const ytResults = await play.search(searchQuery, { 
+                        source: { youtube: "video" }, 
+                        limit: 1 
+                    });
+                    
+                    if (ytResults.length > 0) {
+                        const ytTitle = ytResults[0].title;
+                        console.log(`[MusicBot] Found on YouTube: ${ytTitle}, searching SoundCloud...`);
+                        
+                        // Now search SoundCloud with the exact title
+                        const scResults = await play.search(ytTitle, { 
+                            source: { soundcloud: "tracks" }, 
+                            limit: 1 
+                        });
+                        
+                        if (scResults.length > 0) {
+                            track = {
+                                title: scResults[0].name || scResults[0].title || ytTitle,
+                                url: scResults[0].url,
+                                duration: scResults[0].durationInSec || 0
+                            };
+                            console.log(`[MusicBot] Found matching track on SoundCloud: ${track.title}`);
+                        }
+                    }
+                } catch (ytErr) {
+                    console.log("[MusicBot] YouTube search failed:", ytErr.message);
+                }
+            }
+            
+            // Method 3: Direct YouTube stream (might fail due to IP blocking)
+            if (!track && query.includes("youtube")) {
+                try {
+                    const validation = await play.validate(query);
+                    if (validation) {
+                        track = {
+                            title: searchQuery,
+                            url: query,
+                            duration: 0
+                        };
+                        console.log(`[MusicBot] Trying direct YouTube stream`);
+                    }
+                } catch (e) {
+                    console.log("[MusicBot] Direct YouTube validation failed");
+                }
+            }
+            
+            if (!track) {
                 this.sendMessage(`Bulunamadi: ${searchQuery}`);
                 return false;
             }
-
-            const track = {
-                title: results[0].name || results[0].title || searchQuery,
-                url: results[0].url,
-                duration: results[0].durationInSec || 0
-            };
 
             this.queue.push(track);
             

@@ -392,12 +392,18 @@ const musicBot = new MusicBot(io, broadcastAllVoiceUsers);
             for (const rId in usersInVoice) {
                 if (rId !== voiceRoomId) {
                     usersInVoice[rId] = usersInVoice[rId].filter(u => u.id !== "music-bot");
+                    io.to(rId).emit('user-left-voice', "music-bot");
                     if (usersInVoice[rId].length === 0) delete usersInVoice[rId];
                 }
             }
             usersInVoice[voiceRoomId].push({ id: "music-bot", username: "Music Bot" });
-            broadcastAllVoiceUsers();
         }
+        
+        // Immediately broadcast to ALL clients that bot joined
+        broadcastAllVoiceUsers();
+        
+        // Also send direct notification to the voice room
+        io.to(voiceRoomId).emit("all-rooms-users", usersInVoice);
 
         // Add to queue and play
         musicBot.addToQueue(query, roomId, voiceRoomId).then((success) => {
