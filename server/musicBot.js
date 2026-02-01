@@ -276,21 +276,39 @@ class MusicBot {
         this.ffmpegProcess = spawn(ffmpeg, args);
         inputStream.pipe(this.ffmpegProcess.stdin);
 
+        // Buffer system: RTCAudioSource expects exactly 1920 bytes (10ms of audio)
+        // 48000 Hz * 2 channels * 2 bytes per sample * 0.01 seconds = 1920 bytes
+        const FRAME_SIZE = 1920;
+        let audioBuffer = Buffer.alloc(0);
         let packetCount = 0;
+
         this.ffmpegProcess.stdout.on('data', (chunk) => {
-            if (this.audioSource) {
+            if (!this.audioSource) return;
+            
+            // Append new data to buffer
+            audioBuffer = Buffer.concat([audioBuffer, chunk]);
+            
+            // Process complete frames
+            while (audioBuffer.length >= FRAME_SIZE) {
+                const frame = audioBuffer.slice(0, FRAME_SIZE);
+                audioBuffer = audioBuffer.slice(FRAME_SIZE);
+                
                 if (packetCount < 3) {
-                    console.log(`[FFmpeg] Chunk: ${chunk.length} bytes`);
+                    console.log(`[FFmpeg] Sending frame: ${frame.length} bytes`);
                 }
                 packetCount++;
                 
-                const samples = new Int16Array(chunk.buffer, chunk.byteOffset, chunk.length / 2);
-                this.audioSource.onData({
-                    samples,
-                    sampleRate: 48000,
-                    bitsPerSample: 16,
-                    channelCount: 2
-                });
+                try {
+                    const samples = new Int16Array(frame.buffer, frame.byteOffset, frame.length / 2);
+                    this.audioSource.onData({
+                        samples,
+                        sampleRate: 48000,
+                        bitsPerSample: 16,
+                        channelCount: 2
+                    });
+                } catch (err) {
+                    console.error(`[FFmpeg] onData error: ${err.message}`);
+                }
             }
         });
 
