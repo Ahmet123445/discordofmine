@@ -50,36 +50,12 @@ app.put("/api/users/:id/username", (req, res) => {
     // Also update username in existing messages
     db.prepare("UPDATE messages SET username = ? WHERE user_id = ?").run(username.trim(), id);
     
-    // Broadcast user update
-    io.emit("user-updated", { id: Number(id), username: username.trim() });
-    
-    // Update usersInVoice if this user is in voice
-    // This is expensive O(N) but N is small (number of rooms)
-    let voiceUpdated = false;
-    for (const roomId in usersInVoice) {
-      const roomUsers = usersInVoice[roomId];
-      const userIndex = roomUsers.findIndex(u => u.id === id || Number(u.id) === Number(id)); // Check type safety
-      
-      if (userIndex !== -1) {
-        // We found the user, but we can't update 'socket.id' based on user.id easily here 
-        // because usersInVoice stores { id: socket.id, username }
-        // Wait, usersInVoice actually stores { id: peerID, username } where peerID IS socket.id usually?
-        // Let's check how join-voice works.
-        // join-voice: usersInVoice[roomId].push({ id: socket.id, username: user.username });
-        
-        // So we need to find the user by their DB ID, which is NOT stored in usersInVoice directly!
-        // usersInVoice only has socket ID.
-        // But we have socketToRoom map.
-        // We need to know which socket belongs to this user ID.
-        // We don't have a map for userId -> socketId.
-        
-        // Alternative: Client sends "update-voice-user" socket event after updating username.
-        // That is much cleaner.
-      }
-    }
-    
     res.json({ success: true, username: username.trim() });
   } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to update username" });
+  }
+});
     console.error(err);
     res.status(500).json({ error: "Failed to update username" });
   }
@@ -131,94 +107,6 @@ app.delete("/api/messages/:id", (req, res) => {
     res.status(500).json({ error: "Failed to delete message" });
   }
 });
-
-// Link Preview - Fetch metadata from URL
-app.get("/api/link-preview", async (req, res) => {
-  try {
-    const { url } = req.query;
-    if (!url) return res.status(400).json({ error: "URL required" });
-
-    // Validate URL
-    let parsedUrl;
-    try {
-      parsedUrl = new URL(url);
-    } catch {
-      return res.status(400).json({ error: "Invalid URL" });
-    }
-
-    // Fetch the page
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 5000);
-
-    const response = await fetch(url, {
-      headers: {
-        "User-Agent": "Mozilla/5.0 (compatible; LinkPreview/1.0)",
-        "Accept": "text/html"
-      },
-      signal: controller.signal
-    });
-    clearTimeout(timeout);
-
-    if (!response.ok) {
-      return res.status(404).json({ error: "Could not fetch URL" });
-    }
-
-    const html = await response.text();
-
-    // Parse meta tags
-    const getMetaContent = (name) => {
-      const ogMatch = html.match(new RegExp(`<meta[^>]*property=["']og:${name}["'][^>]*content=["']([^"']*)["']`, "i"));
-      if (ogMatch) return ogMatch[1];
-      
-      const ogMatch2 = html.match(new RegExp(`<meta[^>]*content=["']([^"']*)["'][^>]*property=["']og:${name}["']`, "i"));
-      if (ogMatch2) return ogMatch2[1];
-      
-      const twitterMatch = html.match(new RegExp(`<meta[^>]*name=["']twitter:${name}["'][^>]*content=["']([^"']*)["']`, "i"));
-      if (twitterMatch) return twitterMatch[1];
-      
-      return null;
-    };
-
-    const titleMatch = html.match(/<title[^>]*>([^<]*)<\/title>/i);
-    const title = getMetaContent("title") || (titleMatch ? titleMatch[1].trim() : null);
-    const description = getMetaContent("description") || 
-      html.match(/<meta[^>]*name=["']description["'][^>]*content=["']([^"']*)["']/i)?.[1];
-    const image = getMetaContent("image");
-    const siteName = getMetaContent("site_name") || parsedUrl.hostname.replace("www.", "");
-    
-    // Get favicon
-    const faviconMatch = html.match(/<link[^>]*rel=["'](?:icon|shortcut icon)["'][^>]*href=["']([^"']*)["']/i);
-    let favicon = faviconMatch ? faviconMatch[1] : null;
-    if (favicon && !favicon.startsWith("http")) {
-      favicon = new URL(favicon, parsedUrl.origin).href;
-    }
-
-    res.json({
-      title: title ? decodeHTMLEntities(title) : null,
-      description: description ? decodeHTMLEntities(description) : null,
-      image,
-      siteName,
-      favicon: favicon || `${parsedUrl.origin}/favicon.ico`
-    });
-
-  } catch (err) {
-    console.error("Link preview error:", err.message);
-    res.status(500).json({ error: "Failed to fetch preview" });
-  }
-});
-
-// Helper to decode HTML entities
-function decodeHTMLEntities(text) {
-  const entities = {
-    '&amp;': '&',
-    '&lt;': '<',
-    '&gt;': '>',
-    '&quot;': '"',
-    '&#39;': "'",
-    '&nbsp;': ' '
-  };
-  return text.replace(/&[^;]+;/g, (entity) => entities[entity] || entity);
-}
 
 // Get Rooms with stats
 app.get("/api/rooms", (req, res) => {
@@ -505,47 +393,6 @@ const socketToTextRoom = {}; // { socketId: roomId } for text
       
     } catch (err) {
       console.error("Error saving message:", err);
-    }
-  });
-
-  socket.on("update-username", (data) => {
-    const { username } = data;
-    if (!username) return;
-    
-    // Update usersInRoom (Text)
-    const textRoomId = socketToTextRoom[socket.id];
-    if (textRoomId && usersInRoom[textRoomId] && usersInRoom[textRoomId][socket.id]) {
-      usersInRoom[textRoomId][socket.id] = username;
-    }
-    
-    // Update usersInVoice (Voice)
-    const voiceRoomId = socketToRoom[socket.id];
-    if (voiceRoomId && usersInVoice[voiceRoomId]) {
-      const userIndex = usersInVoice[voiceRoomId].findIndex(u => u.id === socket.id);
-      if (userIndex !== -1) {
-        usersInVoice[voiceRoomId][userIndex].username = username;
-        // Broadcast new voice list
-        io.emit("all-rooms-users", usersInVoice);
-      }
-    }
-  });
-
-  socket.on("voice-state-update", (data) => {
-    const { muted, deafened } = data;
-    const voiceRoomId = socketToRoom[socket.id];
-    
-    if (voiceRoomId && usersInVoice[voiceRoomId]) {
-      const userIndex = usersInVoice[voiceRoomId].findIndex(u => u.id === socket.id);
-      if (userIndex !== -1) {
-        // Update user state
-        usersInVoice[voiceRoomId][userIndex] = {
-          ...usersInVoice[voiceRoomId][userIndex],
-          isMuted: muted,
-          isDeafened: deafened
-        };
-        // Broadcast new voice list
-        io.emit("all-rooms-users", usersInVoice);
-      }
     }
   });
 

@@ -58,7 +58,7 @@ export default function VoiceChat({ socket, roomId: serverId, user }: VoiceChatP
   ]);
   
   // Map of FULL room IDs (server-internal) to users
-  const [allRoomsUsers, setAllRoomsUsers] = useState<{ [roomId: string]: { id: string; username: string; isMuted?: boolean; isDeafened?: boolean }[] }>({});
+  const [allRoomsUsers, setAllRoomsUsers] = useState<{ [roomId: string]: { id: string; username: string }[] }>({});
 
   const peersRef = useRef<{ peerID: string; peer: any }[]>([]);
   const localStream = useRef<MediaStream | null>(null);
@@ -93,7 +93,7 @@ export default function VoiceChat({ socket, roomId: serverId, user }: VoiceChatP
   useEffect(() => {
     if (!socket) return;
     
-    const handleAllRoomsUsers = (data: { [roomId: string]: { id: string; username: string; isMuted?: boolean; isDeafened?: boolean }[] }) => {
+    const handleAllRoomsUsers = (data: { [roomId: string]: { id: string; username: string }[] }) => {
       setAllRoomsUsers(data);
     };
     
@@ -145,20 +145,13 @@ export default function VoiceChat({ socket, roomId: serverId, user }: VoiceChatP
       const audioTrack = localStream.current.getAudioTracks()[0];
       if (audioTrack) {
         audioTrack.enabled = !audioTrack.enabled;
-        const newMuted = !audioTrack.enabled;
-        setIsMuted(newMuted);
-        
-        // Notify server
-        socket?.emit("voice-state-update", { muted: newMuted, deafened: isDeafened });
+        setIsMuted(!audioTrack.enabled);
       }
     }
   };
 
   const toggleDeafen = () => {
-    const newDeafened = !isDeafened;
-    setIsDeafened(newDeafened);
-    // Notify server
-    socket?.emit("voice-state-update", { muted: isMuted, deafened: newDeafened });
+    setIsDeafened((prev) => !prev);
   };
 
   useEffect(() => {
@@ -640,12 +633,6 @@ export default function VoiceChat({ socket, roomId: serverId, user }: VoiceChatP
                     const streamKey = streamItem ? `${streamItem.id}-${streamItem.stream.id}` : "";
                     const isHidden = hiddenStreams.has(streamKey);
                     
-                    // Get user state from allRoomsUsers
-                    const roomUsers = allRoomsUsers[namespacedId] || [];
-                    const userInfo = roomUsers.find(u => u.id === p.peerID);
-                    const isPeerMuted = userInfo?.isMuted;
-                    const isPeerDeafened = userInfo?.isDeafened;
-                    
                     return (
                       <div key={p.peerID} className="flex items-center gap-2 text-xs py-0.5 px-1 rounded text-zinc-400">
                         <div className="w-5 h-5 rounded-full bg-gradient-to-br from-emerald-500 to-teal-600 flex items-center justify-center text-[10px] font-bold text-white">
@@ -653,25 +640,10 @@ export default function VoiceChat({ socket, roomId: serverId, user }: VoiceChatP
                         </div>
                         <span className="flex-1 truncate">{p.username || `User ${p.peerID.substring(0, 4)}`}</span>
                         <div className="flex items-center gap-1.5">
-                          {/* Mute status */}
-                          {isPeerMuted ? (
-                            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-red-500">
-                              <line x1="1" y1="1" x2="23" y2="23"/><path d="M9 9v3a3 3 0 0 0 5.12 2.12M15 9.34V4a3 3 0 0 0-5.94-.6"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
-                            </svg>
-                          ) : (
-                            /* Connected indicator (mic on) */
-                            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-green-500">
-                              <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
-                            </svg>
-                          )}
-                          
-                          {/* Deafen status */}
-                          {isPeerDeafened && (
-                            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-red-500">
-                              <line x1="1" y1="1" x2="23" y2="23"/><path d="M3 14v-4a9 9 0 0 1 9-9v0"/><path d="M21 14v-4a9 9 0 0 0-9-9"/>
-                            </svg>
-                          )}
-                          
+                          {/* Connected indicator */}
+                          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-green-500">
+                            <path d="M3 18v-6a9 9 0 0 1 18 0v6"/><path d="M21 19a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3zM3 19a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H3z"/>
+                          </svg>
                           {/* Screen share status - clickable to show/hide */}
                           {isScreenSharing && (
                             <button

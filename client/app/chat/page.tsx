@@ -4,7 +4,6 @@ import { useEffect, useState, useRef, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import io, { Socket } from "socket.io-client";
 import dynamic from "next/dynamic";
-import LinkPreview from "@/components/LinkPreview";
 
 const VoiceChat = dynamic(() => import("@/components/VoiceChat"), {
   ssr: false,
@@ -213,25 +212,11 @@ function ChatContent() {
       setMessages((prev) => prev.filter((m) => m.id !== data.id));
     });
 
-    newSocket.on("user-updated", (data: { id: number; username: string }) => {
-      // Update username in messages
-      setMessages((prev) => prev.map((m) => 
-        m.user_id === data.id ? { ...m, username: data.username } : m
-      ));
-      
-      // Update current user if it's me (just in case)
-      if (user && user.id === data.id && user.username !== data.username) {
-        const updatedUser = { ...user, username: data.username };
-        setUser(updatedUser);
-        localStorage.setItem("user", JSON.stringify(updatedUser));
-      }
-    });
-
     return () => {
       setIsConnected(false);
       newSocket.disconnect();
     };
-  }, [router, roomId, user]);
+  }, [router, roomId]);
 
   const handleSendMessage = (e: React.FormEvent) => {
     e.preventDefault();
@@ -334,12 +319,6 @@ function ChatContent() {
         const updatedUser = { ...user, username: data.username };
         setUser(updatedUser);
         localStorage.setItem("user", JSON.stringify(updatedUser));
-        
-        // Notify socket server
-        if (socket && socket.connected) {
-          socket.emit("update-username", { username: data.username });
-        }
-        
         setShowSettings(false);
         setNewUsername("");
       } else {
@@ -515,7 +494,7 @@ function ChatContent() {
                           </a>
                         )
                       ) : (
-                        <MessageContent content={msg.content} isMe={isMe} />
+                        msg.content
                       )}
                     </div>
                   </div>
@@ -673,48 +652,6 @@ function ChatContent() {
 }
 
 // Helper component to render message content with link detection
-function MessageContent({ content, isMe }: { content: string; isMe: boolean }) {
-  // URL regex pattern
-  const urlRegex = /(https?:\/\/[^\s]+)/g;
-  const urlMatches = content.match(urlRegex);
-  const urls: string[] = urlMatches ? urlMatches : [];
-  
-  if (urls.length === 0) {
-    return <>{content}</>;
-  }
-
-  // Split content by URLs and render with link previews
-  const parts = content.split(urlRegex);
-  
-  return (
-    <div>
-      {parts.map((part, index) => {
-        if (part && urls.includes(part)) {
-          return (
-            <span key={index}>
-              <a
-                href={part}
-                target="_blank"
-                rel="noopener noreferrer"
-                className={`underline hover:opacity-80 ${isMe ? "text-indigo-200" : "text-indigo-400"}`}
-              >
-                {part.length > 50 ? part.substring(0, 50) + "..." : part}
-              </a>
-            </span>
-          );
-        }
-        return <span key={index}>{part}</span>;
-      })}
-      {/* Show preview for first URL only */}
-      {urls.length > 0 && (
-        <div className={`mt-2 ${isMe ? "-mx-2" : ""}`}>
-          <LinkPreview url={urls[0]} />
-        </div>
-      )}
-    </div>
-  );
-}
-
 export default function ChatPage() {
   return (
     <Suspense fallback={<div className="flex h-screen items-center justify-center bg-zinc-950 text-white">Loading chat...</div>}>
