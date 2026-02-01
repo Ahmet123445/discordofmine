@@ -12,6 +12,7 @@ interface Room {
   onlineCount: number;
   users: string[];
   isPrivate: boolean;
+  created_at?: string;
 }
 
 export default function RoomsPage() {
@@ -32,12 +33,9 @@ export default function RoomsPage() {
   const [joinError, setJoinError] = useState("");
   const [isJoining, setIsJoining] = useState(false);
 
-  // Sound & Socket refs
-  const hoverAudioRef = useRef<HTMLAudioElement | null>(null);
   const socketRef = useRef<Socket | null>(null);
-  const lastEmitRef = useRef<number>(0);
 
-  // Initialize Sound and Socket
+  // Initialize Socket
   useEffect(() => {
     const token = localStorage.getItem("token");
     if (!token) {
@@ -45,24 +43,23 @@ export default function RoomsPage() {
       return;
     }
 
-    // Initialize Premium Sound (Base64)
-    // Short, crisp glass/mechanical tick
-    const tickSound = "data:audio/wav;base64,UklGRlIAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YRAAAAD///////8AAP//AAD//wAA//8AAP//AAD//wAA//8AAP//AAD//wAA//8AAP//";
-    hoverAudioRef.current = new Audio(tickSound);
-    hoverAudioRef.current.volume = 0.4;
-
-    // Initialize Socket for UI events
     const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001";
     
     // Create socket connection
     const newSocket = io(API_URL);
     socketRef.current = newSocket;
 
-    newSocket.on("play-ui-sound", (data: { type: string, userId: string }) => {
-        // Play sound if instructed by server (and not from self, though broadcast handles that)
-        if (data.type === 'hover') {
-            playLocalSound(0.25); // Slightly lower volume for others
-        }
+    // Real-time Room Updates
+    newSocket.on("room-created", (newRoom: Room) => {
+        setRooms(prev => {
+            // Prevent duplicates
+            if (prev.find(r => r.id === newRoom.id)) return prev;
+            return [...prev, { ...newRoom, onlineCount: 0, users: [] }];
+        });
+    });
+
+    newSocket.on("room-deleted", (roomId: string) => {
+        setRooms(prev => prev.filter(r => r.id !== roomId));
     });
 
     fetchRooms();
@@ -73,26 +70,6 @@ export default function RoomsPage() {
       newSocket.disconnect();
     };
   }, [router]);
-
-  const playLocalSound = (vol = 0.4) => {
-    if (hoverAudioRef.current) {
-      const clone = hoverAudioRef.current.cloneNode() as HTMLAudioElement;
-      clone.volume = vol;
-      clone.play().catch(() => {});
-    }
-  };
-
-  const handleHover = () => {
-    // 1. Play locally
-    playLocalSound();
-
-    // 2. Emit to others (Throttled 150ms)
-    const now = Date.now();
-    if (now - lastEmitRef.current > 150 && socketRef.current) {
-        lastEmitRef.current = now;
-        socketRef.current.emit("ui-interaction", { type: "hover" });
-    }
-  };
 
   const fetchRooms = async () => {
     try {
@@ -130,10 +107,12 @@ export default function RoomsPage() {
       });
 
       if (res.ok) {
-        await fetchRooms();
+        // Clear inputs and close modal
         setShowCreateModal(false);
         setNewRoomName("");
         setNewRoomPassword("");
+        // Trigger immediate fetch
+        await fetchRooms();
       }
     } catch (err) {
       console.error("Failed to create room", err);
@@ -235,7 +214,6 @@ export default function RoomsPage() {
               className="h-64 cursor-pointer"
               glowColor="255, 255, 255"
               onClick={() => setShowCreateModal(true)}
-              onMouseEnter={handleHover}
             >
               <div className="flex flex-col items-center justify-center h-full gap-4 relative z-10">
                 <div className="w-16 h-16 rounded-full bg-zinc-900 flex items-center justify-center border border-zinc-800">
@@ -252,7 +230,6 @@ export default function RoomsPage() {
                 className="h-64 cursor-pointer"
                 glowColor="99, 102, 241"
                 onClick={() => handleRoomClick(room)}
-                onMouseEnter={handleHover}
               >
                 <div className="flex flex-col h-full justify-between relative z-10">
                   <div>

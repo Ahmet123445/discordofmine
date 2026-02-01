@@ -251,6 +251,12 @@ export default function VoiceChat({ socket, roomId: serverId, user }: VoiceChatP
       initiator: true,
       trickle: false,
       stream,
+      config: {
+        iceServers: [
+          { urls: "stun:stun.l.google.com:19302" },
+          { urls: "stun:global.stun.twilio.com:3478" }
+        ]
+      }
     });
 
     peer.on("signal", (signal: any) => {
@@ -273,6 +279,12 @@ export default function VoiceChat({ socket, roomId: serverId, user }: VoiceChatP
       initiator: false,
       trickle: false,
       stream,
+      config: {
+        iceServers: [
+          { urls: "stun:stun.l.google.com:19302" },
+          { urls: "stun:global.stun.twilio.com:3478" }
+        ]
+      }
     });
 
     peer.on("signal", (signal: any) => {
@@ -812,7 +824,11 @@ const AudioPlayer = ({ peer, volume = 1 }: { peer: any; volume?: number }) => {
     }
   }, [volume]);
 
-  return <audio ref={ref} autoPlay playsInline style={{ display: "none" }} />;
+  return (
+    <div style={{ position: "absolute", top: 0, left: 0, width: 0, height: 0, overflow: "hidden", visibility: "hidden" }}>
+      <audio ref={ref} autoPlay playsInline controls={false} />
+    </div>
+  );
 };
 
 const VideoPlayer = ({ stream, name, onClose }: { stream: MediaStream; name: string; onClose: () => void }) => {
