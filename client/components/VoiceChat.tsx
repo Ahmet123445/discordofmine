@@ -66,9 +66,6 @@ export default function VoiceChat({ socket, roomId: serverId, user }: VoiceChatP
   const screenStream = useRef<MediaStream | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const mixedAudioStreamRef = useRef<MediaStream | null>(null);
-  const noiseSuppressionRef = useRef<any>(null);
-  const cleanStreamRef = useRef<MediaStream | null>(null);
-  const originalStreamRef = useRef<MediaStream | null>(null);
 
   // Load Peer dynamically on mount
   useEffect(() => {
@@ -158,85 +155,55 @@ export default function VoiceChat({ socket, roomId: serverId, user }: VoiceChatP
     setIsDeafened((prev) => !prev);
   };
 
-  // Toggle Noise Suppression using RNNoise
+  // Toggle Noise Suppression using browser's built-in API
   const toggleNoiseSuppression = async () => {
     if (!localStream.current) return;
     
     const newState = !isNoiseSuppressed;
-    setIsNoiseSuppressed(newState);
     
-    if (newState) {
-      // Enable noise suppression
-      try {
-        const { default: createRnnoiseProcessor } = await import("@jitsi/rnnoise-wasm");
-        
-        const audioContext = new AudioContext({ sampleRate: 48000 });
-        const source = audioContext.createMediaStreamSource(localStream.current);
-        
-        // Load RNNoise WASM module
-        const rnnoise = await createRnnoiseProcessor(audioContext);
-        noiseSuppressionRef.current = { audioContext, rnnoise, source };
-        
-        // Create destination for clean audio
-        const destination = audioContext.createMediaStreamDestination();
-        
-        // Connect: source -> rnnoise -> destination
-        source.connect(rnnoise);
-        rnnoise.connect(destination);
-        
-        cleanStreamRef.current = destination.stream;
-        originalStreamRef.current = localStream.current;
-        
-        // Replace track in all peers
-        const cleanTrack = destination.stream.getAudioTracks()[0];
-        peersRef.current.forEach((p) => {
-          try {
-            const senders = p.peer._pc?.getSenders?.() || [];
-            const audioSender = senders.find((s: RTCRtpSender) => s.track?.kind === "audio");
-            if (audioSender && cleanTrack) {
-              audioSender.replaceTrack(cleanTrack);
-            }
-          } catch (e) {
-            console.error("Failed to replace track with clean audio:", e);
+    try {
+      // Get new audio stream with noise suppression toggled
+      const newStream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          noiseSuppression: newState,
+          echoCancellation: true,
+          autoGainControl: true
+        },
+        video: false
+      });
+      
+      // Stop old audio tracks
+      const oldTracks = localStream.current.getAudioTracks();
+      oldTracks.forEach(track => track.stop());
+      
+      // Get the new audio track
+      const newTrack = newStream.getAudioTracks()[0];
+      
+      // Apply mute state to new track
+      if (isMuted) {
+        newTrack.enabled = false;
+      }
+      
+      // Replace track in local stream
+      localStream.current = newStream;
+      
+      // Replace track in all peers
+      peersRef.current.forEach((p) => {
+        try {
+          const senders = p.peer._pc?.getSenders?.() || [];
+          const audioSender = senders.find((s: RTCRtpSender) => s.track?.kind === "audio");
+          if (audioSender && newTrack) {
+            audioSender.replaceTrack(newTrack);
           }
-        });
-        
-        console.log("Noise suppression enabled");
-      } catch (err) {
-        console.error("Failed to enable noise suppression:", err);
-        setIsNoiseSuppressed(false);
-      }
-    } else {
-      // Disable noise suppression - restore original track
-      try {
-        if (originalStreamRef.current) {
-          const originalTrack = originalStreamRef.current.getAudioTracks()[0];
-          peersRef.current.forEach((p) => {
-            try {
-              const senders = p.peer._pc?.getSenders?.() || [];
-              const audioSender = senders.find((s: RTCRtpSender) => s.track?.kind === "audio");
-              if (audioSender && originalTrack) {
-                audioSender.replaceTrack(originalTrack);
-              }
-            } catch (e) {
-              console.error("Failed to restore original track:", e);
-            }
-          });
+        } catch (e) {
+          console.error("Failed to replace track:", e);
         }
-        
-        // Cleanup
-        if (noiseSuppressionRef.current) {
-          noiseSuppressionRef.current.rnnoise?.disconnect();
-          noiseSuppressionRef.current.source?.disconnect();
-          noiseSuppressionRef.current.audioContext?.close();
-          noiseSuppressionRef.current = null;
-        }
-        cleanStreamRef.current = null;
-        
-        console.log("Noise suppression disabled");
-      } catch (err) {
-        console.error("Failed to disable noise suppression:", err);
-      }
+      });
+      
+      setIsNoiseSuppressed(newState);
+      console.log(`Noise suppression ${newState ? "enabled" : "disabled"}`);
+    } catch (err) {
+      console.error("Failed to toggle noise suppression:", err);
     }
   };
 
@@ -322,17 +289,7 @@ export default function VoiceChat({ socket, roomId: serverId, user }: VoiceChatP
     setCurrentInternalRoomId(null);
     socket?.emit("leave-voice");
 
-    // Cleanup noise suppression
-    if (noiseSuppressionRef.current) {
-      try {
-        noiseSuppressionRef.current.rnnoise?.disconnect();
-        noiseSuppressionRef.current.source?.disconnect();
-        noiseSuppressionRef.current.audioContext?.close();
-      } catch (e) {}
-      noiseSuppressionRef.current = null;
-    }
-    cleanStreamRef.current = null;
-    originalStreamRef.current = null;
+    // Reset noise suppression state
     setIsNoiseSuppressed(false);
 
     localStream.current?.getTracks().forEach((track) => track.stop());
