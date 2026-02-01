@@ -940,6 +940,7 @@ const VideoPlayer = ({ stream, name, onClose }: { stream: MediaStream; name: str
   const [isDragging, setIsDragging] = useState(false);
   const [isResizing, setIsResizing] = useState(false);
   const [hasAudio, setHasAudio] = useState(false);
+  const [volume, setVolume] = useState(100);
   const dragRef = useRef({ startX: 0, startY: 0, initialX: 0, initialY: 0 });
   const resizeRef = useRef({ startX: 0, startY: 0, initialW: 0, initialH: 0 });
 
@@ -965,6 +966,13 @@ const VideoPlayer = ({ stream, name, onClose }: { stream: MediaStream; name: str
       }
     };
   }, [stream]);
+
+  // Update audio volume when volume state changes
+  useEffect(() => {
+    if (audioRef.current) {
+      audioRef.current.volume = volume / 100;
+    }
+  }, [volume]);
 
   const handleMouseDown = (e: React.MouseEvent) => {
     if ((e.target as HTMLElement).closest("button")) return;
@@ -1070,11 +1078,24 @@ const VideoPlayer = ({ stream, name, onClose }: { stream: MediaStream; name: str
       <video ref={ref} autoPlay playsInline muted className="w-full h-full object-contain bg-black" />
       <audio ref={audioRef} autoPlay playsInline style={{ display: "none" }} />
       
-      {/* Audio indicator */}
+      {/* Audio Volume Control */}
       {hasAudio && (
-        <div className="absolute bottom-2 left-2 bg-black/60 px-2 py-1 rounded text-[10px] text-green-400 flex items-center gap-1">
-          <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><path d="M3 9v6h4l5 5V4L7 9H3z"/></svg>
-          Ses Acik
+        <div className="absolute bottom-2 left-2 right-2 bg-black/70 px-3 py-2 rounded flex items-center gap-2 z-20">
+          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-green-400 flex-shrink-0">
+            <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>
+            <path d="M15.54 8.46a5 5 0 0 1 0 7.07"/>
+          </svg>
+          <input
+            type="range"
+            min="0"
+            max="100"
+            value={volume}
+            onChange={(e) => setVolume(parseInt(e.target.value))}
+            className="flex-1 h-1 bg-zinc-600 rounded-lg appearance-none cursor-pointer accent-green-500"
+            onClick={(e) => e.stopPropagation()}
+            onMouseDown={(e) => e.stopPropagation()}
+          />
+          <span className="text-[10px] text-zinc-300 w-8 text-right font-mono">{volume}%</span>
         </div>
       )}
       

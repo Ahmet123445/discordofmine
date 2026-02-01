@@ -17,7 +17,12 @@ class MusicBot {
         this.ffmpegProcess = null;
         this.isPlaying = false;
         this.botId = "music-bot";
-        this.botName = "🎵 Music Bot";
+        this.botName = "Music Bot";
+        
+        // Queue system
+        this.queue = [];
+        this.currentTrack = null;
+        this.textRoomId = null;
     }
 
     // Join a voice room
@@ -27,10 +32,6 @@ class MusicBot {
 
         console.log(`[MusicBot] Joining room ${roomId}`);
         this.currentRoom = roomId;
-
-        // Notify existing users in the room that bot has joined
-        // We don't add to the global usersInVoice array directly here, 
-        // the index.js will handle the "visual" list, but we need to trigger connection logic.
     }
 
     leave() {
@@ -38,110 +39,173 @@ class MusicBot {
         
         console.log(`[MusicBot] Leaving room ${this.currentRoom}`);
         this.stopMusic();
+        this.queue = [];
+        this.currentTrack = null;
         
-        // Destroy all peers
         Object.values(this.peers).forEach(peer => peer.destroy());
         this.peers = {};
         this.currentRoom = null;
     }
 
-    async play(url, roomId) {
-        if (!url) return;
+    // Send a message to the text channel
+    sendMessage(content) {
+        if (this.textRoomId) {
+            this.io.to(this.textRoomId).emit("message-received", {
+                id: Date.now(),
+                content: content,
+                user_id: 0,
+                username: "Music Bot",
+                type: "text",
+                room_id: this.textRoomId,
+                created_at: new Date().toISOString()
+            });
+        }
+    }
+
+    // Add to queue - ONLY uses SoundCloud (no YouTube API calls)
+    async addToQueue(query, textRoomId, voiceRoomId) {
+        this.textRoomId = textRoomId;
+        this.join(voiceRoomId);
         
-        // Ensure we are in the room
-        this.join(roomId);
-
-        // Stop current music if any
-        this.stopMusic();
-
         try {
-            console.log(`[MusicBot] Fetching info for: ${url}`);
+            // Extract search query from YouTube URL if needed
+            let searchQuery = query;
             
-            // Validate URL
-            let streamUrl = url;
-            let streamType = 'youtube'; // Default fallback
-
-            // Try to find on SoundCloud first to avoid YouTube "Sign in" blocking
-            try {
-                // If it is a URL, get the video info to find the title
-                if (url.startsWith("http")) {
-                   const yt_info = await play.video_info(url);
-                   const title = yt_info.video_details.title;
-                   console.log(`[MusicBot] Found title: ${title}. Searching on SoundCloud to bypass limits...`);
-                   
-                   const sc_results = await play.search(title, { source: { soundcloud: "tracks" }, limit: 1 });
-                   if (sc_results.length > 0) {
-                       streamUrl = sc_results[0].url;
-                       console.log(`[MusicBot] Playing from SoundCloud: ${sc_results[0].title}`);
-                   }
-                } else {
-                    // It is a search query
-                    const sc_results = await play.search(url, { source: { soundcloud: "tracks" }, limit: 1 });
-                    if (sc_results.length > 0) {
-                       streamUrl = sc_results[0].url;
-                       console.log(`[MusicBot] Playing from SoundCloud: ${sc_results[0].title}`);
-                    }
+            if (query.includes("youtube.com") || query.includes("youtu.be")) {
+                // Just extract and clean for search - don't call YouTube API
+                searchQuery = query
+                    .replace(/https?:\/\/(www\.)?(youtube\.com|youtu\.be|music\.youtube\.com)\/(watch\?v=|shorts\/)?/gi, '')
+                    .replace(/[&?].*$/g, '')
+                    .replace(/[-_]/g, ' ')
+                    .trim();
+                    
+                if (searchQuery.length < 3) {
+                    searchQuery = query; // Use original if cleanup failed
                 }
-            } catch (fallbackErr) {
-                console.log("[MusicBot] SoundCloud fallback failed, trying direct YouTube...", fallbackErr.message);
             }
 
-            // Get Stream
-            const streamInfo = await play.stream(streamUrl, {
-                discordPlayerCompatibility: true,
-                quality: 2
+            this.sendMessage(`Araniyor: ${searchQuery}`);
+            
+            // Search ONLY on SoundCloud (no IP blocking)
+            const results = await play.search(searchQuery, { 
+                source: { soundcloud: "tracks" }, 
+                limit: 1 
             });
-            console.log(`[MusicBot] Stream Type: ${streamInfo.type}`);
+            
+            if (results.length === 0) {
+                this.sendMessage(`Bulunamadi: ${searchQuery}`);
+                return false;
+            }
+
+            const track = {
+                title: results[0].name || results[0].title || searchQuery,
+                url: results[0].url,
+                duration: results[0].durationInSec || 0
+            };
+
+            this.queue.push(track);
+            
+            if (this.queue.length === 1 && !this.isPlaying) {
+                this.sendMessage(`Kanal: ${track.title}`);
+                await this.playNext();
+                return true;
+            } else {
+                this.sendMessage(`Siraya eklendi (#${this.queue.length}): ${track.title}`);
+                return true;
+            }
+        } catch (err) {
+            console.error("[MusicBot] Add to queue error:", err.message);
+            this.sendMessage(`Hata: Sarki bulunamadi veya kaynaga ulasilamadi.`);
+            return false;
+        }
+    }
+
+    // Play next track in queue
+    async playNext() {
+        if (this.queue.length === 0) {
+            this.sendMessage("Sira bitti.");
+            this.isPlaying = false;
+            return;
+        }
+
+        this.currentTrack = this.queue[0];
+        
+        try {
+            console.log(`[MusicBot] Playing: ${this.currentTrack.title} from ${this.currentTrack.url}`);
+            
+            // Get stream from SoundCloud
+            const streamInfo = await play.stream(this.currentTrack.url, {
+                discordPlayerCompatibility: true
+            });
+
+            console.log(`[MusicBot] Stream type: ${streamInfo.type}`);
 
             // Initialize WebRTC Audio Source
             this.audioSource = new RTCAudioSource();
             const track = this.audioSource.createTrack();
             const mediaStream = new pkg.MediaStream([track]);
+            this.currentStream = mediaStream;
 
-            // Start FFMPEG to convert stream to PCM
-            this.startFFmpeg(streamInfo.stream, streamInfo.type);
+            // Start FFMPEG
+            this.startFFmpeg(streamInfo.stream);
 
             this.isPlaying = true;
 
-            // Update all peers with the new stream
-            // Since we are server-side, we might need to renegotiate or just replace track.
-            // Simple-peer replaceTrack is tricky. 
-            // Strategy: The peers should already be established with this stream or we add it.
-            
-            // For simplicity in this MVP: 
-            // If peers exist, we might need to re-add stream. 
-            // But usually, we create the peers *after* we have the stream or add stream later.
-            
-            // Let's store the stream to use for new connections
-            this.currentStream = mediaStream;
-            
-            // If we already have peers, add this stream to them
+            // Add stream to existing peers
             Object.values(this.peers).forEach(peer => {
                 try {
                     peer.addStream(this.currentStream);
                 } catch (e) {
-                    console.error("Error adding stream to peer:", e);
+                    console.error("Error adding stream to peer:", e.message);
                 }
             });
 
         } catch (err) {
-            console.error("[MusicBot] Play Error:", err);
-            this.stopMusic();
+            console.error("[MusicBot] Play error:", err.message);
+            this.sendMessage(`Calinamadi: ${this.currentTrack.title}`);
+            this.queue.shift();
+            if (this.queue.length > 0) {
+                await this.playNext();
+            }
         }
     }
 
+    // Skip current track
+    skip() {
+        if (this.queue.length === 0) {
+            this.sendMessage("Sirada sarki yok.");
+            return;
+        }
+        
+        const skipped = this.queue.shift();
+        this.sendMessage(`Atlandi: ${skipped.title}`);
+        this.stopMusic();
+        this.playNext();
+    }
+
+    // Show queue
+    getQueueList() {
+        if (this.queue.length === 0) {
+            return "Sira bos.";
+        }
+        
+        let list = "Siradaki sarkilar:\n";
+        this.queue.forEach((track, index) => {
+            const prefix = index === 0 ? "(Simdi)" : `#${index + 1}`;
+            list += `${prefix} ${track.title}\n`;
+        });
+        return list;
+    }
+
+    // Stop music
     stopMusic() {
         if (this.ffmpegProcess) {
-            this.ffmpegProcess.kill();
+            this.ffmpegProcess.kill('SIGKILL');
             this.ffmpegProcess = null;
         }
-        if (this.audioSource) {
-            // No direct stop method, but we stop feeding data
-            this.audioSource = null;
-        }
+        this.audioSource = null;
         this.isPlaying = false;
         
-        // Remove stream from peers
         if (this.currentStream) {
             Object.values(this.peers).forEach(peer => {
                 try {
@@ -152,28 +216,25 @@ class MusicBot {
         }
     }
 
-    startFFmpeg(inputStream, inputType) {
+    startFFmpeg(inputStream) {
         const args = [
-            '-re', // Read input at native frame rate (crucial for streaming)
-            '-i', '-', // Input from pipe
-            '-f', 's16le', // Output format: signed 16-bit little-endian PCM
-            '-ar', '48000', // Sample rate: 48k (WebRTC standard)
-            '-ac', '2', // Channels: Stereo
-            '-' // Output to pipe
+            '-re',
+            '-i', '-',
+            '-f', 's16le',
+            '-ar', '48000',
+            '-ac', '2',
+            '-'
         ];
 
         this.ffmpegProcess = spawn(ffmpeg, args);
 
-        // Pipe input stream to ffmpeg
         inputStream.pipe(this.ffmpegProcess.stdin);
 
-        // Read output from ffmpeg and feed to RTCAudioSource
         let packetCount = 0;
         this.ffmpegProcess.stdout.on('data', (chunk) => {
             if (this.audioSource) {
-                // Log first few packets to confirm data is flowing
-                if (packetCount < 5) {
-                    console.log(`[FFmpeg] Received chunk size: ${chunk.length} bytes`);
+                if (packetCount < 3) {
+                    console.log(`[FFmpeg] Chunk: ${chunk.length} bytes`);
                 }
                 packetCount++;
                 
@@ -182,38 +243,45 @@ class MusicBot {
                     samples,
                     sampleRate: 48000,
                     bitsPerSample: 16,
-                    channelCount: 2 // Explicitly state stereo
+                    channelCount: 2
                 });
             }
         });
 
         this.ffmpegProcess.stderr.on('data', (data) => {
-             // Uncomment to see ffmpeg errors
-             // console.log(`[FFmpeg Error] ${data.toString()}`); 
+            // Debug: console.log(`[FFmpeg] ${data}`);
         });
 
         this.ffmpegProcess.on('close', (code) => {
-            console.log(`[FFmpeg] Exited with code ${code}`);
-            this.isPlaying = false;
+            console.log(`[FFmpeg] Exited: ${code}`);
+            if (this.isPlaying && this.queue.length > 0) {
+                this.queue.shift();
+                this.playNext();
+            }
         });
     }
 
-    // Initiate connection to a specific user (Bot acts as joiner)
+    // Initiate connection to a user
     initiateConnection(userSocketId) {
         if (!this.currentRoom || this.peers[userSocketId]) return;
 
-        console.log(`[MusicBot] Initiating connection to ${userSocketId}`);
+        console.log(`[MusicBot] Connecting to ${userSocketId}`);
 
         const peer = new Peer({
             initiator: true,
             wrtc: pkg,
-            stream: this.currentStream || null
+            stream: this.currentStream || null,
+            config: {
+                iceServers: [
+                    { urls: 'stun:stun.l.google.com:19302' },
+                    { urls: 'stun:global.stun.twilio.com:3478' }
+                ]
+            }
         });
 
         this.peers[userSocketId] = peer;
 
         peer.on('signal', (signal) => {
-            // Send signal to user as if bot joined
             this.io.to(userSocketId).emit('user-joined-voice', {
                 signal: signal,
                 callerID: this.botId,
@@ -222,7 +290,7 @@ class MusicBot {
         });
 
         peer.on('connect', () => {
-            console.log(`[MusicBot] Connected to ${userSocketId} (Initiator)`);
+            console.log(`[MusicBot] Connected to ${userSocketId}`);
         });
 
         peer.on('close', () => {
@@ -231,34 +299,35 @@ class MusicBot {
         });
 
         peer.on('error', (err) => {
-            console.error(`[MusicBot] Peer Error with ${userSocketId}:`, err.message);
+            console.error(`[MusicBot] Peer error ${userSocketId}:`, err.message);
         });
     }
 
-    // Handle incoming WebRTC signal from a user
+    // Handle incoming signal
     handleSignal(userSocketId, signal) {
         if (!this.currentRoom) return;
 
-        console.log(`[MusicBot] Handling signal from ${userSocketId}`);
-
         if (this.peers[userSocketId]) {
-            // Peer already exists, just signal
             this.peers[userSocketId].signal(signal);
         } else {
-            // Create new peer for this user (User initiated)
             const peer = new Peer({
                 initiator: false,
                 wrtc: pkg,
-                stream: this.currentStream || null // Attach stream if playing
+                stream: this.currentStream || null,
+                config: {
+                    iceServers: [
+                        { urls: 'stun:stun.l.google.com:19302' },
+                        { urls: 'stun:global.stun.twilio.com:3478' }
+                    ]
+                }
             });
 
             this.peers[userSocketId] = peer;
 
             peer.on('signal', (outSignal) => {
-                // Return signal to user
                 this.io.to(userSocketId).emit('receiving-returned-signal', {
                     signal: outSignal,
-                    id: this.botId // Client sees this as "bot ID"
+                    id: this.botId
                 });
             });
 
@@ -267,15 +336,13 @@ class MusicBot {
             });
 
             peer.on('close', () => {
-                console.log(`[MusicBot] Disconnected from ${userSocketId}`);
                 delete this.peers[userSocketId];
             });
 
             peer.on('error', (err) => {
-                console.error(`[MusicBot] Peer Error with ${userSocketId}:`, err.message);
+                console.error(`[MusicBot] Peer error:`, err.message);
             });
 
-            // Signal immediately
             peer.signal(signal);
         }
     }
