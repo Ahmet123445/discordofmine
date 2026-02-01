@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
-import GlowBackground from "@/components/GlowBackground";
+import LiquidEther from "@/components/LiquidEther";
 
 export default function HomePage() {
   const router = useRouter();
@@ -59,11 +59,29 @@ export default function HomePage() {
 
   return (
     <div className="relative w-full min-h-screen bg-black overflow-hidden flex items-center justify-center font-sans">
-      {/* Animated Glow Background */}
-      <GlowBackground />
+      {/* Liquid Ether Background */}
+      <div className="fixed inset-0 z-0">
+        <LiquidEther
+          colors={['#5227FF', '#FF9FFC', '#B19EEF']}
+          mouseForce={20}
+          cursorSize={100}
+          isViscous={true}
+          viscous={30}
+          iterationsViscous={32}
+          iterationsPoisson={32}
+          resolution={0.5}
+          isBounce={false}
+          autoDemo={true}
+          autoSpeed={0.5}
+          autoIntensity={2.2}
+          takeoverDuration={0.25}
+          autoResumeDelay={3000}
+          autoRampDuration={0.6}
+        />
+      </div>
       
       {/* Dark overlay for better readability */}
-      <div className="absolute inset-0 bg-black/40 pointer-events-none" />
+      <div className="absolute inset-0 bg-black/40 pointer-events-none z-0" />
 
       <div className="relative z-10 w-full max-w-md p-8">
         <div className="text-center mb-10">
