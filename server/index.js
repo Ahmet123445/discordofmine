@@ -312,7 +312,6 @@ const broadcastAllVoiceUsers = () => {
  * This function is the SINGLE SOURCE OF TRUTH for user counts
  */
 const getRealUserCount = (roomId) => {
-  let count = 0;
   const usernames = new Set();
   
   // Source 1: Text/presence users (usersInRoom)
@@ -321,7 +320,6 @@ const getRealUserCount = (roomId) => {
     textUsers.forEach(name => {
       if (name) usernames.add(name);
     });
-    count += textUsers.length;
   }
   
   // Source 2: Voice users - check all voice channels for this server
@@ -335,22 +333,27 @@ const getRealUserCount = (roomId) => {
       users.forEach(u => {
         if (u && u.username) usernames.add(u.username);
       });
-      count += users.length;
     }
   }
   
+  let socketCount = 0;
   // Source 3: Socket.io adapter rooms (fallback)
   try {
     const adapterRoom = io.sockets.adapter.rooms.get(roomId);
     if (adapterRoom && adapterRoom.size > 0) {
-      count = Math.max(count, adapterRoom.size);
+      socketCount = adapterRoom.size;
     }
   } catch (e) {
     // Ignore adapter errors
   }
   
+  // Fix: Don't sum up counts. Use unique usernames count.
+  // Only fallback to socketCount if for some reason we have sockets but no usernames (rare edge case)
+  const uniqueUserCount = usernames.size;
+  const finalCount = uniqueUserCount > 0 ? uniqueUserCount : socketCount;
+  
   return {
-    count: Math.max(count, usernames.size),
+    count: finalCount,
     users: Array.from(usernames)
   };
 };
