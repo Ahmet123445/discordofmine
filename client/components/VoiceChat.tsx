@@ -330,7 +330,15 @@ export default function VoiceChat({ socket, roomId: serverId, user }: VoiceChatP
     if (!PeerClass || !localStream.current) return;
     
     navigator.mediaDevices
-      .getDisplayMedia({ video: true, audio: true })
+      .getDisplayMedia({ 
+        video: {
+          width: { ideal: 1920 },
+          height: { ideal: 1080 },
+          frameRate: { ideal: 60 },
+          cursor: "always"
+        } as MediaTrackConstraints, 
+        audio: true 
+      })
       .then((stream: MediaStream) => {
         setIsSharingScreen(true);
         screenStream.current = stream;
