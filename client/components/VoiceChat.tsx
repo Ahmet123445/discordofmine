@@ -1,8 +1,9 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import { Socket } from "socket.io-client";
 import { createPortal } from "react-dom";
+import { NoiseSuppressor } from "@/lib/noiseSuppression";
 
 interface VoiceChatProps {
   socket: Socket | null;
@@ -63,6 +64,10 @@ export default function VoiceChat({ socket, roomId: serverId, user }: VoiceChatP
   const peersRef = useRef<{ peerID: string; peer: any }[]>([]);
   const localStream = useRef<MediaStream | null>(null);
   const screenStream = useRef<MediaStream | null>(null);
+  const rawMicStream = useRef<MediaStream | null>(null); // Original mic stream before noise suppression
+  const noiseSuppressorRef = useRef<NoiseSuppressor | null>(null);
+  const [noiseSuppressionEnabled, setNoiseSuppressionEnabled] = useState(true); // Default ON
+  const [noiseSuppressionLoading, setNoiseSuppressionLoading] = useState(false);
 
   // Load Peer dynamically on mount
   useEffect(() => {
@@ -76,6 +81,12 @@ export default function VoiceChat({ socket, roomId: serverId, user }: VoiceChatP
       } catch (e) {
         console.error("Failed to parse saved keybinds");
       }
+    }
+    
+    // Load noise suppression preference from localStorage (default: true)
+    const savedNoiseSuppression = localStorage.getItem("noiseSuppressionEnabled");
+    if (savedNoiseSuppression !== null) {
+      setNoiseSuppressionEnabled(savedNoiseSuppression === "true");
     }
     
     import("simple-peer")
@@ -158,6 +169,12 @@ export default function VoiceChat({ socket, roomId: serverId, user }: VoiceChatP
       if (localStream.current) {
         localStream.current.getTracks().forEach((t) => t.stop());
       }
+      if (rawMicStream.current) {
+        rawMicStream.current.getTracks().forEach((t) => t.stop());
+      }
+      if (noiseSuppressorRef.current) {
+        noiseSuppressorRef.current.destroy();
+      }
     };
   }, []);
 
@@ -175,11 +192,100 @@ export default function VoiceChat({ socket, roomId: serverId, user }: VoiceChatP
     setIsDeafened((prev) => !prev);
   };
 
+  // Toggle noise suppression on/off
+  const toggleNoiseSuppression = useCallback(async () => {
+    const newValue = !noiseSuppressionEnabled;
+    setNoiseSuppressionEnabled(newValue);
+    localStorage.setItem("noiseSuppressionEnabled", String(newValue));
+    
+    // If currently in voice, we need to recreate the audio stream
+    if (inVoice && rawMicStream.current && currentInternalRoomId) {
+      try {
+        setNoiseSuppressionLoading(true);
+        
+        if (newValue) {
+          // Enable noise suppression
+          console.log("[VoiceChat] Enabling noise suppression...");
+          const suppressor = new NoiseSuppressor();
+          await suppressor.init();
+          const denoisedStream = await suppressor.createDenoisedStream(rawMicStream.current);
+          
+          // Clean up old suppressor if any
+          if (noiseSuppressorRef.current) {
+            noiseSuppressorRef.current.destroy();
+          }
+          noiseSuppressorRef.current = suppressor;
+          
+          // Update local stream
+          localStream.current = denoisedStream;
+          
+          // Replace audio track in all peers
+          const newAudioTrack = denoisedStream.getAudioTracks()[0];
+          if (newAudioTrack) {
+            peersRef.current.forEach((p) => {
+              try {
+                const senders = p.peer._pc?.getSenders?.() || [];
+                senders.forEach((sender: RTCRtpSender) => {
+                  if (sender.track?.kind === 'audio') {
+                    sender.replaceTrack(newAudioTrack).catch((e: Error) => {
+                      console.error("[VoiceChat] Failed to replace track:", e);
+                    });
+                  }
+                });
+              } catch (e) {
+                console.error("[VoiceChat] Failed to update peer track:", e);
+              }
+            });
+          }
+          
+          console.log("[VoiceChat] Noise suppression enabled");
+        } else {
+          // Disable noise suppression
+          console.log("[VoiceChat] Disabling noise suppression...");
+          
+          // Stop suppressor
+          if (noiseSuppressorRef.current) {
+            noiseSuppressorRef.current.destroy();
+            noiseSuppressorRef.current = null;
+          }
+          
+          // Use raw mic stream directly
+          localStream.current = rawMicStream.current;
+          
+          // Replace audio track in all peers
+          const rawAudioTrack = rawMicStream.current.getAudioTracks()[0];
+          if (rawAudioTrack) {
+            peersRef.current.forEach((p) => {
+              try {
+                const senders = p.peer._pc?.getSenders?.() || [];
+                senders.forEach((sender: RTCRtpSender) => {
+                  if (sender.track?.kind === 'audio') {
+                    sender.replaceTrack(rawAudioTrack).catch((e: Error) => {
+                      console.error("[VoiceChat] Failed to replace track:", e);
+                    });
+                  }
+                });
+              } catch (e) {
+                console.error("[VoiceChat] Failed to update peer track:", e);
+              }
+            });
+          }
+          
+          console.log("[VoiceChat] Noise suppression disabled");
+        }
+      } catch (error) {
+        console.error("[VoiceChat] Failed to toggle noise suppression:", error);
+      } finally {
+        setNoiseSuppressionLoading(false);
+      }
+    }
+  }, [noiseSuppressionEnabled, inVoice, currentInternalRoomId]);
+
   useEffect(() => {
     // Re-render audio players when deafen state changes
   }, [isDeafened]);
 
-  const joinVoice = (internalRoomId: string) => {
+  const joinVoice = async (internalRoomId: string) => {
     if (!socket || !PeerClass) return;
     if (inVoice) leaveVoice(); 
 
@@ -188,61 +294,98 @@ export default function VoiceChat({ socket, roomId: serverId, user }: VoiceChatP
     // Construct the unique Namespaced Room ID
     const namespacedRoomId = `${serverId}-${internalRoomId}`;
 
-    navigator.mediaDevices
-      .getUserMedia({ video: false, audio: true })
-      .then((stream) => {
-        setInVoice(true);
-        setCurrentInternalRoomId(internalRoomId);
-        setIsMuted(false);
-        localStream.current = stream;
-
-        // Join the namespaced room
-        socket.emit("join-voice", { roomId: namespacedRoomId, user });
-
-        socket.on("all-voice-users", (users: { id: string; username: string }[]) => {
-          const peersArr: { peerID: string; peer: any; volume: number; username: string }[] = [];
-          users.forEach((u) => {
-            if (socket.id) {
-              const peer = createPeer(u.id, socket.id, stream, user.username);
-              peersRef.current.push({ peerID: u.id, peer });
-              peersArr.push({ peerID: u.id, peer, volume: 100, username: u.username });
-            }
-          });
-          setPeers(peersArr);
-        });
-
-        socket.on("user-joined-voice", (payload: { signal: any; callerID: string; username: string }) => {
-          const existing = peersRef.current.find((p) => p.peerID === payload.callerID);
-          if (existing) {
-            existing.peer.signal(payload.signal);
-            return;
-          }
-          playJoinSound();
-          const peer = addPeer(payload.signal, payload.callerID, stream);
-          peersRef.current.push({ peerID: payload.callerID, peer });
-          setPeers((prev) => [...prev, { peerID: payload.callerID, peer, volume: 100, username: payload.username }]);
-        });
-
-        socket.on("receiving-returned-signal", (payload: { signal: any; id: string }) => {
-          const item = peersRef.current.find((p) => p.peerID === payload.id);
-          if (item) {
-            item.peer.signal(payload.signal);
-          }
-        });
-
-        socket.on("user-left-voice", (id: string) => {
-          playLeaveSound();
-          const peerObj = peersRef.current.find((p) => p.peerID === id);
-          if (peerObj) peerObj.peer.destroy();
-          peersRef.current = peersRef.current.filter((p) => p.peerID !== id);
-          setPeers((prev) => prev.filter((p) => p.peerID !== id));
-          setIncomingStreams((prev) => prev.filter((s) => s.id !== id));
-        });
-      })
-      .catch((err) => {
-        console.error("Failed to get local stream", err);
-        alert("Could not access microphone. Please allow permissions.");
+    try {
+      // Get microphone stream with optimal settings for RNNoise
+      const micStream = await navigator.mediaDevices.getUserMedia({ 
+        video: false, 
+        audio: {
+          sampleRate: 48000, // RNNoise requirement
+          channelCount: 1,   // Mono
+          echoCancellation: true,
+          noiseSuppression: false, // We use RNNoise instead
+          autoGainControl: true
+        } 
       });
+
+      // Store raw mic stream for later use
+      rawMicStream.current = micStream;
+      
+      let streamToUse = micStream;
+      
+      // Apply noise suppression if enabled
+      if (noiseSuppressionEnabled) {
+        try {
+          setNoiseSuppressionLoading(true);
+          console.log("[VoiceChat] Initializing noise suppression...");
+          
+          const suppressor = new NoiseSuppressor();
+          await suppressor.init();
+          const denoisedStream = await suppressor.createDenoisedStream(micStream);
+          
+          noiseSuppressorRef.current = suppressor;
+          streamToUse = denoisedStream;
+          
+          console.log("[VoiceChat] Noise suppression active");
+        } catch (nsError) {
+          console.error("[VoiceChat] Noise suppression failed, using raw mic:", nsError);
+          // Fall back to raw stream
+          streamToUse = micStream;
+        } finally {
+          setNoiseSuppressionLoading(false);
+        }
+      }
+
+      setInVoice(true);
+      setCurrentInternalRoomId(internalRoomId);
+      setIsMuted(false);
+      localStream.current = streamToUse;
+
+      // Join the namespaced room
+      socket.emit("join-voice", { roomId: namespacedRoomId, user });
+
+      socket.on("all-voice-users", (users: { id: string; username: string }[]) => {
+        const peersArr: { peerID: string; peer: any; volume: number; username: string }[] = [];
+        users.forEach((u) => {
+          if (socket.id) {
+            const peer = createPeer(u.id, socket.id, streamToUse, user.username);
+            peersRef.current.push({ peerID: u.id, peer });
+            peersArr.push({ peerID: u.id, peer, volume: 100, username: u.username });
+          }
+        });
+        setPeers(peersArr);
+      });
+
+      socket.on("user-joined-voice", (payload: { signal: any; callerID: string; username: string }) => {
+        const existing = peersRef.current.find((p) => p.peerID === payload.callerID);
+        if (existing) {
+          existing.peer.signal(payload.signal);
+          return;
+        }
+        playJoinSound();
+        const peer = addPeer(payload.signal, payload.callerID, streamToUse);
+        peersRef.current.push({ peerID: payload.callerID, peer });
+        setPeers((prev) => [...prev, { peerID: payload.callerID, peer, volume: 100, username: payload.username }]);
+      });
+
+      socket.on("receiving-returned-signal", (payload: { signal: any; id: string }) => {
+        const item = peersRef.current.find((p) => p.peerID === payload.id);
+        if (item) {
+          item.peer.signal(payload.signal);
+        }
+      });
+
+      socket.on("user-left-voice", (id: string) => {
+        playLeaveSound();
+        const peerObj = peersRef.current.find((p) => p.peerID === id);
+        if (peerObj) peerObj.peer.destroy();
+        peersRef.current = peersRef.current.filter((p) => p.peerID !== id);
+        setPeers((prev) => prev.filter((p) => p.peerID !== id));
+        setIncomingStreams((prev) => prev.filter((s) => s.id !== id));
+      });
+    } catch (err) {
+      console.error("Failed to get local stream", err);
+      alert("Could not access microphone. Please allow permissions.");
+    }
   };
 
   const leaveVoice = () => {
@@ -253,6 +396,16 @@ export default function VoiceChat({ socket, roomId: serverId, user }: VoiceChatP
     setInVoice(false);
     setCurrentInternalRoomId(null);
     socket?.emit("leave-voice");
+
+    // Stop noise suppressor
+    if (noiseSuppressorRef.current) {
+      noiseSuppressorRef.current.destroy();
+      noiseSuppressorRef.current = null;
+    }
+
+    // Stop raw mic stream
+    rawMicStream.current?.getTracks().forEach((track) => track.stop());
+    rawMicStream.current = null;
 
     localStream.current?.getTracks().forEach((track) => track.stop());
     localStream.current = null;
@@ -597,6 +750,13 @@ export default function VoiceChat({ socket, roomId: serverId, user }: VoiceChatP
                           <rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/>
                         </svg>
                       )}
+                      {/* Noise suppression status */}
+                      {noiseSuppressionEnabled && (
+                        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-green-400">
+                          <title>Noise Suppression Active</title>
+                          <path d="M2 10v3"/><path d="M6 6v11"/><path d="M10 3v18"/><path d="M14 8v7"/><path d="M18 5v13"/><path d="M22 10v3"/>
+                        </svg>
+                      )}
                     </div>
                   </div>
                   {/* Show other users in my room */}
@@ -717,6 +877,35 @@ export default function VoiceChat({ socket, roomId: serverId, user }: VoiceChatP
               title="Share Screen"
             >
               <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+            </button>
+
+            <button
+              onClick={toggleNoiseSuppression}
+              disabled={noiseSuppressionLoading}
+              className={`p-2.5 rounded-full transition-all ${
+                noiseSuppressionLoading 
+                  ? "bg-zinc-600 text-zinc-400 cursor-wait" 
+                  : noiseSuppressionEnabled 
+                    ? "bg-green-600 text-white" 
+                    : "bg-zinc-700 text-zinc-300 hover:text-white hover:bg-zinc-600"
+              }`}
+              title={noiseSuppressionEnabled ? "Noise Suppression: ON" : "Noise Suppression: OFF"}
+            >
+              {noiseSuppressionLoading ? (
+                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="animate-spin">
+                  <path d="M21 12a9 9 0 1 1-6.219-8.56"/>
+                </svg>
+              ) : (
+                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M2 10v3"/>
+                  <path d="M6 6v11"/>
+                  <path d="M10 3v18"/>
+                  <path d="M14 8v7"/>
+                  <path d="M18 5v13"/>
+                  <path d="M22 10v3"/>
+                  {!noiseSuppressionEnabled && <line x1="1" y1="1" x2="23" y2="23" className="text-red-400"/>}
+                </svg>
+              )}
             </button>
 
             <button

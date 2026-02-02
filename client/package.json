@@ -9,6 +9,7 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "@shiguredo/rnnoise-wasm": "^2025.1.5",
     "@types/simple-peer": "^9.11.9",
     "@types/three": "^0.182.0",
     "gsap": "^3.14.2",
