@@ -507,14 +507,29 @@ io.on("connection", (socket) => {
   socket.on("send-message", async (data) => {
     const { content, user, type = "text", fileUrl, fileName, roomId = "general" } = data;
     
+    // Validate required fields
+    if (!content || !user || !user.id || !user.username) {
+      console.error("[Message] Invalid message data:", { content: !!content, user: !!user, userId: user?.id, username: user?.username });
+      socket.emit("message-error", { error: "Invalid message data" });
+      return;
+    }
+    
+    // Ensure user.id is a number
+    const userId = Number(user.id);
+    if (isNaN(userId)) {
+      console.error("[Message] Invalid user ID:", user.id);
+      socket.emit("message-error", { error: "Invalid user ID" });
+      return;
+    }
+    
     try {
       const stmt = db.prepare("INSERT INTO messages (content, user_id, username, type, room_id) VALUES (?, ?, ?, ?, ?)");
-      const info = stmt.run(content, user.id, user.username, type, roomId);
+      const info = stmt.run(content, userId, user.username, type, roomId);
       
       const message = {
         id: Number(info.lastInsertRowid),
         content,
-        user_id: Number(user.id),
+        user_id: userId,
         username: user.username,
         type,
         fileUrl,
@@ -523,10 +538,13 @@ io.on("connection", (socket) => {
         created_at: new Date().toISOString()
       };
 
+      // Emit to all users in the room
       io.to(roomId).emit("message-received", message);
+      console.log(`[Message] Sent to room ${roomId} by ${user.username} (${userId})`);
       
     } catch (err) {
-      console.error("Error saving message:", err);
+      console.error("[Message] Error saving message:", err);
+      socket.emit("message-error", { error: "Failed to save message" });
     }
   });
 

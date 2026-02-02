@@ -211,6 +211,11 @@ function ChatContent() {
       if (data.roomId && data.roomId !== roomId) return;
       setMessages((prev) => prev.filter((m) => m.id !== data.id));
     });
+    
+    newSocket.on("message-error", (data: { error: string }) => {
+      console.error("Message error from server:", data.error);
+      alert(`Mesaj gönderilemedi: ${data.error}`);
+    });
 
     return () => {
       setIsConnected(false);
@@ -228,8 +233,8 @@ function ChatContent() {
       return;
     }
     
-    if (!user) {
-      console.error("Cannot send message: user not set");
+    if (!user || !user.id || !user.username) {
+      console.error("Cannot send message: user not set properly", user);
       alert("Kullanıcı bilgisi bulunamadı, lütfen tekrar giriş yapın.");
       return;
     }
@@ -239,10 +244,16 @@ function ChatContent() {
       return;
     }
 
-    console.log("Sending message:", { content: inputValue, user, roomId });
+    // Ensure user.id is a number
+    const messageUser = {
+      id: Number(user.id),
+      username: user.username
+    };
+
+    console.log("Sending message:", { content: inputValue, user: messageUser, roomId });
     socket.emit("send-message", {
       content: inputValue,
-      user: user,
+      user: messageUser,
       type: "text",
       roomId,
     });

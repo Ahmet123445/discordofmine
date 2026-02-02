@@ -20,7 +20,11 @@ router.post("/login", async (req, res) => {
       // Register new user (password is dummy 'nopass')
       const insert = db.prepare("INSERT INTO users (username, password) VALUES (?, ?)");
       const result = insert.run(username, 'nopass');
-      user = { id: result.lastInsertRowid, username };
+      // Convert BigInt to Number for JSON serialization
+      user = { id: Number(result.lastInsertRowid), username };
+    } else {
+      // Ensure id is a Number
+      user = { id: Number(user.id), username: user.username };
     }
 
     const token = jwt.sign({ id: user.id, username: user.username }, SECRET_KEY, { expiresIn: "30d" });
@@ -28,7 +32,7 @@ router.post("/login", async (req, res) => {
     res.json({ 
       success: true, 
       token, 
-      user: { id: user.id, username: user.username } 
+      user: { id: Number(user.id), username: user.username } 
     });
   } catch (error) {
     console.error(error);
