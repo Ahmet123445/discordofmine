@@ -9,9 +9,9 @@
     "lint": "eslint"
   },
   "dependencies": {
-    "@shiguredo/rnnoise-wasm": "^2025.1.5",
     "@types/simple-peer": "^9.11.9",
     "@types/three": "^0.182.0",
+    "deepfilternet3-noise-filter": "^1.1.4",
     "gsap": "^3.14.2",
     "next": "16.1.6",
     "ogl": "^1.0.11",
