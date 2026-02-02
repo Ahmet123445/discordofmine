@@ -64,8 +64,12 @@ export default function VoiceChat({ socket, roomId: serverId, user }: VoiceChatP
   const peersRef = useRef<{ peerID: string; peer: any }[]>([]);
   const localStream = useRef<MediaStream | null>(null);
   const screenStream = useRef<MediaStream | null>(null);
-  const audioContextRef = useRef<AudioContext | null>(null);
-  const mixedAudioStreamRef = useRef<MediaStream | null>(null);
+  const noiseGateRef = useRef<{
+    audioContext: AudioContext;
+    source: MediaStreamAudioSourceNode;
+    processor: ScriptProcessorNode;
+    destination: MediaStreamAudioDestinationNode;
+  } | null>(null);
 
   // Load Peer dynamically on mount
   useEffect(() => {
@@ -155,55 +159,131 @@ export default function VoiceChat({ socket, roomId: serverId, user }: VoiceChatP
     setIsDeafened((prev) => !prev);
   };
 
-  // Toggle Noise Suppression using browser's built-in API
+  // Toggle Noise Suppression with real noise gate
   const toggleNoiseSuppression = async () => {
     if (!localStream.current) return;
     
     const newState = !isNoiseSuppressed;
     
-    try {
-      // Get new audio stream with noise suppression toggled
-      const newStream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          noiseSuppression: newState,
-          echoCancellation: true,
-          autoGainControl: true
-        },
-        video: false
-      });
-      
-      // Stop old audio tracks
-      const oldTracks = localStream.current.getAudioTracks();
-      oldTracks.forEach(track => track.stop());
-      
-      // Get the new audio track
-      const newTrack = newStream.getAudioTracks()[0];
-      
-      // Apply mute state to new track
-      if (isMuted) {
-        newTrack.enabled = false;
-      }
-      
-      // Replace track in local stream
-      localStream.current = newStream;
-      
-      // Replace track in all peers
-      peersRef.current.forEach((p) => {
-        try {
-          const senders = p.peer._pc?.getSenders?.() || [];
-          const audioSender = senders.find((s: RTCRtpSender) => s.track?.kind === "audio");
-          if (audioSender && newTrack) {
-            audioSender.replaceTrack(newTrack);
+    if (newState) {
+      // Enable noise gate
+      try {
+        const audioContext = new AudioContext();
+        const source = audioContext.createMediaStreamSource(localStream.current);
+        const destination = audioContext.createMediaStreamDestination();
+        
+        // Create a script processor for noise gate (deprecated but widely supported)
+        const processor = audioContext.createScriptProcessor(4096, 1, 1);
+        
+        // Noise gate parameters
+        const threshold = 0.01; // Minimum amplitude to pass through
+        const attackTime = 0.005; // How fast the gate opens (seconds)
+        const releaseTime = 0.05; // How fast the gate closes (seconds)
+        const holdTime = 0.1; // How long to keep gate open after signal drops
+        
+        let gateOpen = false;
+        let holdCounter = 0;
+        let smoothedLevel = 0;
+        
+        processor.onaudioprocess = (e) => {
+          const input = e.inputBuffer.getChannelData(0);
+          const output = e.outputBuffer.getChannelData(0);
+          
+          // Calculate RMS level
+          let sum = 0;
+          for (let i = 0; i < input.length; i++) {
+            sum += input[i] * input[i];
           }
-        } catch (e) {
-          console.error("Failed to replace track:", e);
+          const rms = Math.sqrt(sum / input.length);
+          
+          // Smooth the level
+          const smoothingFactor = gateOpen ? attackTime : releaseTime;
+          smoothedLevel = smoothedLevel * (1 - smoothingFactor) + rms * smoothingFactor;
+          
+          // Gate logic
+          if (smoothedLevel > threshold) {
+            gateOpen = true;
+            holdCounter = Math.floor(holdTime * audioContext.sampleRate / processor.bufferSize);
+          } else if (holdCounter > 0) {
+            holdCounter--;
+          } else {
+            gateOpen = false;
+          }
+          
+          // Apply gate
+          for (let i = 0; i < input.length; i++) {
+            output[i] = gateOpen ? input[i] : input[i] * 0.01; // Very quiet when closed, not completely silent
+          }
+        };
+        
+        source.connect(processor);
+        processor.connect(destination);
+        
+        noiseGateRef.current = { audioContext, source, processor, destination };
+        
+        // Get the processed track
+        const processedTrack = destination.stream.getAudioTracks()[0];
+        
+        // Apply mute state
+        if (isMuted) {
+          processedTrack.enabled = false;
         }
-      });
-      
-      setIsNoiseSuppressed(newState);
-      console.log(`Noise suppression ${newState ? "enabled" : "disabled"}`);
-    } catch (err) {
-      console.error("Failed to toggle noise suppression:", err);
+        
+        // Replace track in all peers
+        peersRef.current.forEach((p) => {
+          try {
+            const senders = p.peer._pc?.getSenders?.() || [];
+            const audioSender = senders.find((s: RTCRtpSender) => s.track?.kind === "audio");
+            if (audioSender && processedTrack) {
+              audioSender.replaceTrack(processedTrack);
+            }
+          } catch (e) {
+            console.error("Failed to replace track:", e);
+          }
+        });
+        
+        setIsNoiseSuppressed(true);
+        console.log("Noise gate enabled");
+      } catch (err) {
+        console.error("Failed to enable noise gate:", err);
+      }
+    } else {
+      // Disable noise gate - restore original track
+      try {
+        if (noiseGateRef.current) {
+          noiseGateRef.current.processor.disconnect();
+          noiseGateRef.current.source.disconnect();
+          noiseGateRef.current.audioContext.close();
+          noiseGateRef.current = null;
+        }
+        
+        // Get original track from localStream
+        const originalTrack = localStream.current?.getAudioTracks()[0];
+        if (originalTrack) {
+          // Apply mute state
+          if (isMuted) {
+            originalTrack.enabled = false;
+          }
+          
+          // Replace back to original in all peers
+          peersRef.current.forEach((p) => {
+            try {
+              const senders = p.peer._pc?.getSenders?.() || [];
+              const audioSender = senders.find((s: RTCRtpSender) => s.track?.kind === "audio");
+              if (audioSender && originalTrack) {
+                audioSender.replaceTrack(originalTrack);
+              }
+            } catch (e) {
+              console.error("Failed to restore track:", e);
+            }
+          });
+        }
+        
+        setIsNoiseSuppressed(false);
+        console.log("Noise gate disabled");
+      } catch (err) {
+        console.error("Failed to disable noise gate:", err);
+      }
     }
   };
 
@@ -289,7 +369,15 @@ export default function VoiceChat({ socket, roomId: serverId, user }: VoiceChatP
     setCurrentInternalRoomId(null);
     socket?.emit("leave-voice");
 
-    // Reset noise suppression state
+    // Cleanup noise gate
+    if (noiseGateRef.current) {
+      try {
+        noiseGateRef.current.processor.disconnect();
+        noiseGateRef.current.source.disconnect();
+        noiseGateRef.current.audioContext.close();
+      } catch (e) {}
+      noiseGateRef.current = null;
+    }
     setIsNoiseSuppressed(false);
 
     localStream.current?.getTracks().forEach((track) => track.stop());
@@ -398,70 +486,26 @@ export default function VoiceChat({ socket, roomId: serverId, user }: VoiceChatP
 
         const videoTrack = stream.getVideoTracks()[0];
         const screenAudioTrack = stream.getAudioTracks()[0];
-        const micTrack = localStream.current?.getAudioTracks()[0];
-
-        // Ekran sesi varsa ve mikrofon varsa, ikisini birleştir
-        if (screenAudioTrack && micTrack && !isMuted) {
-          try {
-            // Web Audio API ile sesleri birleştir
-            const audioContext = new AudioContext();
-            audioContextRef.current = audioContext;
-            
-            const destination = audioContext.createMediaStreamDestination();
-            
-            // Mikrofon kaynağı
-            const micSource = audioContext.createMediaStreamSource(new MediaStream([micTrack]));
-            micSource.connect(destination);
-            
-            // Ekran ses kaynağı
-            const screenSource = audioContext.createMediaStreamSource(new MediaStream([screenAudioTrack]));
-            screenSource.connect(destination);
-            
-            // Birleştirilmiş ses stream'i
-            const mixedAudioTrack = destination.stream.getAudioTracks()[0];
-            mixedAudioStreamRef.current = destination.stream;
-            
-            peersRef.current.forEach((p) => {
-              // Video track ekle
-              if (videoTrack) {
-                p.peer.addTrack(videoTrack, stream);
-              }
-              
-              // Mevcut mikrofon track'ini bul ve birleştirilmiş ile değiştir
-              try {
-                const senders = p.peer._pc?.getSenders?.() || [];
-                const audioSender = senders.find((s: RTCRtpSender) => s.track?.kind === 'audio');
-                if (audioSender && mixedAudioTrack) {
-                  audioSender.replaceTrack(mixedAudioTrack);
-                }
-              } catch (e) {
-                console.error("Failed to replace audio track:", e);
-              }
-            });
-            
-            console.log("Screen share started with mixed audio (mic + screen)");
-          } catch (e) {
-            console.error("Failed to mix audio:", e);
-            // Fallback: sadece video ekle
-            peersRef.current.forEach((p) => {
-              if (videoTrack) {
-                p.peer.addTrack(videoTrack, stream);
-              }
-            });
-          }
-        } else {
-          // Ekran sesi yok veya mikrofon kapalı - sadece video ekle
+        
+        // Create a combined stream with video + screen audio for VideoPlayer volume control
+        // Microphone stays separate in AudioPlayer
+        if (screenAudioTrack && videoTrack) {
+          // Create a new stream with both video and screen audio
+          const screenShareStream = new MediaStream([videoTrack, screenAudioTrack]);
+          
           peersRef.current.forEach((p) => {
-            if (videoTrack) {
-              p.peer.addTrack(videoTrack, stream);
-            }
+            // Add video track
+            p.peer.addTrack(videoTrack, screenShareStream);
+            // Add screen audio track separately (will create new stream on receiver)
+            p.peer.addTrack(screenAudioTrack, screenShareStream);
           });
           
-          // Mikrofon hala açık olduğundan emin ol
-          if (localStream.current && !isMuted && micTrack) {
-            micTrack.enabled = true;
-          }
-          
+          console.log("Screen share started with screen audio (separate from mic)");
+        } else if (videoTrack) {
+          // No screen audio - just add video
+          peersRef.current.forEach((p) => {
+            p.peer.addTrack(videoTrack, stream);
+          });
           console.log("Screen share started without screen audio");
         }
 
@@ -479,46 +523,34 @@ export default function VoiceChat({ socket, roomId: serverId, user }: VoiceChatP
   const stopScreenShare = () => {
     if (!screenStream.current) return;
     
-    // Ekran stream'ini durdur
+    // Stop all screen stream tracks
     screenStream.current.getTracks().forEach((track) => {
       track.stop();
       track.enabled = false;
     });
 
-    // Audio context'i kapat
-    if (audioContextRef.current) {
-      try {
-        audioContextRef.current.close();
-      } catch (e) {
-        console.error("Failed to close audio context:", e);
-      }
-      audioContextRef.current = null;
-    }
-    mixedAudioStreamRef.current = null;
-
-    // Video track'i kaldır ve mikrofon track'ine geri dön
+    // Remove video and screen audio tracks from peers
     peersRef.current.forEach((p) => {
       try {
         const senders = p.peer._pc?.getSenders?.() || [];
         senders.forEach((sender: RTCRtpSender) => {
+          // Remove video tracks
           if (sender.track?.kind === 'video') {
             p.peer._pc?.removeTrack?.(sender);
           }
-        });
-        
-        // Orijinal mikrofon track'ine geri dön
-        const micTrack = localStream.current?.getAudioTracks()[0];
-        if (micTrack) {
-          const audioSender = senders.find((s: RTCRtpSender) => s.track?.kind === 'audio');
-          if (audioSender) {
-            audioSender.replaceTrack(micTrack);
+          // Remove screen audio tracks (not microphone)
+          // Screen audio tracks have a different id than localStream audio
+          if (sender.track?.kind === 'audio' && 
+              sender.track.id !== localStream.current?.getAudioTracks()[0]?.id) {
+            p.peer._pc?.removeTrack?.(sender);
           }
-        }
+        });
       } catch (e) {
-        console.error("Failed to restore audio track:", e);
+        console.error("Failed to remove screen share tracks:", e);
       }
     });
 
+    // Clear incoming streams (for the sharer's own view)
     setIncomingStreams((prev) => {
       prev.forEach((s) => {
         s.stream.getTracks().forEach((track) => {
@@ -531,7 +563,7 @@ export default function VoiceChat({ socket, roomId: serverId, user }: VoiceChatP
 
     screenStream.current = null;
     setIsSharingScreen(false);
-    console.log("Screen share stopped, restored original mic track");
+    console.log("Screen share stopped");
   };
 
   const handleVolumeChange = (peerId: string, newVolume: number) => {
