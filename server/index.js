@@ -293,80 +293,162 @@ const usersInVoice = {}; // { roomId: [{ id, username }] }
 const usersInRoom = {}; // { roomId: { socketId: username } } for text/presence
 const socketToRoom = {}; // { socketId: roomId } for voice
 const socketToTextRoom = {}; // { socketId: roomId } for text
+const roomEmptyTimestamps = {}; // { roomId: timestamp } - when room became empty
 
 // Broadcast all voice room users to all connected clients
 const broadcastAllVoiceUsers = () => {
   io.emit("all-rooms-users", usersInVoice);
 };
 
+// ============================================================================
+// CRITICAL: Room User Count System
+// RULE 1: If room has >= 1 user, it MUST stay open FOREVER
+// RULE 2: If room has 0 users for 30 seconds, it gets deleted
+// These rules are ABSOLUTE and must NEVER be broken by any code changes
+// ============================================================================
+
+/**
+ * Get the REAL user count for a room by checking ALL possible sources
+ * This function is the SINGLE SOURCE OF TRUTH for user counts
+ */
+const getRealUserCount = (roomId) => {
+  let count = 0;
+  const usernames = new Set();
+  
+  // Source 1: Text/presence users (usersInRoom)
+  if (usersInRoom[roomId]) {
+    const textUsers = Object.values(usersInRoom[roomId]);
+    textUsers.forEach(name => {
+      if (name) usernames.add(name);
+    });
+    count += textUsers.length;
+  }
+  
+  // Source 2: Voice users - check all voice channels for this server
+  // Voice room format: "serverid-channelname" (e.g., "myroom-1234-general")
+  for (const [voiceRoomId, users] of Object.entries(usersInVoice)) {
+    if (!users || users.length === 0) continue;
+    
+    // Check if this voice room belongs to this server
+    // Voice room: "myroom-1234-general", Server: "myroom-1234"
+    if (voiceRoomId.startsWith(roomId + '-') || voiceRoomId === roomId) {
+      users.forEach(u => {
+        if (u && u.username) usernames.add(u.username);
+      });
+      count += users.length;
+    }
+  }
+  
+  // Source 3: Socket.io adapter rooms (fallback)
+  try {
+    const adapterRoom = io.sockets.adapter.rooms.get(roomId);
+    if (adapterRoom && adapterRoom.size > 0) {
+      count = Math.max(count, adapterRoom.size);
+    }
+  } catch (e) {
+    // Ignore adapter errors
+  }
+  
+  return {
+    count: Math.max(count, usernames.size),
+    users: Array.from(usernames)
+  };
+};
+
+/**
+ * Check if a room should be protected from deletion
+ * A room is PROTECTED if it has ANY users
+ */
+const isRoomProtected = (roomId) => {
+  const { count } = getRealUserCount(roomId);
+  return count > 0;
+};
+
+/**
+ * Mark a room as empty (starts the 30 second countdown)
+ * Called when last user leaves
+ */
+const markRoomAsEmpty = (roomId) => {
+  // Double-check that room is actually empty
+  if (isRoomProtected(roomId)) {
+    delete roomEmptyTimestamps[roomId]; // Clear any pending deletion
+    return;
+  }
+  
+  if (!roomEmptyTimestamps[roomId]) {
+    roomEmptyTimestamps[roomId] = Date.now();
+    console.log(`[Room] ${roomId} is now empty, starting 30s countdown`);
+  }
+};
+
+/**
+ * Mark a room as occupied (cancels any pending deletion)
+ * Called when any user joins
+ */
+const markRoomAsOccupied = (roomId) => {
+  if (roomEmptyTimestamps[roomId]) {
+    delete roomEmptyTimestamps[roomId];
+    console.log(`[Room] ${roomId} is now occupied, cancelled deletion`);
+  }
+};
+
 // Helper to get active users count per room for the rooms API
 const getRoomStats = () => {
   const stats = {};
   
-  // Method 1: Count text/presence users from usersInRoom
-  for (const [roomId, users] of Object.entries(usersInRoom)) {
-    const userValues = Object.values(users);
-    if (userValues.length > 0) {
-      const uniqueNames = [...new Set(userValues)];
-      stats[roomId] = {
-        count: uniqueNames.length,
-        users: uniqueNames
-      };
-    }
-  }
-  
-  // Method 2: Include voice users in stats
-  for (const [voiceRoomId, users] of Object.entries(usersInVoice)) {
-    if (!users || users.length === 0) continue;
-    
-    // Extract server ID by removing the last segment (channel name)
-    const lastDashIndex = voiceRoomId.lastIndexOf('-');
-    if (lastDashIndex === -1) continue;
-    
-    const serverId = voiceRoomId.substring(0, lastDashIndex);
-    if (!serverId) continue;
-    
-    if (!stats[serverId]) {
-      stats[serverId] = { count: 0, users: [] };
-    }
-    
-    const voiceNames = users
-      .filter(u => u && u.username)
-      .map(u => u.username);
-    
-    const allUsers = [...new Set([...stats[serverId].users, ...voiceNames])];
-    stats[serverId].count = allUsers.length;
-    stats[serverId].users = allUsers;
+  // Get all rooms from database
+  try {
+    const rooms = db.prepare("SELECT id FROM rooms").all();
+    rooms.forEach(room => {
+      const { count, users } = getRealUserCount(room.id);
+      stats[room.id] = { count, users };
+    });
+  } catch (e) {
+    console.error("Error getting room stats:", e);
   }
   
   return stats;
 };
 
-// Cleanup Empty Rooms (Every 5 minutes)
+// ============================================================================
+// Room Cleanup System - CRITICAL LOGIC
+// Runs every 10 seconds to check for rooms that should be deleted
+// ============================================================================
 setInterval(() => {
   try {
     const rooms = db.prepare("SELECT * FROM rooms").all();
-    const stats = getRoomStats();
     const now = Date.now();
-    const TIMEOUT = 60 * 60 * 1000; // 1 hour
+    const DELETE_AFTER_MS = 30 * 1000; // 30 seconds
 
     rooms.forEach(room => {
-      const activeCount = stats[room.id]?.count || 0;
-      const createdAt = new Date(room.created_at).getTime();
+      const { count } = getRealUserCount(room.id);
       
-      let createdTime = createdAt;
-      if (isNaN(createdTime)) {
-        createdTime = now; 
+      // RULE 1: If room has users, it's PROTECTED - NEVER delete
+      if (count > 0) {
+        markRoomAsOccupied(room.id);
+        return; // Skip this room entirely
       }
-
-      if (activeCount === 0 && (now - createdTime > TIMEOUT)) {
-        console.log(`[Cleanup] Deleting old empty room: ${room.name} (${room.id})`);
+      
+      // RULE 2: Room is empty - start/check countdown
+      markRoomAsEmpty(room.id);
+      
+      const emptyTime = roomEmptyTimestamps[room.id];
+      if (emptyTime && (now - emptyTime >= DELETE_AFTER_MS)) {
+        // Final safety check before deletion
+        if (isRoomProtected(room.id)) {
+          console.log(`[Cleanup] BLOCKED deletion of ${room.id} - users detected at last moment`);
+          markRoomAsOccupied(room.id);
+          return;
+        }
+        
+        console.log(`[Cleanup] Deleting empty room: ${room.name} (${room.id}) - empty for 30+ seconds`);
         db.prepare("DELETE FROM rooms WHERE id = ?").run(room.id);
         io.emit("room-deleted", room.id);
+        delete roomEmptyTimestamps[room.id];
       }
     });
     
-    // Clean up empty tracking objects
+    // Clean up tracking objects for non-existent rooms
     for (const roomId in usersInRoom) {
       if (Object.keys(usersInRoom[roomId]).length === 0) {
         delete usersInRoom[roomId];
@@ -381,7 +463,7 @@ setInterval(() => {
   } catch (err) {
     console.error("Cleanup error:", err);
   }
-}, 300000);
+}, 10000); // Check every 10 seconds
 
 io.on("connection", (socket) => {
   console.log("User connected:", socket.id);
@@ -399,6 +481,10 @@ io.on("connection", (socket) => {
     if (previousRoom && previousRoom !== roomId) {
       if (usersInRoom[previousRoom] && usersInRoom[previousRoom][socket.id]) {
         delete usersInRoom[previousRoom][socket.id];
+        // Check if previous room is now empty
+        if (Object.keys(usersInRoom[previousRoom]).length === 0) {
+          markRoomAsEmpty(previousRoom);
+        }
       }
       socket.leave(previousRoom);
     }
@@ -411,6 +497,9 @@ io.on("connection", (socket) => {
       usersInRoom[roomId] = {};
     }
     usersInRoom[roomId][socket.id] = username;
+    
+    // CRITICAL: Mark room as occupied - cancels any pending deletion
+    markRoomAsOccupied(roomId);
     
     console.log(`[Join] User ${socket.id} (${username}) joined room ${roomId}`);
   });
@@ -448,6 +537,10 @@ io.on("connection", (socket) => {
     const textRoomId = socketToTextRoom[socket.id];
     if (textRoomId && usersInRoom[textRoomId] && usersInRoom[textRoomId][socket.id]) {
       delete usersInRoom[textRoomId][socket.id];
+      // Check if room is now empty
+      if (Object.keys(usersInRoom[textRoomId]).length === 0) {
+        markRoomAsEmpty(textRoomId);
+      }
     }
     delete socketToTextRoom[socket.id];
 
@@ -459,6 +552,26 @@ io.on("connection", (socket) => {
       usersInVoice[roomID] = room;
       socket.broadcast.to(roomID).emit('user-left-voice', socket.id);
       broadcastAllVoiceUsers();
+      
+      // Check if voice room's server is now empty
+      // Voice room format: "serverid-channelname"
+      if (room.length === 0) {
+        const lastDash = roomID.lastIndexOf('-');
+        if (lastDash > 0) {
+          const serverId = roomID.substring(0, lastDash);
+          // Only mark as empty if no other voice channels have users
+          let serverHasUsers = false;
+          for (const [vRoomId, vUsers] of Object.entries(usersInVoice)) {
+            if (vRoomId.startsWith(serverId + '-') && vUsers && vUsers.length > 0) {
+              serverHasUsers = true;
+              break;
+            }
+          }
+          if (!serverHasUsers && !isRoomProtected(serverId)) {
+            markRoomAsEmpty(serverId);
+          }
+        }
+      }
     }
     delete socketToRoom[socket.id];
   });
@@ -486,6 +599,14 @@ io.on("connection", (socket) => {
     
     // Join socket room for signaling
     socket.join(roomId);
+    
+    // CRITICAL: Mark the server as occupied
+    // Voice room format: "serverid-channelname"
+    const lastDash = roomId.lastIndexOf('-');
+    if (lastDash > 0) {
+      const serverId = roomId.substring(0, lastDash);
+      markRoomAsOccupied(serverId);
+    }
 
     // Send existing users to the new joiner
     const usersInThisRoom = usersInVoice[roomId].filter(u => u.id !== socket.id);
@@ -515,6 +636,25 @@ io.on("connection", (socket) => {
       usersInVoice[roomID] = room;
       socket.broadcast.to(roomID).emit('user-left-voice', socket.id);
       broadcastAllVoiceUsers();
+      
+      // Check if voice room's server is now empty
+      if (room.length === 0 && roomID) {
+        const lastDash = roomID.lastIndexOf('-');
+        if (lastDash > 0) {
+          const serverId = roomID.substring(0, lastDash);
+          // Only mark as empty if no other voice channels have users
+          let serverHasUsers = false;
+          for (const [vRoomId, vUsers] of Object.entries(usersInVoice)) {
+            if (vRoomId.startsWith(serverId + '-') && vUsers && vUsers.length > 0) {
+              serverHasUsers = true;
+              break;
+            }
+          }
+          if (!serverHasUsers && !isRoomProtected(serverId)) {
+            markRoomAsEmpty(serverId);
+          }
+        }
+      }
     }
     if (roomID) socket.leave(roomID);
     delete socketToRoom[socket.id];
