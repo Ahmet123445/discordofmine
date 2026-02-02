@@ -502,6 +502,17 @@ io.on("connection", (socket) => {
     markRoomAsOccupied(roomId);
     
     console.log(`[Join] User ${socket.id} (${username}) joined room ${roomId}`);
+
+    // Send system message only to others (don't spam the joiner)
+    socket.to(roomId).emit("message-received", {
+      id: Date.now(),
+      content: `${username} odaya katildi.`,
+      user_id: 0,
+      username: "System",
+      type: "system",
+      room_id: roomId,
+      created_at: new Date().toISOString()
+    });
   });
 
   socket.on("send-message", async (data) => {

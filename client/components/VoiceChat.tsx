@@ -838,6 +838,10 @@ const AudioPlayer = ({ peer, volume = 1 }: { peer: any; volume?: number }) => {
 
   useEffect(() => {
     const handler = (stream: MediaStream) => {
+      // Ignore screen share streams (they have video tracks) - they are handled by VideoPlayer
+      // Only handle microphone streams (audio only)
+      if (stream.getVideoTracks().length > 0) return;
+
       const audioTracks = stream.getAudioTracks();
       if (audioTracks.length > 0) {
         const audioStream = new MediaStream(audioTracks);
@@ -851,7 +855,7 @@ const AudioPlayer = ({ peer, volume = 1 }: { peer: any; volume?: number }) => {
     
     // If peer already has remote streams (reconnection case)
     if (peer._remoteStreams && peer._remoteStreams.length > 0) {
-      handler(peer._remoteStreams[0]);
+      peer._remoteStreams.forEach((s: MediaStream) => handler(s));
     }
     
     return () => {
