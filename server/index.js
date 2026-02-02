@@ -8,6 +8,7 @@ import authRoutes from "./routes/auth.js";
 import uploadRoutes from "./routes/upload.js";
 import path from "path";
 
+// Version: 1.1.0 - Added reconnect support for room tracking
 dotenv.config();
 
 const app = express();
