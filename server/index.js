@@ -169,6 +169,101 @@ app.post("/api/rooms", (req, res) => {
   }
 });
 
+// Link Preview - fetch metadata from URL
+app.get("/api/link-preview", async (req, res) => {
+  try {
+    const { url } = req.query;
+    if (!url) return res.status(400).json({ error: "URL required" });
+    
+    // Validate URL
+    let parsedUrl;
+    try {
+      parsedUrl = new URL(url);
+    } catch {
+      return res.status(400).json({ error: "Invalid URL" });
+    }
+    
+    // Fetch the page with timeout
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+    
+    const response = await fetch(parsedUrl.href, {
+      signal: controller.signal,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (compatible; LinkPreviewBot/1.0)',
+        'Accept': 'text/html'
+      }
+    });
+    clearTimeout(timeout);
+    
+    if (!response.ok) {
+      return res.json({ url: parsedUrl.href, title: parsedUrl.hostname });
+    }
+    
+    const html = await response.text();
+    
+    // Extract metadata using regex (simple approach)
+    const getMetaContent = (property) => {
+      const ogMatch = html.match(new RegExp(`<meta[^>]*property=["']og:${property}["'][^>]*content=["']([^"']+)["']`, 'i'));
+      if (ogMatch) return ogMatch[1];
+      
+      const ogMatch2 = html.match(new RegExp(`<meta[^>]*content=["']([^"']+)["'][^>]*property=["']og:${property}["']`, 'i'));
+      if (ogMatch2) return ogMatch2[1];
+      
+      const twitterMatch = html.match(new RegExp(`<meta[^>]*name=["']twitter:${property}["'][^>]*content=["']([^"']+)["']`, 'i'));
+      if (twitterMatch) return twitterMatch[1];
+      
+      return null;
+    };
+    
+    // Get title
+    let title = getMetaContent('title');
+    if (!title) {
+      const titleMatch = html.match(/<title[^>]*>([^<]+)<\/title>/i);
+      title = titleMatch ? titleMatch[1].trim() : parsedUrl.hostname;
+    }
+    
+    // Get description
+    let description = getMetaContent('description');
+    if (!description) {
+      const descMatch = html.match(/<meta[^>]*name=["']description["'][^>]*content=["']([^"']+)["']/i);
+      description = descMatch ? descMatch[1] : null;
+    }
+    
+    // Get image
+    let image = getMetaContent('image');
+    if (image && !image.startsWith('http')) {
+      image = new URL(image, parsedUrl.origin).href;
+    }
+    
+    // Get favicon
+    let favicon = null;
+    const iconMatch = html.match(/<link[^>]*rel=["'](?:shortcut )?icon["'][^>]*href=["']([^"']+)["']/i);
+    if (iconMatch) {
+      favicon = iconMatch[1].startsWith('http') ? iconMatch[1] : new URL(iconMatch[1], parsedUrl.origin).href;
+    } else {
+      favicon = `${parsedUrl.origin}/favicon.ico`;
+    }
+    
+    res.json({
+      url: parsedUrl.href,
+      title: title ? title.substring(0, 100) : parsedUrl.hostname,
+      description: description ? description.substring(0, 200) : null,
+      image,
+      favicon,
+      siteName: getMetaContent('site_name') || parsedUrl.hostname
+    });
+  } catch (err) {
+    console.error("Link preview error:", err.message);
+    try {
+      const parsedUrl = new URL(req.query.url);
+      res.json({ url: parsedUrl.href, title: parsedUrl.hostname });
+    } catch {
+      res.status(500).json({ error: "Failed to fetch link preview" });
+    }
+  }
+});
+
 // --- Socket.io ---
 
 const httpServer = new HttpServer(app);

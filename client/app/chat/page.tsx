@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useRef, Suspense } from "react";
+import { useEffect, useState, useRef, Suspense, useCallback } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import io, { Socket } from "socket.io-client";
 import dynamic from "next/dynamic";
@@ -494,7 +494,7 @@ function ChatContent() {
                           </a>
                         )
                       ) : (
-                        msg.content
+                        <MessageContent content={msg.content} isMe={isMe} />
                       )}
                     </div>
                   </div>
@@ -651,7 +651,153 @@ function ChatContent() {
   );
 }
 
+// Link Preview Cache
+const linkPreviewCache: { [url: string]: LinkPreview | null } = {};
+
+interface LinkPreview {
+  url: string;
+  title: string;
+  description?: string | null;
+  image?: string | null;
+  favicon?: string | null;
+  siteName?: string;
+}
+
 // Helper component to render message content with link detection
+function MessageContent({ content, isMe }: { content: string; isMe: boolean }) {
+  const [previews, setPreviews] = useState<{ [url: string]: LinkPreview | null }>({});
+  const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001";
+  
+  // URL regex pattern
+  const urlRegex = /(https?:\/\/[^\s<]+[^<.,:;"')\]\s])/g;
+  
+  // Extract URLs from content
+  const urls = content.match(urlRegex) || [];
+  
+  // Fetch link previews
+  useEffect(() => {
+    urls.forEach(async (url) => {
+      // Skip if already cached
+      if (linkPreviewCache[url] !== undefined) {
+        setPreviews(prev => ({ ...prev, [url]: linkPreviewCache[url] }));
+        return;
+      }
+      
+      try {
+        const res = await fetch(`${API_URL}/api/link-preview?url=${encodeURIComponent(url)}`);
+        if (res.ok) {
+          const data = await res.json();
+          linkPreviewCache[url] = data;
+          setPreviews(prev => ({ ...prev, [url]: data }));
+        } else {
+          linkPreviewCache[url] = null;
+        }
+      } catch {
+        linkPreviewCache[url] = null;
+      }
+    });
+  }, [content, API_URL]);
+  
+  // Split content into parts (text and links)
+  const parts: { type: 'text' | 'link'; content: string }[] = [];
+  let lastIndex = 0;
+  let match;
+  const regex = new RegExp(urlRegex);
+  
+  while ((match = regex.exec(content)) !== null) {
+    // Add text before the link
+    if (match.index > lastIndex) {
+      parts.push({ type: 'text', content: content.slice(lastIndex, match.index) });
+    }
+    // Add the link
+    parts.push({ type: 'link', content: match[0] });
+    lastIndex = regex.lastIndex;
+  }
+  // Add remaining text
+  if (lastIndex < content.length) {
+    parts.push({ type: 'text', content: content.slice(lastIndex) });
+  }
+  
+  // If no links found, return plain text
+  if (parts.length === 0) {
+    return <span>{content}</span>;
+  }
+  
+  return (
+    <div className="space-y-2">
+      <div className="whitespace-pre-wrap break-words">
+        {parts.map((part, i) => (
+          part.type === 'link' ? (
+            <a
+              key={i}
+              href={part.content}
+              target="_blank"
+              rel="noopener noreferrer"
+              className={`underline hover:opacity-80 transition-opacity ${isMe ? 'text-blue-200' : 'text-blue-400'}`}
+            >
+              {part.content}
+            </a>
+          ) : (
+            <span key={i}>{part.content}</span>
+          )
+        ))}
+      </div>
+      
+      {/* Link Previews */}
+      {urls.map((url, i) => {
+        const preview = previews[url];
+        if (!preview) return null;
+        
+        return (
+          <a
+            key={i}
+            href={preview.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className={`block mt-2 rounded-lg overflow-hidden border transition-all hover:opacity-90 ${
+              isMe ? 'border-indigo-500/30 bg-indigo-700/30' : 'border-zinc-700 bg-zinc-900/50'
+            }`}
+          >
+            {preview.image && (
+              <div className="w-full h-32 overflow-hidden bg-zinc-900">
+                <img
+                  src={preview.image}
+                  alt={preview.title}
+                  className="w-full h-full object-cover"
+                  onError={(e) => (e.currentTarget.style.display = 'none')}
+                />
+              </div>
+            )}
+            <div className="p-3">
+              <div className="flex items-center gap-2 mb-1">
+                {preview.favicon && (
+                  <img
+                    src={preview.favicon}
+                    alt=""
+                    className="w-4 h-4 rounded"
+                    onError={(e) => (e.currentTarget.style.display = 'none')}
+                  />
+                )}
+                <span className={`text-xs ${isMe ? 'text-indigo-300' : 'text-zinc-500'}`}>
+                  {preview.siteName || new URL(preview.url).hostname}
+                </span>
+              </div>
+              <div className={`font-medium text-sm ${isMe ? 'text-white' : 'text-zinc-200'}`}>
+                {preview.title}
+              </div>
+              {preview.description && (
+                <div className={`text-xs mt-1 line-clamp-2 ${isMe ? 'text-indigo-200/70' : 'text-zinc-400'}`}>
+                  {preview.description}
+                </div>
+              )}
+            </div>
+          </a>
+        );
+      })}
+    </div>
+  );
+}
+
 export default function ChatPage() {
   return (
     <Suspense fallback={<div className="flex h-screen items-center justify-center bg-zinc-950 text-white">Loading chat...</div>}>
