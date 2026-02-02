@@ -190,6 +190,13 @@ function ChatContent() {
       newSocket.emit("join-room", { roomId, username: parsedUser.username });
     });
 
+    // Handle reconnection - re-join room after reconnect
+    newSocket.on("reconnect", () => {
+      console.log("Reconnected to socket server");
+      setIsConnected(true);
+      newSocket.emit("join-room", { roomId, username: parsedUser.username });
+    });
+
     newSocket.on("disconnect", () => {
       console.log("Disconnected from socket server");
       setIsConnected(false);

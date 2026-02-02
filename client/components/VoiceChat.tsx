@@ -102,6 +102,29 @@ export default function VoiceChat({ socket, roomId: serverId, user }: VoiceChatP
     };
   }, [socket]);
 
+  // Handle socket reconnection - re-join voice if was connected
+  useEffect(() => {
+    if (!socket || !PeerClass) return;
+    
+    const handleReconnect = () => {
+      console.log("VoiceChat: Socket reconnected");
+      // If user was in a voice channel, re-join it
+      if (inVoice && currentInternalRoomId) {
+        console.log("VoiceChat: Re-joining voice channel after reconnect:", currentInternalRoomId);
+        const namespacedRoomId = `${serverId}-${currentInternalRoomId}`;
+        
+        // Re-emit join-voice to restore server-side tracking
+        socket.emit("join-voice", { roomId: namespacedRoomId, user });
+      }
+    };
+    
+    socket.on("reconnect", handleReconnect);
+    
+    return () => {
+      socket.off("reconnect", handleReconnect);
+    };
+  }, [socket, PeerClass, inVoice, currentInternalRoomId, serverId, user]);
+
   // Keyboard Shortcuts
   useEffect(() => {
     if (!mounted) return;

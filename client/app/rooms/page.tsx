@@ -62,6 +62,12 @@ export default function RoomsPage() {
         setRooms(prev => prev.filter(r => r.id !== roomId));
     });
 
+    // Handle reconnection - refresh room list
+    newSocket.on("reconnect", () => {
+        console.log("Rooms page: Socket reconnected, refreshing room list");
+        fetchRooms();
+    });
+
     fetchRooms();
     const interval = setInterval(fetchRooms, 5000);
 
