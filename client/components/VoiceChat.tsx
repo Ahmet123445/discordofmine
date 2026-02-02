@@ -40,7 +40,6 @@ export default function VoiceChat({ socket, roomId: serverId, user }: VoiceChatP
   const [hiddenStreams, setHiddenStreams] = useState<Set<string>>(new Set());
   const [isMuted, setIsMuted] = useState(false);
   const [isDeafened, setIsDeafened] = useState(false);
-  const [isNoiseSuppressed, setIsNoiseSuppressed] = useState(false);
   const [mounted, setMounted] = useState(false);
   const [showAddRoom, setShowAddRoom] = useState(false);
   const [showKeybindSettings, setShowKeybindSettings] = useState(false);
@@ -64,12 +63,6 @@ export default function VoiceChat({ socket, roomId: serverId, user }: VoiceChatP
   const peersRef = useRef<{ peerID: string; peer: any }[]>([]);
   const localStream = useRef<MediaStream | null>(null);
   const screenStream = useRef<MediaStream | null>(null);
-  const noiseGateRef = useRef<{
-    audioContext: AudioContext;
-    source: MediaStreamAudioSourceNode;
-    processor: ScriptProcessorNode;
-    destination: MediaStreamAudioDestinationNode;
-  } | null>(null);
 
   // Load Peer dynamically on mount
   useEffect(() => {
@@ -159,134 +152,6 @@ export default function VoiceChat({ socket, roomId: serverId, user }: VoiceChatP
     setIsDeafened((prev) => !prev);
   };
 
-  // Toggle Noise Suppression with real noise gate
-  const toggleNoiseSuppression = async () => {
-    if (!localStream.current) return;
-    
-    const newState = !isNoiseSuppressed;
-    
-    if (newState) {
-      // Enable noise gate
-      try {
-        const audioContext = new AudioContext();
-        const source = audioContext.createMediaStreamSource(localStream.current);
-        const destination = audioContext.createMediaStreamDestination();
-        
-        // Create a script processor for noise gate (deprecated but widely supported)
-        const processor = audioContext.createScriptProcessor(4096, 1, 1);
-        
-        // Noise gate parameters
-        const threshold = 0.01; // Minimum amplitude to pass through
-        const attackTime = 0.005; // How fast the gate opens (seconds)
-        const releaseTime = 0.05; // How fast the gate closes (seconds)
-        const holdTime = 0.1; // How long to keep gate open after signal drops
-        
-        let gateOpen = false;
-        let holdCounter = 0;
-        let smoothedLevel = 0;
-        
-        processor.onaudioprocess = (e) => {
-          const input = e.inputBuffer.getChannelData(0);
-          const output = e.outputBuffer.getChannelData(0);
-          
-          // Calculate RMS level
-          let sum = 0;
-          for (let i = 0; i < input.length; i++) {
-            sum += input[i] * input[i];
-          }
-          const rms = Math.sqrt(sum / input.length);
-          
-          // Smooth the level
-          const smoothingFactor = gateOpen ? attackTime : releaseTime;
-          smoothedLevel = smoothedLevel * (1 - smoothingFactor) + rms * smoothingFactor;
-          
-          // Gate logic
-          if (smoothedLevel > threshold) {
-            gateOpen = true;
-            holdCounter = Math.floor(holdTime * audioContext.sampleRate / processor.bufferSize);
-          } else if (holdCounter > 0) {
-            holdCounter--;
-          } else {
-            gateOpen = false;
-          }
-          
-          // Apply gate
-          for (let i = 0; i < input.length; i++) {
-            output[i] = gateOpen ? input[i] : input[i] * 0.01; // Very quiet when closed, not completely silent
-          }
-        };
-        
-        source.connect(processor);
-        processor.connect(destination);
-        
-        noiseGateRef.current = { audioContext, source, processor, destination };
-        
-        // Get the processed track
-        const processedTrack = destination.stream.getAudioTracks()[0];
-        
-        // Apply mute state
-        if (isMuted) {
-          processedTrack.enabled = false;
-        }
-        
-        // Replace track in all peers
-        peersRef.current.forEach((p) => {
-          try {
-            const senders = p.peer._pc?.getSenders?.() || [];
-            const audioSender = senders.find((s: RTCRtpSender) => s.track?.kind === "audio");
-            if (audioSender && processedTrack) {
-              audioSender.replaceTrack(processedTrack);
-            }
-          } catch (e) {
-            console.error("Failed to replace track:", e);
-          }
-        });
-        
-        setIsNoiseSuppressed(true);
-        console.log("Noise gate enabled");
-      } catch (err) {
-        console.error("Failed to enable noise gate:", err);
-      }
-    } else {
-      // Disable noise gate - restore original track
-      try {
-        if (noiseGateRef.current) {
-          noiseGateRef.current.processor.disconnect();
-          noiseGateRef.current.source.disconnect();
-          noiseGateRef.current.audioContext.close();
-          noiseGateRef.current = null;
-        }
-        
-        // Get original track from localStream
-        const originalTrack = localStream.current?.getAudioTracks()[0];
-        if (originalTrack) {
-          // Apply mute state
-          if (isMuted) {
-            originalTrack.enabled = false;
-          }
-          
-          // Replace back to original in all peers
-          peersRef.current.forEach((p) => {
-            try {
-              const senders = p.peer._pc?.getSenders?.() || [];
-              const audioSender = senders.find((s: RTCRtpSender) => s.track?.kind === "audio");
-              if (audioSender && originalTrack) {
-                audioSender.replaceTrack(originalTrack);
-              }
-            } catch (e) {
-              console.error("Failed to restore track:", e);
-            }
-          });
-        }
-        
-        setIsNoiseSuppressed(false);
-        console.log("Noise gate disabled");
-      } catch (err) {
-        console.error("Failed to disable noise gate:", err);
-      }
-    }
-  };
-
   useEffect(() => {
     // Re-render audio players when deafen state changes
   }, [isDeafened]);
@@ -314,9 +179,6 @@ export default function VoiceChat({ socket, roomId: serverId, user }: VoiceChatP
         socket.on("all-voice-users", (users: { id: string; username: string }[]) => {
           const peersArr: { peerID: string; peer: any; volume: number; username: string }[] = [];
           users.forEach((u) => {
-            // Skip music-bot - it will initiate connection to us, not the other way around
-            if (u.id === "music-bot") return;
-            
             if (socket.id) {
               const peer = createPeer(u.id, socket.id, stream, user.username);
               peersRef.current.push({ peerID: u.id, peer });
@@ -368,17 +230,6 @@ export default function VoiceChat({ socket, roomId: serverId, user }: VoiceChatP
     setInVoice(false);
     setCurrentInternalRoomId(null);
     socket?.emit("leave-voice");
-
-    // Cleanup noise gate
-    if (noiseGateRef.current) {
-      try {
-        noiseGateRef.current.processor.disconnect();
-        noiseGateRef.current.source.disconnect();
-        noiseGateRef.current.audioContext.close();
-      } catch (e) {}
-      noiseGateRef.current = null;
-    }
-    setIsNoiseSuppressed(false);
 
     localStream.current?.getTracks().forEach((track) => track.stop());
     localStream.current = null;
@@ -827,18 +678,6 @@ export default function VoiceChat({ socket, roomId: serverId, user }: VoiceChatP
               ) : (
                 <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 18v-6a9 9 0 0 1 18 0v6"/><path d="M21 19a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3zM3 19a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H3z"/></svg>
               )}
-            </button>
-
-            <button
-              onClick={toggleNoiseSuppression}
-              className={`p-2.5 rounded-full transition-all ${isNoiseSuppressed ? "bg-green-600 text-white" : "bg-zinc-700 text-zinc-300 hover:text-white hover:bg-zinc-600"}`}
-              title="Gurultu Engelleme"
-            >
-              <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/>
-                <circle cx="12" cy="12" r="3"/>
-                {isNoiseSuppressed && <path d="M2 2l20 20" strokeWidth="3"/>}
-              </svg>
             </button>
 
             <button

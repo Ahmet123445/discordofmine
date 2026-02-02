@@ -7,7 +7,6 @@ import db from "./db.js";
 import authRoutes from "./routes/auth.js";
 import uploadRoutes from "./routes/upload.js";
 import path from "path";
-import MusicBot from "./musicBot.js";
 
 dotenv.config();
 
@@ -177,12 +176,22 @@ const io = new SocketIOServer(httpServer, {
   cors: {
     origin: "*", 
     methods: ["GET", "POST"]
-  }
+  },
+  // CRITICAL: Ping/Pong settings to prevent Render timeout
+  pingTimeout: 60000,      // 60 seconds - how long to wait for pong
+  pingInterval: 25000,     // 25 seconds - send ping every 25s (Render timeout is 30s)
+  transports: ['websocket', 'polling'],
+  allowUpgrades: true
 });
 
-// Health check
+// Health check - also keeps Render awake
 app.get("/", (req, res) => {
-  res.send("V A T A N A S K I Server is running");
+  res.send("Server is running - " + new Date().toISOString());
+});
+
+// Keep-alive endpoint for external pinging
+app.get("/health", (req, res) => {
+  res.json({ status: "ok", uptime: process.uptime(), connections: io.engine.clientsCount });
 });
 
 const usersInVoice = {}; // { roomId: [{ id, username }] }
@@ -190,145 +199,103 @@ const usersInRoom = {}; // { roomId: { socketId: username } } for text/presence
 const socketToRoom = {}; // { socketId: roomId } for voice
 const socketToTextRoom = {}; // { socketId: roomId } for text
 
-  // Broadcast all voice room users to all connected clients
-  const broadcastAllVoiceUsers = () => {
-    io.emit("all-rooms-users", usersInVoice);
-  };
+// Broadcast all voice room users to all connected clients
+const broadcastAllVoiceUsers = () => {
+  io.emit("all-rooms-users", usersInVoice);
+};
 
-const musicBot = new MusicBot(io, broadcastAllVoiceUsers);
-
-
-  // Helper to get active users count per room for the rooms API
-  const getRoomStats = () => {
-    const stats = {};
+// Helper to get active users count per room for the rooms API
+const getRoomStats = () => {
+  const stats = {};
+  
+  // Method 1: Count text/presence users from usersInRoom
+  for (const [roomId, users] of Object.entries(usersInRoom)) {
+    const userValues = Object.values(users);
+    if (userValues.length > 0) {
+      const uniqueNames = [...new Set(userValues)];
+      stats[roomId] = {
+        count: uniqueNames.length,
+        users: uniqueNames
+      };
+    }
+  }
+  
+  // Method 2: Include voice users in stats
+  for (const [voiceRoomId, users] of Object.entries(usersInVoice)) {
+    if (!users || users.length === 0) continue;
     
-    // Method 1: Count text/presence users from usersInRoom
-    for (const [roomId, users] of Object.entries(usersInRoom)) {
-      const userValues = Object.values(users);
-      if (userValues.length > 0) {
-        const uniqueNames = [...new Set(userValues)];
-        stats[roomId] = {
-          count: uniqueNames.length,
-          users: uniqueNames
-        };
+    // Extract server ID by removing the last segment (channel name)
+    const lastDashIndex = voiceRoomId.lastIndexOf('-');
+    if (lastDashIndex === -1) continue;
+    
+    const serverId = voiceRoomId.substring(0, lastDashIndex);
+    if (!serverId) continue;
+    
+    if (!stats[serverId]) {
+      stats[serverId] = { count: 0, users: [] };
+    }
+    
+    const voiceNames = users
+      .filter(u => u && u.username)
+      .map(u => u.username);
+    
+    const allUsers = [...new Set([...stats[serverId].users, ...voiceNames])];
+    stats[serverId].count = allUsers.length;
+    stats[serverId].users = allUsers;
+  }
+  
+  return stats;
+};
+
+// Cleanup Empty Rooms (Every 5 minutes)
+setInterval(() => {
+  try {
+    const rooms = db.prepare("SELECT * FROM rooms").all();
+    const stats = getRoomStats();
+    const now = Date.now();
+    const TIMEOUT = 60 * 60 * 1000; // 1 hour
+
+    rooms.forEach(room => {
+      const activeCount = stats[room.id]?.count || 0;
+      const createdAt = new Date(room.created_at).getTime();
+      
+      let createdTime = createdAt;
+      if (isNaN(createdTime)) {
+        createdTime = now; 
+      }
+
+      if (activeCount === 0 && (now - createdTime > TIMEOUT)) {
+        console.log(`[Cleanup] Deleting old empty room: ${room.name} (${room.id})`);
+        db.prepare("DELETE FROM rooms WHERE id = ?").run(room.id);
+        io.emit("room-deleted", room.id);
+      }
+    });
+    
+    // Clean up empty tracking objects
+    for (const roomId in usersInRoom) {
+      if (Object.keys(usersInRoom[roomId]).length === 0) {
+        delete usersInRoom[roomId];
       }
     }
     
-    // Method 2: Include voice users in stats
-    // Voice room format examples: "myroom-1234-general", "myroom-1234-gaming"
-    // Server ID format: "myroom-1234"
-    for (const [voiceRoomId, users] of Object.entries(usersInVoice)) {
-        if (!users || users.length === 0) continue;
-        
-        // Extract server ID by removing the last segment (channel name)
-        const lastDashIndex = voiceRoomId.lastIndexOf('-');
-        if (lastDashIndex === -1) continue;
-        
-        const serverId = voiceRoomId.substring(0, lastDashIndex);
-        if (!serverId) continue;
-        
-        if (!stats[serverId]) {
-            stats[serverId] = { count: 0, users: [] };
-        }
-        
-        // Filter out music bot from display count
-        const voiceNames = users
-            .filter(u => u && u.id !== "music-bot" && u.username)
-            .map(u => u.username);
-        
-        const allUsers = [...new Set([...stats[serverId].users, ...voiceNames])];
-        stats[serverId].count = allUsers.length;
-        stats[serverId].users = allUsers;
-    }
-    
-    // Method 3: Fallback - check Socket.io adapter rooms
-    try {
-        const adapterRooms = io.sockets.adapter.rooms;
-        for (const [roomId, socketSet] of adapterRooms.entries()) {
-            // Skip socket IDs (they are long random strings)
-            if (roomId.length > 30 || roomId.includes('=')) continue;
-            
-            // Extract server ID if this is a voice channel room
-            let targetRoomId = roomId;
-            const lastDash = roomId.lastIndexOf('-');
-            if (lastDash > 0) {
-                const suffix = roomId.substring(lastDash + 1);
-                // Common voice channel suffixes
-                if (['general', 'gaming', 'music', 'chill'].includes(suffix.toLowerCase())) {
-                    targetRoomId = roomId.substring(0, lastDash);
-                }
-            }
-            
-            const socketsInRoom = socketSet.size;
-            if (socketsInRoom > 0) {
-                if (!stats[targetRoomId]) {
-                    stats[targetRoomId] = {
-                        count: socketsInRoom,
-                        users: [`${socketsInRoom} online`]
-                    };
-                } else {
-                    stats[targetRoomId].count = Math.max(stats[targetRoomId].count, socketsInRoom);
-                }
-            }
-        }
-    } catch (err) {
-        // Ignore adapter errors
-    }
-    
-    return stats;
-  };
-
-  // Cleanup Empty Rooms (Every 5 minutes, only delete rooms empty for 1 hour)
-  setInterval(() => {
-      try {
-          const rooms = db.prepare("SELECT * FROM rooms").all();
-          const stats = getRoomStats();
-          const now = Date.now();
-          const TIMEOUT = 60 * 60 * 1000; // 1 hour - only delete after 1 hour of being empty
-
-          rooms.forEach(room => {
-              const activeCount = stats[room.id]?.count || 0;
-              const createdAt = new Date(room.created_at).getTime();
-              
-              let createdTime = createdAt;
-              if (isNaN(createdTime)) {
-                  createdTime = now; 
-              }
-
-              // Only delete if room is empty AND older than 1 hour
-              if (activeCount === 0 && (now - createdTime > TIMEOUT)) {
-                  console.log(`[Cleanup] Deleting old empty room: ${room.name} (${room.id})`);
-                  db.prepare("DELETE FROM rooms WHERE id = ?").run(room.id);
-                  io.emit("room-deleted", room.id);
-              }
-          });
-          
-          // Clean up empty tracking objects
-          for (const roomId in usersInRoom) {
-              if (Object.keys(usersInRoom[roomId]).length === 0) {
-                  delete usersInRoom[roomId];
-              }
-          }
-          
-          for (const roomId in usersInVoice) {
-              if (usersInVoice[roomId].length === 0) {
-                  delete usersInVoice[roomId];
-              }
-          }
-      } catch (err) {
-          console.error("Cleanup error:", err);
+    for (const roomId in usersInVoice) {
+      if (usersInVoice[roomId].length === 0) {
+        delete usersInVoice[roomId];
       }
-  }, 300000); // Check every 5 minutes (300000ms)
+    }
+  } catch (err) {
+    console.error("Cleanup error:", err);
+  }
+}, 300000);
 
-  io.on("connection", (socket) => {
-    console.log("User connected:", socket.id);
-    
-    // Send current voice users to new connection
-    socket.emit("all-rooms-users", usersInVoice);
+io.on("connection", (socket) => {
+  console.log("User connected:", socket.id);
+  
+  // Send current voice users to new connection
+  socket.emit("all-rooms-users", usersInVoice);
 
   // Join a Text/Socket Room
   socket.on("join-room", (data) => {
-    // data can be roomId string or object { roomId, username }
     const roomId = typeof data === 'object' ? data.roomId : data;
     const username = typeof data === 'object' ? data.username : "Anonymous";
 
@@ -337,7 +304,6 @@ const musicBot = new MusicBot(io, broadcastAllVoiceUsers);
     if (previousRoom && previousRoom !== roomId) {
       if (usersInRoom[previousRoom] && usersInRoom[previousRoom][socket.id]) {
         delete usersInRoom[previousRoom][socket.id];
-        console.log(`[Join] User ${socket.id} left previous room ${previousRoom}`);
       }
       socket.leave(previousRoom);
     }
@@ -351,151 +317,11 @@ const musicBot = new MusicBot(io, broadcastAllVoiceUsers);
     }
     usersInRoom[roomId][socket.id] = username;
     
-    const currentCount = Object.keys(usersInRoom[roomId]).length;
-    console.log(`[Join] User ${socket.id} (${username}) joined room ${roomId}. Total in room: ${currentCount}`);
+    console.log(`[Join] User ${socket.id} (${username}) joined room ${roomId}`);
   });
 
   socket.on("send-message", async (data) => {
     const { content, user, type = "text", fileUrl, fileName, roomId = "general" } = data;
-    
-    // --- Music Bot Commands (/ prefix) ---
-    
-    // /help - Show all commands
-    if (content === "/help") {
-        socket.emit("message-received", {
-            id: Date.now(),
-            content: `Muzik Bot Komutlari:
-/play <sarki adi> - Sarki cal (SoundCloud)
-/skip - Siradaki sarkiya gec
-/queue - Sirayi goster
-/stop - Muzigi durdur ve botu cikar`,
-            user_id: 0,
-            username: "Music Bot",
-            type: "text",
-            room_id: roomId,
-            created_at: new Date().toISOString()
-        });
-        return;
-    }
-    
-    // /play <query> - Play music
-    if (content.startsWith("/play ")) {
-        const query = content.slice(6).trim();
-        const voiceRoomId = socketToRoom[socket.id];
-        
-        if (!voiceRoomId) {
-            socket.emit("message-received", {
-                id: Date.now(),
-                content: "Muzik botu kullanmak icin bir ses kanalina katilmalisin.",
-                user_id: 0,
-                username: "Music Bot",
-                type: "text",
-                room_id: roomId,
-                created_at: new Date().toISOString()
-            });
-            return;
-        }
-
-        // Add Bot to Voice List (Visual)
-        if (!usersInVoice[voiceRoomId]) usersInVoice[voiceRoomId] = [];
-        const botExists = usersInVoice[voiceRoomId].find(u => u.id === "music-bot");
-        
-        if (!botExists) {
-            for (const rId in usersInVoice) {
-                if (rId !== voiceRoomId) {
-                    usersInVoice[rId] = usersInVoice[rId].filter(u => u.id !== "music-bot");
-                    io.to(rId).emit('user-left-voice', "music-bot");
-                    if (usersInVoice[rId].length === 0) delete usersInVoice[rId];
-                }
-            }
-            usersInVoice[voiceRoomId].push({ id: "music-bot", username: "Music Bot" });
-        }
-        
-        // Immediately broadcast to ALL clients that bot joined
-        broadcastAllVoiceUsers();
-        
-        // Also send direct notification to the voice room
-        io.to(voiceRoomId).emit("all-rooms-users", usersInVoice);
-
-        // Add to queue and play
-        musicBot.addToQueue(query, roomId, voiceRoomId).then((success) => {
-            if (success) {
-                // Connect to all existing users in the room
-                const users = usersInVoice[voiceRoomId] || [];
-                users.forEach(u => {
-                    if (u.id !== "music-bot") {
-                        musicBot.initiateConnection(u.id);
-                    }
-                });
-            }
-        });
-        return;
-    }
-    
-    // /skip - Skip current track
-    if (content === "/skip") {
-        musicBot.skip();
-        return;
-    }
-    
-    // /queue - Show queue
-    if (content === "/queue") {
-        const queueList = musicBot.getQueueList();
-        socket.emit("message-received", {
-            id: Date.now(),
-            content: queueList,
-            user_id: 0,
-            username: "Music Bot",
-            type: "text",
-            room_id: roomId,
-            created_at: new Date().toISOString()
-        });
-        return;
-    }
-
-    // /stop - Stop music and disconnect bot
-    if (content === "/stop") {
-        musicBot.stopMusic();
-        musicBot.leave();
-        
-        // Remove bot from ALL voice rooms
-        for (const rId in usersInVoice) {
-            const hadBot = usersInVoice[rId].some(u => u.id === "music-bot");
-            usersInVoice[rId] = usersInVoice[rId].filter(u => u.id !== "music-bot");
-            
-            if (hadBot) {
-                // Notify users in that room that bot left
-                io.to(rId).emit('user-left-voice', "music-bot");
-            }
-            
-            // Clean up empty rooms
-            if (usersInVoice[rId].length === 0) {
-                delete usersInVoice[rId];
-            }
-        }
-        
-        // Broadcast updated list to everyone
-        broadcastAllVoiceUsers();
-        
-        // Also send to the text room
-        io.emit("all-rooms-users", usersInVoice);
-
-        io.to(roomId).emit("message-received", {
-            id: Date.now(),
-            content: "Muzik durduruldu ve bot ayrildi.",
-            user_id: 0,
-            username: "Music Bot",
-            type: "text",
-            room_id: roomId,
-            created_at: new Date().toISOString()
-        });
-        return;
-    }
-
-    // Save regular messages to DB (skip bot commands)
-    if (content.startsWith("/")) {
-        return; // Don't save unknown slash commands
-    }
     
     try {
       const stmt = db.prepare("INSERT INTO messages (content, user_id, username, type, room_id) VALUES (?, ?, ?, ?, ?)");
@@ -514,7 +340,6 @@ const musicBot = new MusicBot(io, broadcastAllVoiceUsers);
       };
 
       io.to(roomId).emit("message-received", message);
-      console.log(`Message sent to room ${roomId} by user ${user.id}: ${content.substring(0, 50)}`);
       
     } catch (err) {
       console.error("Error saving message:", err);
@@ -524,33 +349,26 @@ const musicBot = new MusicBot(io, broadcastAllVoiceUsers);
   socket.on("disconnect", () => {
     console.log("User disconnected:", socket.id);
     
-    // Remove from text room using socketToTextRoom mapping
+    // Remove from text room
     const textRoomId = socketToTextRoom[socket.id];
     if (textRoomId && usersInRoom[textRoomId] && usersInRoom[textRoomId][socket.id]) {
-      const username = usersInRoom[textRoomId][socket.id];
       delete usersInRoom[textRoomId][socket.id];
-      console.log(`[Disconnect] Removed ${username} from text room ${textRoomId}. Remaining: ${Object.keys(usersInRoom[textRoomId]).length}`);
     }
     delete socketToTextRoom[socket.id];
 
-    // Remove user from voice list if they were in it
+    // Remove user from voice list
     const roomID = socketToRoom[socket.id];
     let room = usersInVoice[roomID];
     if (room) {
-      const username = room.find(u => u.id === socket.id)?.username;
       room = room.filter(u => u.id !== socket.id);
       usersInVoice[roomID] = room;
-      console.log(`[Disconnect] Removed ${username} from voice room ${roomID}. Remaining: ${room.length}`);
-      // Notify others to remove this peer
       socket.broadcast.to(roomID).emit('user-left-voice', socket.id);
-      // Broadcast updated room list
       broadcastAllVoiceUsers();
     }
     delete socketToRoom[socket.id];
   });
 
   socket.on("join-voice", (data) => {
-    // data can be just roomId (string) or object { roomId, user }
     const roomId = typeof data === 'object' ? data.roomId : data;
     const userData = typeof data === 'object' ? data.user : { username: "Unknown" };
 
@@ -564,9 +382,9 @@ const musicBot = new MusicBot(io, broadcastAllVoiceUsers);
     // Check if user is already in (prevent duplicates)
     const existingIndex = usersInVoice[roomId].findIndex(u => u.id === socket.id);
     if (existingIndex !== -1) {
-       usersInVoice[roomId][existingIndex] = { id: socket.id, username: userData.username };
+      usersInVoice[roomId][existingIndex] = { id: socket.id, username: userData.username };
     } else {
-       usersInVoice[roomId].push({ id: socket.id, username: userData.username });
+      usersInVoice[roomId].push({ id: socket.id, username: userData.username });
     }
     
     socketToRoom[socket.id] = roomId;
@@ -583,14 +401,10 @@ const musicBot = new MusicBot(io, broadcastAllVoiceUsers);
   });
 
   socket.on("sending-signal", payload => {
-    if (payload.userToSignal === "music-bot") {
-        musicBot.handleSignal(socket.id, payload.signal);
-        return;
-    }
     io.to(payload.userToSignal).emit('user-joined-voice', { 
-        signal: payload.signal, 
-        callerID: payload.callerID,
-        username: payload.username // Pass username through signal
+      signal: payload.signal, 
+      callerID: payload.callerID,
+      username: payload.username
     });
   });
 
@@ -604,10 +418,10 @@ const musicBot = new MusicBot(io, broadcastAllVoiceUsers);
     if (room) {
       room = room.filter(u => u.id !== socket.id);
       usersInVoice[roomID] = room;
-      socket.broadcast.to(roomID).emit('user-left-voice', socket.id); // Broadcast to room only
+      socket.broadcast.to(roomID).emit('user-left-voice', socket.id);
       broadcastAllVoiceUsers();
     }
-    if (roomID) socket.leave(roomID); // Leave socket room
+    if (roomID) socket.leave(roomID);
     delete socketToRoom[socket.id];
   });
 
