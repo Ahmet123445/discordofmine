@@ -296,58 +296,59 @@ const playLeaveSound = () => {
 
       // B. Pre-Gain - Boosts quiet voices before processing (Compensates for disabled AGC)
       const preGain = audioCtx.createGain();
-      preGain.gain.value = 3.5; // Significant boost to bring levels back to normal
+      preGain.gain.value = 3.0; // Optimized gain (Loud enough but prevents distortion)
 
-      // C. DeepFilterNet - AI Noise Suppression
-      console.log("[VoiceChat] Initializing DeepFilterNet (Loud & Clear Mode)...");
+      // C. DeepFilterNet - AI Noise Suppression (Lite Mode for Performance)
+      console.log("[VoiceChat] Initializing DeepFilterNet (Lite Mode - Performance Optimized)...");
       const processor = new DeepFilterNet3Processor({
           sampleRate: 48000,
           assetConfig: {
               cdnUrl: '/processors'
           },
-          noiseReductionLevel: 45
+          noiseReductionLevel: 30 // PERFORMANCE: Lower level significantly reduces CPU usage
       });
       await processor.initialize();
       const workletNode = await processor.createAudioWorkletNode(audioCtx);
       deepFilterRef.current = processor;
       processor.setNoiseSuppressionEnabled(noiseSuppressionEnabled);
 
-      // D. Body EQ (Low-Mid Boost) - Adds warmth and richness
+      // D. Body EQ (Low-Mid Boost) - Adds warmth and richness using CPU-friendly nodes
       const bodyEQ = audioCtx.createBiquadFilter();
       bodyEQ.type = "peaking";
       bodyEQ.frequency.value = 350;
-      bodyEQ.Q.value = 0.8;
-      bodyEQ.gain.value = 2.5;
+      bodyEQ.Q.value = 0.5; // Wider band for natural warmth
+      bodyEQ.gain.value = 3.0; // +3dB boost
 
       // E. High-Shelf Filter (Air Boost) - Adds studio clarity
       const hsFilter = audioCtx.createBiquadFilter();
       hsFilter.type = "highshelf";
       hsFilter.frequency.value = 5000;
-      hsFilter.gain.value = 3.5;
+      hsFilter.gain.value = 4.0; // +4dB boost for air/presence
 
-      // F. Dynamics Compressor - Professional leveling
+      // F. Dynamics Compressor - Soft leveling
       const compressor = audioCtx.createDynamicsCompressor();
       compressor.threshold.setValueAtTime(-20, audioCtx.currentTime);
-      compressor.knee.setValueAtTime(35, audioCtx.currentTime);
-      compressor.ratio.setValueAtTime(4, audioCtx.currentTime);
-      compressor.attack.setValueAtTime(0.005, audioCtx.currentTime);
+      compressor.knee.setValueAtTime(40, audioCtx.currentTime); // Very soft knee
+      compressor.ratio.setValueAtTime(3.0, audioCtx.currentTime); // Gentle compression
+      compressor.attack.setValueAtTime(0.01, audioCtx.currentTime); // Slower attack for natural transients
       compressor.release.setValueAtTime(0.2, audioCtx.currentTime);
 
-      // G. Post-Gain (Makeup Gain) - Extra boost after compression
+      // G. Post-Gain (Makeup Gain)
       const postGain = audioCtx.createGain();
-      postGain.gain.value = 1.6; // +60% additional boost
+      postGain.gain.value = 1.5; // Restore loudness
 
       // H. Smart Noise Gate (VAD) with Hold/Release
+      // SENSITIVITY FIX: Move Analyser to the START of the chain (after preGain)
       const gateNode = audioCtx.createGain();
       const analyser = audioCtx.createAnalyser();
-      analyser.fftSize = 1024;
+      analyser.fftSize = 512; // Smaller for even less CPU
       const bufferLength = analyser.frequencyBinCount;
       const dataArray = new Float32Array(bufferLength);
       
       let lastActiveTime = Date.now();
       let gateOpen = true;
-      const threshold = -42; // dB threshold (Adjusted for higher gain)
-      const holdTimeMs = 1000;
+      const threshold = -58; // SENSITIVITY: Much lower threshold (detects whispers)
+      const holdTimeMs = 1200; // Longer hold for natural speech flow
 
       const updateGate = () => {
         if (!audioContextRef.current) return;
@@ -369,7 +370,7 @@ const playLeaveSound = () => {
           }
         } else if (now - lastActiveTime > holdTimeMs) {
           if (gateOpen) {
-            gateNode.gain.setTargetAtTime(0, audioCtx.currentTime, 0.4);
+            gateNode.gain.setTargetAtTime(0, audioCtx.currentTime, 0.5); // Very smooth fade-out
             gateOpen = false;
           }
         }
@@ -393,17 +394,26 @@ const playLeaveSound = () => {
       destinationNodeRef.current = destination;
 
       // Connect Graph: 
-      // Source -> HPF -> PreGain -> DFN -> BodyEQ -> AirEQ -> Compressor -> PostGain -> Analyser -> Gate -> Limiter -> Dest
-      console.log("[VoiceChat] Connecting Studio Pro v3 (High Volume) Audio Graph");
+      // Source -> HPF -> PreGain -> [ANALYSER BRANCH]
+      //                     |
+      //                     v
+      //                  DFN -> BodyEQ -> AirEQ -> Compressor -> PostGain -> Gate -> Limiter -> Dest
+      console.log("[VoiceChat] Connecting Studio Pro v4 (Gamer Edition) Audio Graph");
+      
       source
         .connect(hpFilter)
-        .connect(preGain)
+        .connect(preGain);
+      
+      // Sensitivity Branch
+      preGain.connect(analyser);
+      
+      // Audio Processing Branch
+      preGain
         .connect(workletNode)
         .connect(bodyEQ)
         .connect(hsFilter)
         .connect(compressor)
         .connect(postGain)
-        .connect(analyser)
         .connect(gateNode)
         .connect(limiter)
         .connect(destination);
