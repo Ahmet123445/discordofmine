@@ -52,6 +52,30 @@ try {
   // Column likely exists
 }
 
+// Room Sessions Table - Persistent user tracking
+// This replaces RAM-based tracking for reliability across restarts
+db.exec(`
+  CREATE TABLE IF NOT EXISTS room_sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    room_id TEXT NOT NULL,
+    socket_id TEXT NOT NULL,
+    username TEXT NOT NULL,
+    session_type TEXT DEFAULT 'text',
+    joined_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    last_heartbeat TEXT DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(room_id, socket_id, session_type)
+  )
+`);
+
+// Create index for faster queries
+try {
+  db.exec("CREATE INDEX IF NOT EXISTS idx_room_sessions_room_id ON room_sessions(room_id)");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_room_sessions_socket_id ON room_sessions(socket_id)");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_room_sessions_heartbeat ON room_sessions(last_heartbeat)");
+} catch (err) {
+  // Indexes may already exist
+}
+
 // NOTE: Seed data removed as per request. Default state is empty.
 
 export default db;

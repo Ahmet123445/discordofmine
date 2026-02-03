@@ -197,6 +197,14 @@ function ChatContent() {
       newSocket.emit("join-room", { roomId, username: parsedUser.username });
     });
 
+    // CRITICAL: Heartbeat to keep session alive in database
+    // Sends every 30 seconds to prevent stale session cleanup
+    const heartbeatInterval = setInterval(() => {
+      if (newSocket.connected) {
+        newSocket.emit("heartbeat", { roomId });
+      }
+    }, 30000);
+
     newSocket.on("disconnect", () => {
       console.log("Disconnected from socket server");
       setIsConnected(false);
@@ -225,6 +233,7 @@ function ChatContent() {
     });
 
     return () => {
+      clearInterval(heartbeatInterval);
       setIsConnected(false);
       newSocket.disconnect();
     };

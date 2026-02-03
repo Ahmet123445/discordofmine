@@ -8,7 +8,7 @@ import authRoutes from "./routes/auth.js";
 import uploadRoutes from "./routes/upload.js";
 import path from "path";
 
-// Version: 1.1.0 - Added reconnect support for room tracking
+// Version: 2.0.0 - Database-based session tracking for reliability
 dotenv.config();
 
 const app = express();
@@ -290,8 +290,8 @@ app.get("/health", (req, res) => {
   res.json({ status: "ok", uptime: process.uptime(), connections: io.engine.clientsCount });
 });
 
-const usersInVoice = {}; // { roomId: [{ id, username }] }
-const usersInRoom = {}; // { roomId: { socketId: username } } for text/presence
+const usersInVoice = {}; // { roomId: [{ id, username }] } - kept for real-time WebRTC signaling
+const usersInRoom = {}; // { roomId: { socketId: username } } - kept for compatibility
 const socketToRoom = {}; // { socketId: roomId } for voice
 const socketToTextRoom = {}; // { socketId: roomId } for text
 const roomEmptyTimestamps = {}; // { roomId: timestamp } - when room became empty
@@ -299,6 +299,87 @@ const roomEmptyTimestamps = {}; // { roomId: timestamp } - when room became empt
 // --- Persistence Protection ---
 const SERVER_START_TIME = Date.now();
 const GRACE_PERIOD_MS = 5 * 60 * 1000; // 5 minutes grace period on startup
+
+// ============================================================================
+// DATABASE SESSION MANAGEMENT - The Single Source of Truth
+// All user tracking is now persisted in SQLite for reliability
+// ============================================================================
+
+// Clean up stale sessions on server start (sessions without heartbeat for 5+ min)
+const cleanupStaleSessions = () => {
+  try {
+    const fiveMinAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+    const result = db.prepare("DELETE FROM room_sessions WHERE last_heartbeat < ?").run(fiveMinAgo);
+    if (result.changes > 0) {
+      console.log(`[Startup] Cleaned up ${result.changes} stale sessions`);
+    }
+  } catch (err) {
+    console.error("[Startup] Error cleaning stale sessions:", err);
+  }
+};
+
+// Run cleanup on startup
+cleanupStaleSessions();
+
+/**
+ * Add a session to the database
+ */
+const addSession = (roomId, socketId, username, sessionType = 'text') => {
+  try {
+    const now = new Date().toISOString();
+    db.prepare(`
+      INSERT OR REPLACE INTO room_sessions (room_id, socket_id, username, session_type, joined_at, last_heartbeat)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(roomId, socketId, username, sessionType, now, now);
+    console.log(`[Session] Added ${sessionType} session: ${username} in ${roomId}`);
+  } catch (err) {
+    console.error("[Session] Error adding session:", err);
+  }
+};
+
+/**
+ * Remove a session from the database
+ */
+const removeSession = (socketId, sessionType = null) => {
+  try {
+    if (sessionType) {
+      db.prepare("DELETE FROM room_sessions WHERE socket_id = ? AND session_type = ?").run(socketId, sessionType);
+    } else {
+      db.prepare("DELETE FROM room_sessions WHERE socket_id = ?").run(socketId);
+    }
+    console.log(`[Session] Removed sessions for socket ${socketId}`);
+  } catch (err) {
+    console.error("[Session] Error removing session:", err);
+  }
+};
+
+/**
+ * Update heartbeat for a socket
+ */
+const updateHeartbeat = (socketId) => {
+  try {
+    const now = new Date().toISOString();
+    db.prepare("UPDATE room_sessions SET last_heartbeat = ? WHERE socket_id = ?").run(now, socketId);
+  } catch (err) {
+    console.error("[Session] Error updating heartbeat:", err);
+  }
+};
+
+/**
+ * Get sessions for a room (including voice channels)
+ */
+const getSessionsForRoom = (roomId) => {
+  try {
+    // Get sessions for this room AND all voice channels under it
+    return db.prepare(`
+      SELECT DISTINCT username, session_type FROM room_sessions 
+      WHERE room_id = ? OR room_id LIKE ?
+    `).all(roomId, `${roomId}-%`);
+  } catch (err) {
+    console.error("[Session] Error getting sessions:", err);
+    return [];
+  }
+};
 
 // Broadcast all voice room users to all connected clients
 const broadcastAllVoiceUsers = () => {
@@ -313,54 +394,49 @@ const broadcastAllVoiceUsers = () => {
 // ============================================================================
 
 /**
- * Get the REAL user count for a room by checking ALL possible sources
+ * Get the REAL user count for a room by checking the DATABASE
  * This function is the SINGLE SOURCE OF TRUTH for user counts
  */
 const getRealUserCount = (roomId) => {
-  const usernames = new Set();
-  
-  // Source 1: Text/presence users (usersInRoom)
-  if (usersInRoom[roomId]) {
-    const textUsers = Object.values(usersInRoom[roomId]);
-    textUsers.forEach(name => {
-      if (name) usernames.add(name);
-    });
-  }
-  
-  // Source 2: Voice users - check all voice channels for this server
-  // Voice room format: "serverid-channelname" (e.g., "myroom-1234-general")
-  for (const [voiceRoomId, users] of Object.entries(usersInVoice)) {
-    if (!users || users.length === 0) continue;
+  try {
+    // Query database for all sessions in this room and its voice channels
+    const sessions = db.prepare(`
+      SELECT DISTINCT username FROM room_sessions 
+      WHERE room_id = ? OR room_id LIKE ?
+    `).all(roomId, `${roomId}-%`);
     
-    // Check if this voice room belongs to this server
-    // Voice room: "myroom-1234-general", Server: "myroom-1234"
-    if (voiceRoomId.startsWith(roomId + '-') || voiceRoomId === roomId) {
-      users.forEach(u => {
-        if (u && u.username) usernames.add(u.username);
+    const usernames = sessions.map(s => s.username);
+    
+    return {
+      count: usernames.length,
+      users: usernames
+    };
+  } catch (err) {
+    console.error("[getRealUserCount] Database error:", err);
+    
+    // Fallback to RAM-based counting if DB fails
+    const usernames = new Set();
+    
+    if (usersInRoom[roomId]) {
+      Object.values(usersInRoom[roomId]).forEach(name => {
+        if (name) usernames.add(name);
       });
     }
-  }
-  
-  let socketCount = 0;
-  // Source 3: Socket.io adapter rooms (fallback)
-  try {
-    const adapterRoom = io.sockets.adapter.rooms.get(roomId);
-    if (adapterRoom && adapterRoom.size > 0) {
-      socketCount = adapterRoom.size;
+    
+    for (const [voiceRoomId, users] of Object.entries(usersInVoice)) {
+      if (!users || users.length === 0) continue;
+      if (voiceRoomId.startsWith(roomId + '-') || voiceRoomId === roomId) {
+        users.forEach(u => {
+          if (u && u.username) usernames.add(u.username);
+        });
+      }
     }
-  } catch (e) {
-    // Ignore adapter errors
+    
+    return {
+      count: usernames.size,
+      users: Array.from(usernames)
+    };
   }
-  
-  // Fix: Don't sum up counts. Use unique usernames count.
-  // Only fallback to socketCount if for some reason we have sockets but no usernames (rare edge case)
-  const uniqueUserCount = usernames.size;
-  const finalCount = uniqueUserCount > 0 ? uniqueUserCount : socketCount;
-  
-  return {
-    count: finalCount,
-    users: Array.from(usernames)
-  };
 };
 
 /**
@@ -424,6 +500,13 @@ const getRoomStats = () => {
 // ============================================================================
 setInterval(() => {
   try {
+    // First, clean up stale sessions (no heartbeat for 5 minutes)
+    const fiveMinAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+    const staleResult = db.prepare("DELETE FROM room_sessions WHERE last_heartbeat < ?").run(fiveMinAgo);
+    if (staleResult.changes > 0) {
+      console.log(`[Cleanup] Removed ${staleResult.changes} stale sessions`);
+    }
+    
     const rooms = db.prepare("SELECT * FROM rooms").all();
     const now = Date.now();
     const DELETE_AFTER_MS = 30 * 1000; // 30 seconds
@@ -495,6 +578,9 @@ io.on("connection", (socket) => {
     // Leave previous text room if any
     const previousRoom = socketToTextRoom[socket.id];
     if (previousRoom && previousRoom !== roomId) {
+      // Remove from DB
+      removeSession(socket.id, 'text');
+      
       if (usersInRoom[previousRoom] && usersInRoom[previousRoom][socket.id]) {
         delete usersInRoom[previousRoom][socket.id];
         // Check if previous room is now empty
@@ -508,11 +594,14 @@ io.on("connection", (socket) => {
     socket.join(roomId);
     socketToTextRoom[socket.id] = roomId;
     
-    // Track user in room
+    // Track user in room (RAM for compatibility)
     if (!usersInRoom[roomId]) {
       usersInRoom[roomId] = {};
     }
     usersInRoom[roomId][socket.id] = username;
+    
+    // CRITICAL: Add to database for persistence
+    addSession(roomId, socket.id, username, 'text');
     
     // CRITICAL: Mark room as occupied - cancels any pending deletion
     markRoomAsOccupied(roomId);
@@ -578,7 +667,10 @@ io.on("connection", (socket) => {
   socket.on("disconnect", () => {
     console.log("User disconnected:", socket.id);
     
-    // Remove from text room
+    // CRITICAL: Remove ALL sessions for this socket from database
+    removeSession(socket.id);
+    
+    // Remove from text room (RAM)
     const textRoomId = socketToTextRoom[socket.id];
     if (textRoomId && usersInRoom[textRoomId] && usersInRoom[textRoomId][socket.id]) {
       delete usersInRoom[textRoomId][socket.id];
@@ -589,7 +681,7 @@ io.on("connection", (socket) => {
     }
     delete socketToTextRoom[socket.id];
 
-    // Remove user from voice list
+    // Remove user from voice list (RAM for WebRTC signaling)
     const roomID = socketToRoom[socket.id];
     let room = usersInVoice[roomID];
     if (room) {
@@ -599,20 +691,11 @@ io.on("connection", (socket) => {
       broadcastAllVoiceUsers();
       
       // Check if voice room's server is now empty
-      // Voice room format: "serverid-channelname"
-      if (room.length === 0) {
+      if (room.length === 0 && roomID) {
         const lastDash = roomID.lastIndexOf('-');
         if (lastDash > 0) {
           const serverId = roomID.substring(0, lastDash);
-          // Only mark as empty if no other voice channels have users
-          let serverHasUsers = false;
-          for (const [vRoomId, vUsers] of Object.entries(usersInVoice)) {
-            if (vRoomId.startsWith(serverId + '-') && vUsers && vUsers.length > 0) {
-              serverHasUsers = true;
-              break;
-            }
-          }
-          if (!serverHasUsers && !isRoomProtected(serverId)) {
+          if (!isRoomProtected(serverId)) {
             markRoomAsEmpty(serverId);
           }
         }
@@ -627,7 +710,7 @@ io.on("connection", (socket) => {
 
     console.log(`User ${socket.id} (${userData.username}) joining voice in ${roomId}`);
     
-    // Add to voice list
+    // Add to voice list (RAM for WebRTC signaling)
     if (!usersInVoice[roomId]) {
       usersInVoice[roomId] = [];
     }
@@ -644,6 +727,9 @@ io.on("connection", (socket) => {
     
     // Join socket room for signaling
     socket.join(roomId);
+    
+    // CRITICAL: Add voice session to database
+    addSession(roomId, socket.id, userData.username, 'voice');
     
     // CRITICAL: Mark the server as occupied
     // Voice room format: "serverid-channelname"
@@ -675,6 +761,10 @@ io.on("connection", (socket) => {
 
   socket.on("leave-voice", () => {
     const roomID = socketToRoom[socket.id];
+    
+    // CRITICAL: Remove voice session from database
+    removeSession(socket.id, 'voice');
+    
     let room = usersInVoice[roomID];
     if (room) {
       room = room.filter(u => u.id !== socket.id);
@@ -687,15 +777,7 @@ io.on("connection", (socket) => {
         const lastDash = roomID.lastIndexOf('-');
         if (lastDash > 0) {
           const serverId = roomID.substring(0, lastDash);
-          // Only mark as empty if no other voice channels have users
-          let serverHasUsers = false;
-          for (const [vRoomId, vUsers] of Object.entries(usersInVoice)) {
-            if (vRoomId.startsWith(serverId + '-') && vUsers && vUsers.length > 0) {
-              serverHasUsers = true;
-              break;
-            }
-          }
-          if (!serverHasUsers && !isRoomProtected(serverId)) {
+          if (!isRoomProtected(serverId)) {
             markRoomAsEmpty(serverId);
           }
         }
@@ -703,6 +785,11 @@ io.on("connection", (socket) => {
     }
     if (roomID) socket.leave(roomID);
     delete socketToRoom[socket.id];
+  });
+
+  // Heartbeat handler - client sends this every 30 seconds
+  socket.on("heartbeat", (data) => {
+    updateHeartbeat(socket.id);
   });
 
 });

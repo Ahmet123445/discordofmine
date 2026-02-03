@@ -146,6 +146,24 @@ const playLeaveSound = () => {
     };
   }, [socket, PeerClass, inVoice, currentInternalRoomId, serverId, user]);
 
+  // CRITICAL: Heartbeat to keep session alive in database
+  // Sends every 30 seconds to prevent stale session cleanup
+  useEffect(() => {
+    if (!socket || !inVoice || !currentInternalRoomId) return;
+    
+    const namespacedRoomId = `${serverId}-${currentInternalRoomId}`;
+    
+    // Send heartbeat immediately on join
+    socket.emit("heartbeat", { roomId: namespacedRoomId });
+    
+    // Then send every 30 seconds
+    const interval = setInterval(() => {
+      socket.emit("heartbeat", { roomId: namespacedRoomId });
+    }, 30000);
+    
+    return () => clearInterval(interval);
+  }, [socket, inVoice, currentInternalRoomId, serverId]);
+
   // Keyboard Shortcuts
   useEffect(() => {
     if (!mounted) return;
