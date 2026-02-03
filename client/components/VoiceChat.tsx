@@ -272,9 +272,9 @@ const playLeaveSound = () => {
         audio: {
           sampleRate: 48000,
           channelCount: 1,
-          echoCancellation: true, 
-          noiseSuppression: false, // We will use DeepFilterNet
-          autoGainControl: true
+          echoCancellation: true, // Keep hardware EC
+          noiseSuppression: false, // RAW input for AI
+          autoGainControl: false   // STABILITY: Disable browser AGC to prevent "sliding" quality
         } 
       });
 
@@ -289,58 +289,66 @@ const playLeaveSound = () => {
       // Premium Audio Chain Initialization
       // --------------------------------------------------------
 
-      // A. High-Pass Filter (80Hz) - Removes low-end rumble/fan hum
+      // A. High-Pass Filter (60Hz) - Removes sub-bass rumble without cutting vocal body
       const hpFilter = audioCtx.createBiquadFilter();
       hpFilter.type = "highpass";
-      hpFilter.frequency.value = 80;
+      hpFilter.frequency.value = 60;
 
       // B. Pre-Gain - Boosts quiet voices before processing
       const preGain = audioCtx.createGain();
-      preGain.gain.value = 1.25; // +25% boost
+      preGain.gain.value = 1.2; // +20% boost
 
       // C. DeepFilterNet - AI Noise Suppression
-      console.log("[VoiceChat] Initializing DeepFilterNet (Optimized)...");
+      console.log("[VoiceChat] Initializing DeepFilterNet (Musical Mode)...");
       const processor = new DeepFilterNet3Processor({
           sampleRate: 48000,
           assetConfig: {
               cdnUrl: '/processors'
           },
-          noiseReductionLevel: 65 // Optimized level (Natural & Effective)
+          noiseReductionLevel: 45 // STABILITY: Lower reduction for better musicality/less robotic tone
       });
       await processor.initialize();
       const workletNode = await processor.createAudioWorkletNode(audioCtx);
       deepFilterRef.current = processor;
       processor.setNoiseSuppressionEnabled(noiseSuppressionEnabled);
 
-      // D. High-Shelf Filter (Clarity Boost) - Adds air and detail
+      // D. Body EQ (Low-Mid Boost) - Adds warmth and richness
+      const bodyEQ = audioCtx.createBiquadFilter();
+      bodyEQ.type = "peaking";
+      bodyEQ.frequency.value = 350;
+      bodyEQ.Q.value = 0.8;
+      bodyEQ.gain.value = 2.5; // +2.5dB boost
+
+      // E. High-Shelf Filter (Air Boost) - Adds studio clarity and "breath"
       const hsFilter = audioCtx.createBiquadFilter();
       hsFilter.type = "highshelf";
-      hsFilter.frequency.value = 4000;
-      hsFilter.gain.value = 3; // +3dB boost for presence
+      hsFilter.frequency.value = 5000;
+      hsFilter.gain.value = 3.5; // +3.5dB boost for air
 
-      // E. Dynamics Compressor - Balances volume levels
+      // F. Dynamics Compressor - Professional "Opto" style leveling
       const compressor = audioCtx.createDynamicsCompressor();
-      compressor.threshold.setValueAtTime(-24, audioCtx.currentTime);
-      compressor.knee.setValueAtTime(30, audioCtx.currentTime);
-      compressor.ratio.setValueAtTime(4, audioCtx.currentTime);
-      compressor.attack.setValueAtTime(0.003, audioCtx.currentTime);
-      compressor.release.setValueAtTime(0.25, audioCtx.currentTime);
+      compressor.threshold.setValueAtTime(-22, audioCtx.currentTime);
+      compressor.knee.setValueAtTime(35, audioCtx.currentTime); // Soft knee
+      compressor.ratio.setValueAtTime(3.5, audioCtx.currentTime); // Gentle ratio
+      compressor.attack.setValueAtTime(0.005, audioCtx.currentTime);
+      compressor.release.setValueAtTime(0.2, audioCtx.currentTime);
 
-      // F. Smart Noise Gate (VAD) - Eliminates background hiss
+      // G. Smart Noise Gate (VAD) with Hold/Release - Eliminates hiss
       const gateNode = audioCtx.createGain();
       const analyser = audioCtx.createAnalyser();
-      analyser.fftSize = 2048;
+      analyser.fftSize = 1024; // Smaller for faster response
       const bufferLength = analyser.frequencyBinCount;
       const dataArray = new Float32Array(bufferLength);
       
+      let lastActiveTime = Date.now();
       let gateOpen = true;
-      const threshold = -55; // dB threshold for gate
+      const threshold = -52; // dB threshold
+      const holdTimeMs = 1000; // Hold for 1 second after speech stops
 
       const updateGate = () => {
         if (!audioContextRef.current) return;
         analyser.getFloatTimeDomainData(dataArray);
         
-        // Calculate RMS (Volume)
         let sum = 0;
         for (let i = 0; i < dataArray.length; i++) {
           sum += dataArray[i] * dataArray[i];
@@ -348,21 +356,30 @@ const playLeaveSound = () => {
         const rms = Math.sqrt(sum / dataArray.length);
         const db = 20 * Math.log10(rms || 0.000001);
 
-        // Simple Attack/Release logic
+        const now = Date.now();
         if (db > threshold) {
+          lastActiveTime = now;
           if (!gateOpen) {
-            gateNode.gain.setTargetAtTime(1, audioCtx.currentTime, 0.05);
+            gateNode.gain.setTargetAtTime(1, audioCtx.currentTime, 0.05); // Rapid open
             gateOpen = true;
           }
-        } else {
+        } else if (now - lastActiveTime > holdTimeMs) {
           if (gateOpen) {
-            gateNode.gain.setTargetAtTime(0, audioCtx.currentTime, 0.15);
+            gateNode.gain.setTargetAtTime(0, audioCtx.currentTime, 0.4); // Smooth fade-out
             gateOpen = false;
           }
         }
         gateIntervalRef.current = window.requestAnimationFrame(updateGate);
       };
       updateGate();
+
+      // H. Peak Limiter - Prevents digital clipping/distortion
+      const limiter = audioCtx.createDynamicsCompressor();
+      limiter.threshold.setValueAtTime(-1, audioCtx.currentTime); // Hard ceiling
+      limiter.knee.setValueAtTime(0, audioCtx.currentTime);
+      limiter.ratio.setValueAtTime(20, audioCtx.currentTime);
+      limiter.attack.setValueAtTime(0.001, audioCtx.currentTime);
+      limiter.release.setValueAtTime(0.1, audioCtx.currentTime);
 
       // Create Nodes
       const source = audioCtx.createMediaStreamSource(micStream);
@@ -372,16 +389,18 @@ const playLeaveSound = () => {
       destinationNodeRef.current = destination;
 
       // Connect Graph: 
-      // Source -> HP Filter -> Pre-Gain -> DeepFilterNet -> Clarity Filter -> Compressor -> Analyser -> Gate -> Destination
-      console.log("[VoiceChat] Connecting Premium Audio Graph");
+      // Source -> HPF -> Gain -> DFN -> BodyEQ -> AirEQ -> Compressor -> Analyser -> Gate -> Limiter -> Dest
+      console.log("[VoiceChat] Connecting Studio Pro v2 Audio Graph");
       source
         .connect(hpFilter)
         .connect(preGain)
         .connect(workletNode)
+        .connect(bodyEQ)
         .connect(hsFilter)
         .connect(compressor)
         .connect(analyser)
         .connect(gateNode)
+        .connect(limiter)
         .connect(destination);
 
       // Use the PROCESSED stream for peers
