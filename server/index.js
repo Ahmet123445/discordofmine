@@ -296,6 +296,10 @@ const socketToRoom = {}; // { socketId: roomId } for voice
 const socketToTextRoom = {}; // { socketId: roomId } for text
 const roomEmptyTimestamps = {}; // { roomId: timestamp } - when room became empty
 
+// --- Persistence Protection ---
+const SERVER_START_TIME = Date.now();
+const GRACE_PERIOD_MS = 5 * 60 * 1000; // 5 minutes grace period on startup
+
 // Broadcast all voice room users to all connected clients
 const broadcastAllVoiceUsers = () => {
   io.emit("all-rooms-users", usersInVoice);
@@ -438,6 +442,14 @@ setInterval(() => {
       
       const emptyTime = roomEmptyTimestamps[room.id];
       if (emptyTime && (now - emptyTime >= DELETE_AFTER_MS)) {
+        // RULE 3: Persistence Protection
+        // If server started recently, do NOT delete any rooms yet.
+        // This gives users time to auto-reconnect and repopulate tracking objects.
+        if (now - SERVER_START_TIME < GRACE_PERIOD_MS) {
+          console.log(`[Cleanup] Postponing deletion of ${room.id} - Server in grace period`);
+          return;
+        }
+
         // Final safety check before deletion
         if (isRoomProtected(room.id)) {
           console.log(`[Cleanup] BLOCKED deletion of ${room.id} - users detected at last moment`);
