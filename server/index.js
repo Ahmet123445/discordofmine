@@ -318,8 +318,12 @@ const cleanupStaleSessions = () => {
   }
 };
 
-// Run cleanup on startup
-cleanupStaleSessions();
+// Run cleanup AFTER grace period (not immediately on startup)
+// This allows clients to reconnect before we delete their sessions
+setTimeout(() => {
+  console.log("[Startup] Grace period ended, running initial stale session cleanup");
+  cleanupStaleSessions();
+}, GRACE_PERIOD_MS);
 
 /**
  * Add a session to the database
@@ -500,16 +504,23 @@ const getRoomStats = () => {
 // ============================================================================
 setInterval(() => {
   try {
-    // First, clean up stale sessions (no heartbeat for 5 minutes)
-    const fiveMinAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString();
-    const staleResult = db.prepare("DELETE FROM room_sessions WHERE last_heartbeat < ?").run(fiveMinAgo);
-    if (staleResult.changes > 0) {
-      console.log(`[Cleanup] Removed ${staleResult.changes} stale sessions`);
+    const now = Date.now();
+    const DELETE_AFTER_MS = 30 * 1000; // 30 seconds
+    
+    // CRITICAL: Only clean up stale sessions AFTER grace period
+    // This gives clients time to reconnect after server restart
+    if (now - SERVER_START_TIME >= GRACE_PERIOD_MS) {
+      const fiveMinAgo = new Date(now - 5 * 60 * 1000).toISOString();
+      const staleResult = db.prepare("DELETE FROM room_sessions WHERE last_heartbeat < ?").run(fiveMinAgo);
+      if (staleResult.changes > 0) {
+        console.log(`[Cleanup] Removed ${staleResult.changes} stale sessions`);
+      }
+    } else {
+      const remaining = Math.round((GRACE_PERIOD_MS - (now - SERVER_START_TIME)) / 1000);
+      console.log(`[Cleanup] Grace period active (${remaining}s left) - skipping stale session cleanup`);
     }
     
     const rooms = db.prepare("SELECT * FROM rooms").all();
-    const now = Date.now();
-    const DELETE_AFTER_MS = 30 * 1000; // 30 seconds
 
     rooms.forEach(room => {
       const { count } = getRealUserCount(room.id);

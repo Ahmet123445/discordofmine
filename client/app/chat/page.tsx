@@ -188,6 +188,8 @@ function ChatContent() {
       setIsConnected(true);
       // Join specific text room with username for tracking
       newSocket.emit("join-room", { roomId, username: parsedUser.username });
+      // CRITICAL: Send immediate heartbeat to establish session in database
+      newSocket.emit("heartbeat", { roomId });
     });
 
     // Handle reconnection - re-join room after reconnect
@@ -195,6 +197,8 @@ function ChatContent() {
       console.log("Reconnected to socket server");
       setIsConnected(true);
       newSocket.emit("join-room", { roomId, username: parsedUser.username });
+      // CRITICAL: Send immediate heartbeat on reconnect
+      newSocket.emit("heartbeat", { roomId });
     });
 
     // CRITICAL: Heartbeat to keep session alive in database
