@@ -272,9 +272,9 @@ const playLeaveSound = () => {
         audio: {
           sampleRate: 48000,
           channelCount: 1,
-          echoCancellation: true, // Keep hardware EC
-          noiseSuppression: false, // RAW input for AI
-          autoGainControl: false   // STABILITY: Disable browser AGC to prevent "sliding" quality
+          echoCancellation: true,   // Keep hardware EC
+          noiseSuppression: false,  // AI handles this
+          autoGainControl: true     // ENABLED: Stabilizes volume over time
         } 
       });
 
@@ -286,69 +286,44 @@ const playLeaveSound = () => {
       audioContextRef.current = audioCtx;
 
       // --------------------------------------------------------
-      // Premium Audio Chain Initialization
+      // Crystal Clear Gamer - Minimalist Audio Chain
+      // Fewer nodes = Less CPU = No lag = No robotic sound
       // --------------------------------------------------------
 
-      // A. High-Pass Filter (60Hz) - Removes sub-bass rumble without cutting vocal body
+      // A. High-Pass Filter (80Hz) - Removes fan/AC rumble
       const hpFilter = audioCtx.createBiquadFilter();
       hpFilter.type = "highpass";
-      hpFilter.frequency.value = 60;
+      hpFilter.frequency.value = 80;
 
-      // B. Pre-Gain - Boosts quiet voices before processing (Compensates for disabled AGC)
+      // B. Pre-Gain - Moderate boost (AGC handles most of it)
       const preGain = audioCtx.createGain();
-      preGain.gain.value = 3.0; // Optimized gain (Loud enough but prevents distortion)
+      preGain.gain.value = 2.0; // +6dB boost
 
-      // C. DeepFilterNet - AI Noise Suppression (Lite Mode for Performance)
-      console.log("[VoiceChat] Initializing DeepFilterNet (Lite Mode - Performance Optimized)...");
+      // C. DeepFilterNet - Minimal AI (Just enough for keyboard clicks)
+      console.log("[VoiceChat] Initializing DeepFilterNet (Crystal Clear Gamer - 20%)...");
       const processor = new DeepFilterNet3Processor({
           sampleRate: 48000,
           assetConfig: {
               cdnUrl: '/processors'
           },
-          noiseReductionLevel: 30 // PERFORMANCE: Lower level significantly reduces CPU usage
+          noiseReductionLevel: 20 // MINIMAL: Preserves voice 100%, removes clicks
       });
       await processor.initialize();
       const workletNode = await processor.createAudioWorkletNode(audioCtx);
       deepFilterRef.current = processor;
       processor.setNoiseSuppressionEnabled(noiseSuppressionEnabled);
 
-      // D. Body EQ (Low-Mid Boost) - Adds warmth and richness using CPU-friendly nodes
-      const bodyEQ = audioCtx.createBiquadFilter();
-      bodyEQ.type = "peaking";
-      bodyEQ.frequency.value = 350;
-      bodyEQ.Q.value = 0.5; // Wider band for natural warmth
-      bodyEQ.gain.value = 3.0; // +3dB boost
-
-      // E. High-Shelf Filter (Air Boost) - Adds studio clarity
-      const hsFilter = audioCtx.createBiquadFilter();
-      hsFilter.type = "highshelf";
-      hsFilter.frequency.value = 5000;
-      hsFilter.gain.value = 4.0; // +4dB boost for air/presence
-
-      // F. Dynamics Compressor - Soft leveling
-      const compressor = audioCtx.createDynamicsCompressor();
-      compressor.threshold.setValueAtTime(-20, audioCtx.currentTime);
-      compressor.knee.setValueAtTime(40, audioCtx.currentTime); // Very soft knee
-      compressor.ratio.setValueAtTime(3.0, audioCtx.currentTime); // Gentle compression
-      compressor.attack.setValueAtTime(0.01, audioCtx.currentTime); // Slower attack for natural transients
-      compressor.release.setValueAtTime(0.2, audioCtx.currentTime);
-
-      // G. Post-Gain (Makeup Gain)
-      const postGain = audioCtx.createGain();
-      postGain.gain.value = 1.5; // Restore loudness
-
-      // H. Smart Noise Gate (VAD) with Hold/Release
-      // SENSITIVITY FIX: Move Analyser to the START of the chain (after preGain)
+      // D. Smart Gate - Ultra-sensitive VAD
       const gateNode = audioCtx.createGain();
       const analyser = audioCtx.createAnalyser();
-      analyser.fftSize = 512; // Smaller for even less CPU
+      analyser.fftSize = 256; // Minimum CPU usage
       const bufferLength = analyser.frequencyBinCount;
       const dataArray = new Float32Array(bufferLength);
       
       let lastActiveTime = Date.now();
       let gateOpen = true;
-      const threshold = -58; // SENSITIVITY: Much lower threshold (detects whispers)
-      const holdTimeMs = 1200; // Longer hold for natural speech flow
+      const threshold = -60; // ULTRA SENSITIVE: Detects even whispers
+      const holdTimeMs = 1500; // 1.5s hold for natural speech
 
       const updateGate = () => {
         if (!audioContextRef.current) return;
@@ -365,12 +340,12 @@ const playLeaveSound = () => {
         if (db > threshold) {
           lastActiveTime = now;
           if (!gateOpen) {
-            gateNode.gain.setTargetAtTime(1, audioCtx.currentTime, 0.05);
+            gateNode.gain.setTargetAtTime(1, audioCtx.currentTime, 0.03); // Fast open
             gateOpen = true;
           }
         } else if (now - lastActiveTime > holdTimeMs) {
           if (gateOpen) {
-            gateNode.gain.setTargetAtTime(0, audioCtx.currentTime, 0.5); // Very smooth fade-out
+            gateNode.gain.setTargetAtTime(0, audioCtx.currentTime, 0.6); // Slow fade-out
             gateOpen = false;
           }
         }
@@ -378,7 +353,7 @@ const playLeaveSound = () => {
       };
       updateGate();
 
-      // I. Peak Limiter - Prevents clipping
+      // E. Limiter - Safety net for loud sounds
       const limiter = audioCtx.createDynamicsCompressor();
       limiter.threshold.setValueAtTime(-1, audioCtx.currentTime);
       limiter.knee.setValueAtTime(0, audioCtx.currentTime);
@@ -393,27 +368,20 @@ const playLeaveSound = () => {
       const destination = audioCtx.createMediaStreamDestination();
       destinationNodeRef.current = destination;
 
-      // Connect Graph: 
-      // Source -> HPF -> PreGain -> [ANALYSER BRANCH]
-      //                     |
-      //                     v
-      //                  DFN -> BodyEQ -> AirEQ -> Compressor -> PostGain -> Gate -> Limiter -> Dest
-      console.log("[VoiceChat] Connecting Studio Pro v4 (Gamer Edition) Audio Graph");
+      // Connect Graph (MINIMAL):
+      // Source -> HPF -> PreGain -> [Analyser] -> DFN -> Gate -> Limiter -> Dest
+      console.log("[VoiceChat] Connecting Crystal Clear Gamer Audio Graph (5 nodes only)");
       
       source
         .connect(hpFilter)
         .connect(preGain);
       
-      // Sensitivity Branch - V4.1 Force Trigger
+      // Sensitivity: Analyser listens BEFORE AI processing
       preGain.connect(analyser);
       
-      // Audio Processing Branch
+      // Audio path
       preGain
         .connect(workletNode)
-        .connect(bodyEQ)
-        .connect(hsFilter)
-        .connect(compressor)
-        .connect(postGain)
         .connect(gateNode)
         .connect(limiter)
         .connect(destination);
