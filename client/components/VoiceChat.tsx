@@ -404,7 +404,7 @@ const playLeaveSound = () => {
         .connect(hpFilter)
         .connect(preGain);
       
-      // Sensitivity Branch
+      // Sensitivity Branch - V4.1 Force Trigger
       preGain.connect(analyser);
       
       // Audio Processing Branch
