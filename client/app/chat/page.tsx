@@ -209,6 +209,11 @@ function ChatContent() {
       }
     }, 30000);
 
+    // Render.com Keep-Alive: Ping the health endpoint every 2 minutes
+    const keepAliveInterval = setInterval(() => {
+      fetch(`${API_URL}/health`).catch(() => {});
+    }, 120000);
+
     newSocket.on("disconnect", () => {
       console.log("Disconnected from socket server");
       setIsConnected(false);
@@ -238,6 +243,7 @@ function ChatContent() {
 
     return () => {
       clearInterval(heartbeatInterval);
+      clearInterval(keepAliveInterval);
       setIsConnected(false);
       newSocket.disconnect();
     };

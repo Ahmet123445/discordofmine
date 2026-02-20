@@ -274,8 +274,8 @@ const io = new SocketIOServer(httpServer, {
     methods: ["GET", "POST"]
   },
   // CRITICAL: Ping/Pong settings to prevent Render timeout
-  pingTimeout: 60000,      // 60 seconds - how long to wait for pong
-  pingInterval: 25000,     // 25 seconds - send ping every 25s (Render timeout is 30s)
+  pingTimeout: 60000,      // 60 seconds
+  pingInterval: 20000,     // 20 seconds - more frequent pings to keep Render alive
   transports: ['websocket', 'polling'],
   allowUpgrades: true
 });
@@ -298,7 +298,7 @@ const roomEmptyTimestamps = {}; // { roomId: timestamp } - when room became empt
 
 // --- Persistence Protection ---
 const SERVER_START_TIME = Date.now();
-const GRACE_PERIOD_MS = 5 * 60 * 1000; // 5 minutes grace period on startup
+const GRACE_PERIOD_MS = 1 * 60 * 1000; // 1 minute grace period on startup (reduced from 5)
 
 // ============================================================================
 // DATABASE SESSION MANAGEMENT - The Single Source of Truth
@@ -500,24 +500,17 @@ const getRoomStats = () => {
 
 // ============================================================================
 // Room Cleanup System - CRITICAL LOGIC
-// Runs every 10 seconds to check for rooms that should be deleted
+// Runs every 5 seconds for high responsiveness
 // ============================================================================
 setInterval(() => {
   try {
     const now = Date.now();
-    const DELETE_AFTER_MS = 30 * 1000; // 30 seconds
+    const DELETE_AFTER_MS = 30 * 1000; // STRICT: 30 seconds
     
     // CRITICAL: Only clean up stale sessions AFTER grace period
-    // This gives clients time to reconnect after server restart
     if (now - SERVER_START_TIME >= GRACE_PERIOD_MS) {
       const fiveMinAgo = new Date(now - 5 * 60 * 1000).toISOString();
-      const staleResult = db.prepare("DELETE FROM room_sessions WHERE last_heartbeat < ?").run(fiveMinAgo);
-      if (staleResult.changes > 0) {
-        console.log(`[Cleanup] Removed ${staleResult.changes} stale sessions`);
-      }
-    } else {
-      const remaining = Math.round((GRACE_PERIOD_MS - (now - SERVER_START_TIME)) / 1000);
-      console.log(`[Cleanup] Grace period active (${remaining}s left) - skipping stale session cleanup`);
+      db.prepare("DELETE FROM room_sessions WHERE last_heartbeat < ?").run(fiveMinAgo);
     }
     
     const rooms = db.prepare("SELECT * FROM rooms").all();
@@ -525,55 +518,48 @@ setInterval(() => {
     rooms.forEach(room => {
       const { count } = getRealUserCount(room.id);
       
-      // RULE 1: If room has users, it's PROTECTED - NEVER delete
+      // RULE 1: If room has users (even 1), it's PROTECTED - NEVER delete
       if (count > 0) {
         markRoomAsOccupied(room.id);
-        return; // Skip this room entirely
+        return; 
       }
       
       // RULE 2: Room is empty - start/check countdown
-      markRoomAsEmpty(room.id);
+      if (!roomEmptyTimestamps[room.id]) {
+        markRoomAsEmpty(room.id);
+      }
       
       const emptyTime = roomEmptyTimestamps[room.id];
       if (emptyTime && (now - emptyTime >= DELETE_AFTER_MS)) {
-        // RULE 3: Persistence Protection
-        // If server started recently, do NOT delete any rooms yet.
-        // This gives users time to auto-reconnect and repopulate tracking objects.
+        // RULE 3: Server Warmup Protection (1 min)
         if (now - SERVER_START_TIME < GRACE_PERIOD_MS) {
-          console.log(`[Cleanup] Postponing deletion of ${room.id} - Server in grace period`);
           return;
         }
 
-        // Final safety check before deletion
+        // Final safety check
         if (isRoomProtected(room.id)) {
-          console.log(`[Cleanup] BLOCKED deletion of ${room.id} - users detected at last moment`);
           markRoomAsOccupied(room.id);
           return;
         }
         
-        console.log(`[Cleanup] Deleting empty room: ${room.name} (${room.id}) - empty for 30+ seconds`);
+        console.log(`[Cleanup] Deleting room: ${room.name} (Empty for 30s)`);
         db.prepare("DELETE FROM rooms WHERE id = ?").run(room.id);
         io.emit("room-deleted", room.id);
         delete roomEmptyTimestamps[room.id];
       }
     });
-    
-    // Clean up tracking objects for non-existent rooms
-    for (const roomId in usersInRoom) {
-      if (Object.keys(usersInRoom[roomId]).length === 0) {
-        delete usersInRoom[roomId];
-      }
+
+    // Clean up tracking objects for non-existent rooms to prevent memory leaks
+    for (const rid in usersInRoom) {
+      if (Object.keys(usersInRoom[rid]).length === 0) delete usersInRoom[rid];
     }
-    
-    for (const roomId in usersInVoice) {
-      if (usersInVoice[roomId].length === 0) {
-        delete usersInVoice[roomId];
-      }
+    for (const rid in usersInVoice) {
+      if (usersInVoice[rid].length === 0) delete usersInVoice[rid];
     }
   } catch (err) {
     console.error("Cleanup error:", err);
   }
-}, 10000); // Check every 10 seconds
+}, 5000); // Check every 5 seconds for precision
 
 io.on("connection", (socket) => {
   console.log("User connected:", socket.id);
