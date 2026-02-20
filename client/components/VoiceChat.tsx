@@ -300,8 +300,8 @@ const setBitrate = (sdp: string, bitrate: number) => {
           sampleRate: 48000,
           channelCount: 1,
           echoCancellation: true,   // Keep hardware EC
-          noiseSuppression: false,  // AI handles this
-          autoGainControl: true     // ENABLED: Stabilizes volume over time
+          noiseSuppression: true,   // CRITICAL: Let browser filter out desktop audio (games/apps)
+          autoGainControl: true     // Stabilizes volume over time
         } 
       });
 
@@ -326,14 +326,14 @@ const setBitrate = (sdp: string, bitrate: number) => {
       const preGain = audioCtx.createGain();
       preGain.gain.value = 2.0; // +6dB boost
 
-      // C. DeepFilterNet - Minimal AI (Just enough for keyboard clicks)
-      console.log("[VoiceChat] Initializing DeepFilterNet (Crystal Clear Gamer - 20%)...");
+      // C. DeepFilterNet - AI Noise Cancellation
+      console.log("[VoiceChat] Initializing DeepFilterNet (Aggressive Noise Canceling - 75%)...");
       const processor = new DeepFilterNet3Processor({
           sampleRate: 48000,
           assetConfig: {
               cdnUrl: '/processors'
           },
-          noiseReductionLevel: 20 // MINIMAL: Preserves voice 100%, removes clicks
+          noiseReductionLevel: 75 // AGGRESSIVE: 75/100 to remove game sounds like CS:GO
       });
       await processor.initialize();
       const workletNode = await processor.createAudioWorkletNode(audioCtx);
@@ -349,8 +349,11 @@ const setBitrate = (sdp: string, bitrate: number) => {
       
       let lastActiveTime = Date.now();
       let gateOpen = true;
-      const threshold = -60; // ULTRA SENSITIVE: Detects even whispers
-      const holdTimeMs = 1500; // 1.5s hold for natural speech
+      
+      // Get user's preferred threshold from localStorage, default to -42 (moderate)
+      const savedThreshold = localStorage.getItem("voiceNoiseThreshold");
+      const threshold = savedThreshold ? parseInt(savedThreshold) : -42; // HIGHER THRESHOLD: Stops game audio bleed
+      const holdTimeMs = 800; // FAST CLOSE: Closes mic quickly after speaking (0.8s instead of 1.5s)
 
       const updateGate = () => {
         if (!audioContextRef.current) return;
