@@ -212,7 +212,7 @@ const setBitrate = (sdp: string, bitrate: number) => {
   
   const cleanupAudioContext = () => {
     if (gateIntervalRef.current) {
-      window.cancelAnimationFrame(gateIntervalRef.current);
+      window.clearInterval(gateIntervalRef.current);
       gateIntervalRef.current = null;
     }
     if (deepFilterRef.current) {
@@ -379,9 +379,13 @@ const setBitrate = (sdp: string, bitrate: number) => {
             gateOpen = false;
           }
         }
-        gateIntervalRef.current = window.requestAnimationFrame(updateGate);
       };
-      updateGate();
+      
+      // CRITICAL FIX: Use setInterval instead of requestAnimationFrame
+      // requestAnimationFrame is heavily throttled (to 1fps or stopped) when the tab is in the background
+      // setInterval runs at least once per second in background, keeping the mic gate active
+      gateIntervalRef.current = window.setInterval(updateGate, 50) as unknown as number; // Check 20 times per second
+      updateGate(); // run once immediately
 
       // E. Limiter - Safety net for loud sounds
       const limiter = audioCtx.createDynamicsCompressor();
