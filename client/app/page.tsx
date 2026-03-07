@@ -26,6 +26,19 @@ export default function HomePage() {
     return () => clearInterval(interval);
   }, [tips.length]);
 
+  // Son oturum açan kullanıcı adını otomatik doldur
+  useEffect(() => {
+    try {
+      const savedUser = localStorage.getItem("user");
+      if (savedUser) {
+        const parsed = JSON.parse(savedUser);
+        if (parsed?.username) {
+          setUsername(parsed.username);
+        }
+      }
+    } catch {}
+  }, []);
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
@@ -125,10 +138,17 @@ export default function HomePage() {
             <input
               type="text"
               required
+              autoFocus
               placeholder="Kullanıcı adı giriniz"
               className="relative w-full bg-black/80 text-white rounded-2xl px-6 py-4 text-center text-lg placeholder-zinc-500 focus:outline-none focus:ring-2 focus:ring-purple-500/50 transition-all border border-white/10 backdrop-blur-sm"
               value={username}
               onChange={(e) => setUsername(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && username.trim() && !loading) {
+                  e.preventDefault();
+                  handleSubmit(e as unknown as React.FormEvent);
+                }
+              }}
             />
           </div>
 

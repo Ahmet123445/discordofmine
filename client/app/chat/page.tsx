@@ -278,6 +278,25 @@ function ChatContent() {
       roomId,
     });
 
+    // Mesaj gönderme sesi (Web Audio API)
+    if (typeof window !== "undefined") {
+      try {
+        const ctx = new AudioContext();
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.type = "sine";
+        osc.frequency.setValueAtTime(880, ctx.currentTime);
+        osc.frequency.exponentialRampToValueAtTime(660, ctx.currentTime + 0.08);
+        gain.gain.setValueAtTime(0.08, ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.12);
+        osc.start(ctx.currentTime);
+        osc.stop(ctx.currentTime + 0.12);
+        osc.onended = () => ctx.close();
+      } catch {}
+    }
+
     setInputValue("");
   };
 
