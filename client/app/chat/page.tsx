@@ -240,7 +240,7 @@ function ChatContent() {
         setMessages((prev) => [...prev, message]);
 
         // Başkasından gelen mesajlarda ses çal (kendi mesajımda çift ses olmasın)
-        if (message.user?.id !== user?.id) {
+        if (message.user_id !== parsedUser.id) {
           if (typeof window !== "undefined") {
             try {
               const ctx = new AudioContext();
@@ -278,7 +278,7 @@ function ChatContent() {
       setIsConnected(false);
       newSocket.disconnect();
     };
-  }, [router, roomId, user]);
+  }, [router, roomId]);
 
   const handleSendMessage = (e: React.FormEvent) => {
     e.preventDefault();
