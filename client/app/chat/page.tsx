@@ -238,6 +238,27 @@ function ChatContent() {
       // Only add if it belongs to this room (socket.io broadcast filtering is safer but this is double check)
       if (message && message.id && message.room_id === roomId) {
         setMessages((prev) => [...prev, message]);
+
+        // Başkasından gelen mesajlarda ses çal (kendi mesajımda çift ses olmasın)
+        if (message.user?.id !== user?.id) {
+          if (typeof window !== "undefined") {
+            try {
+              const ctx = new AudioContext();
+              const osc = ctx.createOscillator();
+              const gain = ctx.createGain();
+              osc.connect(gain);
+              gain.connect(ctx.destination);
+              osc.type = "sine";
+              osc.frequency.setValueAtTime(880, ctx.currentTime);
+              osc.frequency.exponentialRampToValueAtTime(660, ctx.currentTime + 0.08);
+              gain.gain.setValueAtTime(0.08, ctx.currentTime);
+              gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.12);
+              osc.start(ctx.currentTime);
+              osc.stop(ctx.currentTime + 0.12);
+              osc.onended = () => ctx.close();
+            } catch {}
+          }
+        }
       }
     });
 
@@ -257,7 +278,7 @@ function ChatContent() {
       setIsConnected(false);
       newSocket.disconnect();
     };
-  }, [router, roomId]);
+  }, [router, roomId, user]);
 
   const handleSendMessage = (e: React.FormEvent) => {
     e.preventDefault();
