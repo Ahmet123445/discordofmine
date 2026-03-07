@@ -31,6 +31,15 @@ const playLeaveSound = () => {
   audio.play().catch(() => {});
 };
 
+// --- WebRTC Quality Boosters ---
+const setBitrate = (sdp: string, bitrate: number) => {
+  // Increase bitrate for both video and audio
+  // Target: 8000 kbps for 1080p 60fps
+  return sdp.replace(/a=fmtp:(102|121|127|96|97|98|99|100|101).*/g, (match) => {
+    return match + ";x-google-max-bitrate=" + bitrate + ";x-google-min-bitrate=" + bitrate + ";x-google-start-bitrate=" + bitrate;
+  });
+};
+
   // SIMD Check Helper
   // const isSimdSupported = async () => { ... } // No longer needed for DeepFilterNet (WASM handles it)
   
@@ -203,7 +212,7 @@ const playLeaveSound = () => {
   
   const cleanupAudioContext = () => {
     if (gateIntervalRef.current) {
-      window.cancelAnimationFrame(gateIntervalRef.current);
+      window.clearInterval(gateIntervalRef.current);
       gateIntervalRef.current = null;
     }
     if (deepFilterRef.current) {
@@ -291,8 +300,8 @@ const playLeaveSound = () => {
           sampleRate: 48000,
           channelCount: 1,
           echoCancellation: true,   // Keep hardware EC
-          noiseSuppression: false,  // AI handles this
-          autoGainControl: true     // ENABLED: Stabilizes volume over time
+          noiseSuppression: true,   // CRITICAL: Let browser filter out desktop audio (games/apps)
+          autoGainControl: true     // Stabilizes volume over time
         } 
       });
 
@@ -317,14 +326,14 @@ const playLeaveSound = () => {
       const preGain = audioCtx.createGain();
       preGain.gain.value = 2.0; // +6dB boost
 
-      // C. DeepFilterNet - Minimal AI (Just enough for keyboard clicks)
-      console.log("[VoiceChat] Initializing DeepFilterNet (Crystal Clear Gamer - 20%)...");
+      // C. DeepFilterNet - AI Noise Cancellation
+      console.log("[VoiceChat] Initializing DeepFilterNet (Aggressive Noise Canceling - 75%)...");
       const processor = new DeepFilterNet3Processor({
           sampleRate: 48000,
           assetConfig: {
               cdnUrl: '/processors'
           },
-          noiseReductionLevel: 20 // MINIMAL: Preserves voice 100%, removes clicks
+          noiseReductionLevel: 75 // AGGRESSIVE: 75/100 to remove game sounds like CS:GO
       });
       await processor.initialize();
       const workletNode = await processor.createAudioWorkletNode(audioCtx);
@@ -340,8 +349,11 @@ const playLeaveSound = () => {
       
       let lastActiveTime = Date.now();
       let gateOpen = true;
-      const threshold = -60; // ULTRA SENSITIVE: Detects even whispers
-      const holdTimeMs = 1500; // 1.5s hold for natural speech
+      
+      // Get user's preferred threshold from localStorage, default to -42 (moderate)
+      const savedThreshold = localStorage.getItem("voiceNoiseThreshold");
+      const threshold = savedThreshold ? parseInt(savedThreshold) : -42; // HIGHER THRESHOLD: Stops game audio bleed
+      const holdTimeMs = 800; // FAST CLOSE: Closes mic quickly after speaking (0.8s instead of 1.5s)
 
       const updateGate = () => {
         if (!audioContextRef.current) return;
@@ -367,9 +379,13 @@ const playLeaveSound = () => {
             gateOpen = false;
           }
         }
-        gateIntervalRef.current = window.requestAnimationFrame(updateGate);
       };
-      updateGate();
+      
+      // CRITICAL FIX: Use setInterval instead of requestAnimationFrame
+      // requestAnimationFrame is heavily throttled (to 1fps or stopped) when the tab is in the background
+      // setInterval runs at least once per second in background, keeping the mic gate active
+      gateIntervalRef.current = window.setInterval(updateGate, 50) as unknown as number; // Check 20 times per second
+      updateGate(); // run once immediately
 
       // E. Limiter - Safety net for loud sounds
       const limiter = audioCtx.createDynamicsCompressor();
@@ -501,6 +517,10 @@ const playLeaveSound = () => {
     });
 
     peer.on("signal", (signal: any) => {
+      // If it's an offer or answer, boost the bitrate in the SDP
+      if (signal.type === "offer" || signal.type === "answer") {
+        signal.sdp = setBitrate(signal.sdp, 8000); // 8 Mbps for high quality
+      }
       socket?.emit("sending-signal", { userToSignal, callerID, signal, username: myUsername });
     });
 
@@ -529,6 +549,10 @@ const playLeaveSound = () => {
     });
 
     peer.on("signal", (signal: any) => {
+      // If it's an offer or answer, boost the bitrate in the SDP
+      if (signal.type === "offer" || signal.type === "answer") {
+        signal.sdp = setBitrate(signal.sdp, 8000); // 8 Mbps for high quality
+      }
       socket?.emit("returning-signal", { signal, callerID });
     });
 
@@ -570,16 +594,22 @@ const playLeaveSound = () => {
   const startScreenShare = () => {
     if (!PeerClass || !localStream.current) return;
     
+    // 1080p 60fps High Performance Constraints
+    const constraints = {
+      video: {
+        width: { ideal: 1920, max: 1920 },
+        height: { ideal: 1080, max: 1080 },
+        frameRate: { ideal: 60, max: 60 },
+      },
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true
+      }
+    };
+
     navigator.mediaDevices
-      .getDisplayMedia({ 
-        video: {
-          width: { ideal: 1920 },
-          height: { ideal: 1080 },
-          frameRate: { ideal: 60 },
-          cursor: "always"
-        } as MediaTrackConstraints, 
-        audio: true 
-      })
+      .getDisplayMedia(constraints)
       .then((stream: MediaStream) => {
         setIsSharingScreen(true);
         screenStream.current = stream;
@@ -1311,22 +1341,28 @@ const VideoPlayer = ({ stream, name, onClose }: { stream: MediaStream; name: str
       
       {/* Audio Volume Control */}
       {hasAudio && (
-        <div className="absolute bottom-2 left-2 right-2 bg-black/70 px-3 py-2 rounded flex items-center gap-2 z-20">
-          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-green-400 flex-shrink-0">
-            <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>
-            <path d="M15.54 8.46a5 5 0 0 1 0 7.07"/>
-          </svg>
+        <div className="absolute bottom-2 left-2 right-2 bg-black/80 backdrop-blur-md px-3 py-2.5 rounded-xl flex items-center gap-3 z-20 border border-white/10 shadow-lg animate-in fade-in slide-in-from-bottom-2">
+          <div className="flex items-center gap-2">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-indigo-400 flex-shrink-0">
+              <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>
+              <path d="M15.54 8.46a5 5 0 0 1 0 7.07"/>
+            </svg>
+            <span className="text-[10px] font-bold text-zinc-400 uppercase tracking-tighter">Stream</span>
+          </div>
           <input
             type="range"
             min="0"
-            max="100"
+            max="150"
+            step="1"
             value={volume}
             onChange={(e) => setVolume(parseInt(e.target.value))}
-            className="flex-1 h-1 bg-zinc-600 rounded-lg appearance-none cursor-pointer accent-green-500"
+            className="flex-1 h-1.5 bg-zinc-700 rounded-lg appearance-none cursor-pointer accent-indigo-500"
             onClick={(e) => e.stopPropagation()}
             onMouseDown={(e) => e.stopPropagation()}
           />
-          <span className="text-[10px] text-zinc-300 w-8 text-right font-mono">{volume}%</span>
+          <span className={`text-[11px] font-mono w-10 text-right ${volume > 100 ? "text-orange-400 font-bold" : "text-zinc-300"}`}>
+            {volume}%
+          </span>
         </div>
       )}
       

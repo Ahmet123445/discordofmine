@@ -43,6 +43,10 @@ function ChatContent() {
   const [newUsername, setNewUsername] = useState("");
   const [usernameError, setUsernameError] = useState("");
   const [isUpdatingUsername, setIsUpdatingUsername] = useState(false);
+  
+  // Voice Settings State
+  const [noiseThreshold, setNoiseThreshold] = useState(-42); // Default -42 dB
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -150,6 +154,12 @@ function ChatContent() {
     const token = localStorage.getItem("token");
     const storedUser = localStorage.getItem("user");
 
+    // Load preferred noise threshold on mount
+    const savedThreshold = localStorage.getItem("voiceNoiseThreshold");
+    if (savedThreshold) {
+      setNoiseThreshold(parseInt(savedThreshold));
+    }
+
     if (!token || !storedUser) {
       router.push("/login");
       return;
@@ -209,6 +219,11 @@ function ChatContent() {
       }
     }, 30000);
 
+    // Render.com Keep-Alive: Ping the health endpoint every 2 minutes
+    const keepAliveInterval = setInterval(() => {
+      fetch(`${API_URL}/health`).catch(() => {});
+    }, 120000);
+
     newSocket.on("disconnect", () => {
       console.log("Disconnected from socket server");
       setIsConnected(false);
@@ -238,6 +253,7 @@ function ChatContent() {
 
     return () => {
       clearInterval(heartbeatInterval);
+      clearInterval(keepAliveInterval);
       setIsConnected(false);
       newSocket.disconnect();
     };
@@ -380,6 +396,11 @@ function ChatContent() {
     } finally {
       setIsUpdatingUsername(false);
     }
+  };
+
+  const saveNoiseThreshold = (value: number) => {
+    setNoiseThreshold(value);
+    localStorage.setItem("voiceNoiseThreshold", value.toString());
   };
 
   if (!user || !roomId) return null;
@@ -676,6 +697,35 @@ function ChatContent() {
               >
                 {isUpdatingUsername ? "Guncelleniyor..." : "Kaydet"}
               </button>
+            </div>
+
+            {/* Divider */}
+            <div className="border-t border-zinc-700 my-6"></div>
+
+            {/* Microphone Settings */}
+            <div className="space-y-4">
+              <div className="flex items-center justify-between mb-2">
+                <label className="text-xs text-zinc-400 uppercase font-semibold">Mikrofon Hassasiyeti</label>
+                <span className="text-xs font-mono text-zinc-500">{noiseThreshold} dB</span>
+              </div>
+              <p className="text-[10px] text-zinc-500 mb-3">
+                Mikrofonunuzun hangi ses seviyesinde açılacağını belirleyin. Oyun sesleri (CS:GO vb.) karşıya gidiyorsa bu çubuğu <b>sağa</b> kaydırın. Fısıltınız duyulmuyorsa <b>sola</b> kaydırın. (Sadece yeni sesli odaya bağlandığınızda aktif olur.)
+              </p>
+              
+              <input
+                type="range"
+                min="-80"
+                max="-20"
+                step="1"
+                value={noiseThreshold}
+                onChange={(e) => saveNoiseThreshold(parseInt(e.target.value))}
+                className="w-full h-2 bg-zinc-700 rounded-lg appearance-none cursor-pointer accent-indigo-500"
+              />
+              <div className="flex justify-between text-[10px] text-zinc-600 font-medium">
+                <span>Çok Hassas (-80)</span>
+                <span>Normal (-42)</span>
+                <span>Az Hassas (-20)</span>
+              </div>
             </div>
 
             {/* Divider */}
