@@ -31,6 +31,32 @@ const playLeaveSound = () => {
   audio.play().catch(() => {});
 };
 
+const playScreenStartSound = () => {
+  if (typeof window === "undefined") return;
+
+  try {
+    const ctx = new AudioContext();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+
+    osc.type = "triangle";
+    osc.frequency.setValueAtTime(920, ctx.currentTime);
+    osc.frequency.exponentialRampToValueAtTime(700, ctx.currentTime + 0.16);
+
+    gain.gain.setValueAtTime(0.0001, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.08, ctx.currentTime + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.16);
+
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start(ctx.currentTime);
+    osc.stop(ctx.currentTime + 0.17);
+    osc.onended = () => ctx.close();
+  } catch {
+    // Ignore audio failures silently
+  }
+};
+
 // --- WebRTC Quality Boosters ---
 const setBitrate = (sdp: string, bitrate: number) => {
   // Increase bitrate for both video and audio
@@ -83,6 +109,7 @@ const setBitrate = (sdp: string, bitrate: number) => {
   const sourceNodeRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const destinationNodeRef = useRef<MediaStreamAudioDestinationNode | null>(null);
   const gateIntervalRef = useRef<number | null>(null);
+  const announcedScreenStreamsRef = useRef<Set<string>>(new Set());
 
   const [noiseSuppressionEnabled, setNoiseSuppressionEnabled] = useState(true); // Default ON
   const [noiseSuppressionLoading, setNoiseSuppressionLoading] = useState(false);
@@ -209,6 +236,21 @@ const setBitrate = (sdp: string, bitrate: number) => {
       }
     };
   }, []);
+
+  useEffect(() => {
+    if (!inVoice) return;
+
+    const handleBeforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+      return "";
+    };
+
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => {
+      window.removeEventListener("beforeunload", handleBeforeUnload);
+    };
+  }, [inVoice]);
   
   const cleanupAudioContext = () => {
     if (gateIntervalRef.current) {
@@ -246,6 +288,21 @@ const setBitrate = (sdp: string, bitrate: number) => {
 
   const toggleDeafen = () => {
     setIsDeafened((prev) => !prev);
+  };
+
+  const attachActiveScreenTracks = (peer: any) => {
+    if (!screenStream.current || !peer) return;
+
+    const activeTracks = screenStream.current.getTracks().filter((track) => track.readyState === "live");
+    if (activeTracks.length === 0) return;
+
+    activeTracks.forEach((track) => {
+      try {
+        peer.addTrack(track, screenStream.current as MediaStream);
+      } catch (err) {
+        console.error("Failed to attach active screen track:", err);
+      }
+    });
   };
 
   // Toggle noise suppression on/off
@@ -469,6 +526,11 @@ const setBitrate = (sdp: string, bitrate: number) => {
         peersRef.current = peersRef.current.filter((p) => p.peerID !== id);
         setPeers((prev) => prev.filter((p) => p.peerID !== id));
         setIncomingStreams((prev) => prev.filter((s) => s.id !== id));
+        announcedScreenStreamsRef.current.forEach((key) => {
+          if (key.startsWith(`${id}-`)) {
+            announcedScreenStreamsRef.current.delete(key);
+          }
+        });
       });
     } catch (err) {
       console.error("Failed to get local stream", err);
@@ -496,6 +558,7 @@ const setBitrate = (sdp: string, bitrate: number) => {
     setPeers([]);
     setIncomingStreams([]);
     setHiddenStreams(new Set());
+    announcedScreenStreamsRef.current.clear();
 
     socket?.off("all-voice-users");
     socket?.off("user-joined-voice");
@@ -532,6 +595,8 @@ const setBitrate = (sdp: string, bitrate: number) => {
       console.error("Peer error:", err);
     });
 
+    attachActiveScreenTracks(peer);
+
     return peer;
   };
 
@@ -564,6 +629,8 @@ const setBitrate = (sdp: string, bitrate: number) => {
       console.error("Peer error:", err);
     });
 
+    attachActiveScreenTracks(peer);
+
     peer.signal(incomingSignal);
 
     return peer;
@@ -584,6 +651,12 @@ const setBitrate = (sdp: string, bitrate: number) => {
 
     const videoTracks = stream.getVideoTracks();
     if (videoTracks.length > 0) {
+      const streamKey = `${id}-${stream.id}`;
+      if (!announcedScreenStreamsRef.current.has(streamKey)) {
+        announcedScreenStreamsRef.current.add(streamKey);
+        playScreenStartSound();
+      }
+
       setIncomingStreams((prev) => {
         if (prev.find((s) => s.id === id && s.stream.id === stream.id)) return prev;
         return [...prev, { id, stream }];

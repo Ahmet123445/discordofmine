@@ -43,12 +43,14 @@ function ChatContent() {
   const [newUsername, setNewUsername] = useState("");
   const [usernameError, setUsernameError] = useState("");
   const [isUpdatingUsername, setIsUpdatingUsername] = useState(false);
+  const [copiedMessageId, setCopiedMessageId] = useState<number | null>(null);
   
   // Voice Settings State
   const [noiseThreshold, setNoiseThreshold] = useState(-42); // Default -42 dB
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const copyFeedbackTimeoutRef = useRef<number | null>(null);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -57,6 +59,14 @@ function ChatContent() {
   useEffect(() => {
     scrollToBottom();
   }, [messages]);
+
+  useEffect(() => {
+    return () => {
+      if (copyFeedbackTimeoutRef.current !== null) {
+        window.clearTimeout(copyFeedbackTimeoutRef.current);
+      }
+    };
+  }, []);
 
   // Ctrl+V paste handler for screenshots
   useEffect(() => {
@@ -147,6 +157,39 @@ function ChatContent() {
     } catch (err) {
       console.error("Delete failed", err);
       alert("Mesaj silinemedi");
+    }
+  };
+
+  const copyMessageContent = async (message: Message) => {
+    const textToCopy = message.type === "file" ? message.fileUrl || message.content : message.content;
+
+    if (!textToCopy) return;
+
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(textToCopy);
+      } else {
+        const textarea = document.createElement("textarea");
+        textarea.value = textToCopy;
+        textarea.style.position = "fixed";
+        textarea.style.opacity = "0";
+        document.body.appendChild(textarea);
+        textarea.focus();
+        textarea.select();
+        document.execCommand("copy");
+        document.body.removeChild(textarea);
+      }
+
+      setCopiedMessageId(message.id);
+      if (copyFeedbackTimeoutRef.current !== null) {
+        window.clearTimeout(copyFeedbackTimeoutRef.current);
+      }
+      copyFeedbackTimeoutRef.current = window.setTimeout(() => {
+        setCopiedMessageId(null);
+      }, 1400);
+    } catch (err) {
+      console.error("Copy failed:", err);
+      alert("Mesaj kopyalanamadi");
     }
   };
 
@@ -550,6 +593,21 @@ function ChatContent() {
                     </div>
                   )}
                   <div className="flex items-center gap-2 group-hover:gap-2">
+                    <button
+                      onClick={() => copyMessageContent(msg)}
+                      className={`p-1.5 rounded transition-all transform scale-90 hover:scale-100 ${
+                        copiedMessageId === msg.id
+                          ? "opacity-100 text-emerald-400"
+                          : "opacity-70 hover:opacity-100 md:opacity-0 md:group-hover:opacity-100 text-zinc-600 hover:text-zinc-300"
+                      }`}
+                      title={copiedMessageId === msg.id ? "Kopyalandi" : "Kopyala"}
+                    >
+                      {copiedMessageId === msg.id ? (
+                        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
+                      ) : (
+                        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                      )}
+                    </button>
                     {isMe && (
                       <button
                         onClick={() => deleteMessage(msg.id)}
