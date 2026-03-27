@@ -7,6 +7,11 @@ import db from "./db.js";
 import authRoutes from "./routes/auth.js";
 import uploadRoutes from "./routes/upload.js";
 import path from "path";
+import { spawn } from "child_process";
+import Peer from "simple-peer";
+import play from "play-dl";
+import wrtc from "@roamhq/wrtc";
+import ffmpegPath from "ffmpeg-static";
 
 // Version: 2.0.0 - Database-based session tracking for reliability
 dotenv.config();
@@ -279,6 +284,574 @@ const io = new SocketIOServer(httpServer, {
   transports: ['websocket', 'polling'],
   allowUpgrades: true
 });
+
+const FRAME_SIZE_BYTES = 1920;
+const MUSIC_BOT_USERNAME = "Music Bot";
+const musicSessions = new Map();
+
+const buildMusicBotId = (voiceRoomId) => `music-bot:${voiceRoomId}`;
+const isMusicBotId = (id) => typeof id === "string" && id.startsWith("music-bot:");
+
+const sendSystemMessage = (roomId, content) => {
+  io.to(roomId).emit("message-received", {
+    id: Date.now(),
+    content,
+    user_id: 0,
+    username: "System",
+    type: "system",
+    room_id: roomId,
+    created_at: new Date().toISOString()
+  });
+};
+
+const getVoiceUsers = (voiceRoomId) => usersInVoice[voiceRoomId] || [];
+const getHumanVoiceUsers = (voiceRoomId) => getVoiceUsers(voiceRoomId).filter((u) => !isMusicBotId(u.id));
+
+const addMusicBotPresence = (voiceRoomId) => {
+  const botId = buildMusicBotId(voiceRoomId);
+  if (!usersInVoice[voiceRoomId]) {
+    usersInVoice[voiceRoomId] = [];
+  }
+
+  const exists = usersInVoice[voiceRoomId].some((u) => u.id === botId);
+  if (!exists) {
+    usersInVoice[voiceRoomId].push({ id: botId, username: MUSIC_BOT_USERNAME });
+    broadcastAllVoiceUsers();
+  }
+
+  return botId;
+};
+
+const removeMusicBotPresence = (voiceRoomId) => {
+  const botId = buildMusicBotId(voiceRoomId);
+  const roomUsers = usersInVoice[voiceRoomId];
+
+  if (!roomUsers) return;
+
+  const next = roomUsers.filter((u) => u.id !== botId);
+  usersInVoice[voiceRoomId] = next;
+
+  io.to(voiceRoomId).emit("user-left-voice", botId);
+
+  if (next.length === 0) {
+    delete usersInVoice[voiceRoomId];
+  }
+
+  broadcastAllVoiceUsers();
+};
+
+const destroyMusicPeer = (session, userSocketId) => {
+  const peer = session.peers.get(userSocketId);
+  if (!peer) return;
+
+  try {
+    peer.destroy();
+  } catch {}
+
+  session.peers.delete(userSocketId);
+};
+
+const destroyAllMusicPeers = (session) => {
+  for (const userSocketId of session.peers.keys()) {
+    destroyMusicPeer(session, userSocketId);
+  }
+};
+
+const stopCurrentPlayback = (session) => {
+  if (!session.ffmpegProcess) {
+    session.buffer = Buffer.alloc(0);
+    session.current = null;
+    session.isPlaying = false;
+    session.isPaused = false;
+    return;
+  }
+
+  session.isStoppingCurrent = true;
+
+  try {
+    session.ffmpegProcess.stdout?.removeAllListeners();
+    session.ffmpegProcess.stderr?.removeAllListeners();
+  } catch {}
+
+  try {
+    session.ffmpegProcess.kill("SIGKILL");
+  } catch {}
+
+  session.ffmpegProcess = null;
+  session.buffer = Buffer.alloc(0);
+  session.current = null;
+  session.isPlaying = false;
+  session.isPaused = false;
+};
+
+const closeMusicSession = (voiceRoomId, reason = null) => {
+  const session = musicSessions.get(voiceRoomId);
+  if (!session) return;
+
+  stopCurrentPlayback(session);
+  destroyAllMusicPeers(session);
+
+  try {
+    session.track.stop();
+  } catch {}
+
+  session.queue = [];
+  musicSessions.delete(voiceRoomId);
+  removeMusicBotPresence(voiceRoomId);
+
+  if (reason) {
+    const serverRoomId = voiceRoomId.substring(0, voiceRoomId.lastIndexOf("-"));
+    sendSystemMessage(serverRoomId, reason);
+  }
+};
+
+const resolveTrack = async (query) => {
+  const trimmed = (query || "").trim();
+  const isYouTubeUrl = /^(https?:\/\/)?(www\.)?(youtube\.com|youtu\.be)\//i.test(trimmed);
+
+  if (isYouTubeUrl) {
+    const info = await play.video_basic_info(trimmed);
+    const video = info.video_details;
+    return {
+      title: video.title,
+      url: video.url,
+      durationInSec: Number(video.durationInSec || 0)
+    };
+  }
+
+  const results = await play.search(trimmed, {
+    source: { youtube: "video" },
+    limit: 1,
+    language: "tr"
+  });
+
+  if (!results || results.length === 0) {
+    throw new Error("Arama sonucu bulunamadi.");
+  }
+
+  const first = results[0];
+  return {
+    title: first.title,
+    url: first.url,
+    durationInSec: Number(first.durationInSec || 0)
+  };
+};
+
+const getOrCreateMusicSession = (voiceRoomId) => {
+  if (musicSessions.has(voiceRoomId)) {
+    return musicSessions.get(voiceRoomId);
+  }
+
+  const RTC = wrtc.default || wrtc;
+  const audioSource = new RTC.nonstandard.RTCAudioSource();
+  const track = audioSource.createTrack();
+  const stream = new RTC.MediaStream([track]);
+  const botId = addMusicBotPresence(voiceRoomId);
+
+  const session = {
+    voiceRoomId,
+    botId,
+    audioSource,
+    track,
+    stream,
+    queue: [],
+    peers: new Map(),
+    ffmpegProcess: null,
+    current: null,
+    isPlaying: false,
+    isPaused: false,
+    isStoppingCurrent: false,
+    volume: 80,
+    buffer: Buffer.alloc(0)
+  };
+
+  musicSessions.set(voiceRoomId, session);
+  return session;
+};
+
+const connectBotToUser = (voiceRoomId, userSocketId) => {
+  const session = musicSessions.get(voiceRoomId);
+  if (!session) return;
+  if (!io.sockets.sockets.get(userSocketId)) return;
+  if (session.peers.has(userSocketId)) return;
+
+  const RTC = wrtc.default || wrtc;
+  const peer = new Peer({
+    initiator: true,
+    trickle: false,
+    stream: session.stream,
+    wrtc: RTC,
+    config: {
+      iceServers: [
+        { urls: "stun:stun.l.google.com:19302" },
+        { urls: "stun:global.stun.twilio.com:3478" }
+      ]
+    }
+  });
+
+  peer.on("signal", (signal) => {
+    io.to(userSocketId).emit("user-joined-voice", {
+      signal,
+      callerID: session.botId,
+      username: MUSIC_BOT_USERNAME
+    });
+  });
+
+  peer.on("error", (err) => {
+    console.error(`[MusicBot] Peer error (${voiceRoomId}/${userSocketId}):`, err.message);
+    destroyMusicPeer(session, userSocketId);
+  });
+
+  peer.on("close", () => {
+    destroyMusicPeer(session, userSocketId);
+  });
+
+  session.peers.set(userSocketId, peer);
+};
+
+const ensureBotConnectedToRoomUsers = (voiceRoomId) => {
+  const users = getHumanVoiceUsers(voiceRoomId);
+  users.forEach((u) => connectBotToUser(voiceRoomId, u.id));
+};
+
+const pumpChunkToRtcSource = (session, chunk) => {
+  session.buffer = Buffer.concat([session.buffer, chunk]);
+
+  while (session.buffer.length >= FRAME_SIZE_BYTES) {
+    const frameData = session.buffer.subarray(0, FRAME_SIZE_BYTES);
+    session.buffer = session.buffer.subarray(FRAME_SIZE_BYTES);
+
+    const arrayBuffer = new ArrayBuffer(FRAME_SIZE_BYTES);
+    const view = new Uint8Array(arrayBuffer);
+    for (let i = 0; i < FRAME_SIZE_BYTES; i++) {
+      view[i] = frameData[i];
+    }
+
+    const samples = new Int16Array(arrayBuffer);
+    session.audioSource.onData({
+      samples,
+      sampleRate: 48000,
+      bitsPerSample: 16,
+      channelCount: 2,
+      numberOfFrames: 480
+    });
+  }
+};
+
+const playNextInSession = async (voiceRoomId) => {
+  const session = musicSessions.get(voiceRoomId);
+  if (!session || session.isPlaying) return;
+
+  const nextTrack = session.queue.shift();
+  if (!nextTrack) {
+    session.current = null;
+    session.isPaused = false;
+    return;
+  }
+
+  ensureBotConnectedToRoomUsers(voiceRoomId);
+
+  session.current = nextTrack;
+  session.isPlaying = true;
+  session.isPaused = false;
+  session.buffer = Buffer.alloc(0);
+
+  try {
+    const audioStream = await play.stream(nextTrack.url, {
+      quality: 2,
+      discordPlayerCompatibility: true
+    });
+
+    const ffmpegArgs = [
+      "-loglevel", "error",
+      "-i", "pipe:0",
+      "-filter:a", `volume=${Math.max(0, session.volume) / 100}`,
+      "-f", "s16le",
+      "-ar", "48000",
+      "-ac", "2",
+      "pipe:1"
+    ];
+
+    const ffmpegBinary = process.env.FFMPEG_PATH || ffmpegPath || "ffmpeg";
+    const ffmpeg = spawn(ffmpegBinary, ffmpegArgs, {
+      stdio: ["pipe", "pipe", "pipe"]
+    });
+
+    session.ffmpegProcess = ffmpeg;
+    session.isStoppingCurrent = false;
+
+    audioStream.stream.on("error", (err) => {
+      console.error("[MusicBot] Source stream error:", err.message);
+      try {
+        ffmpeg.kill("SIGKILL");
+      } catch {}
+    });
+
+    audioStream.stream.pipe(ffmpeg.stdin);
+
+    ffmpeg.stdout.on("data", (chunk) => {
+      if (!session.isPaused) {
+        pumpChunkToRtcSource(session, chunk);
+      }
+    });
+
+    ffmpeg.stderr.on("data", (data) => {
+      const msg = data.toString().trim();
+      if (msg) {
+        console.error("[MusicBot][FFmpeg]", msg);
+      }
+    });
+
+    ffmpeg.on("close", () => {
+      session.ffmpegProcess = null;
+      session.buffer = Buffer.alloc(0);
+      session.current = null;
+      session.isPlaying = false;
+      session.isPaused = false;
+
+      const serverRoomId = voiceRoomId.substring(0, voiceRoomId.lastIndexOf("-"));
+
+      if (!session.isStoppingCurrent) {
+        sendSystemMessage(serverRoomId, `Sarki bitti: ${nextTrack.title}`);
+      }
+
+      session.isStoppingCurrent = false;
+      void playNextInSession(voiceRoomId);
+    });
+
+    const serverRoomId = voiceRoomId.substring(0, voiceRoomId.lastIndexOf("-"));
+    sendSystemMessage(serverRoomId, `Caliniyor: ${nextTrack.title}`);
+  } catch (err) {
+    console.error("[MusicBot] Failed to start track:", err.message);
+    session.current = null;
+    session.isPlaying = false;
+    session.isPaused = false;
+    session.buffer = Buffer.alloc(0);
+
+    const serverRoomId = voiceRoomId.substring(0, voiceRoomId.lastIndexOf("-"));
+    sendSystemMessage(serverRoomId, `Sarki oynatilamadi: ${nextTrack.title}`);
+    void playNextInSession(voiceRoomId);
+  }
+};
+
+const maybeAutoStopMusicForRoom = (voiceRoomId) => {
+  const session = musicSessions.get(voiceRoomId);
+  if (!session) return;
+
+  const humans = getHumanVoiceUsers(voiceRoomId);
+  if (humans.length === 0) {
+    closeMusicSession(voiceRoomId, "Muzik botu odada kimse kalmadigi icin ayrildi.");
+  }
+};
+
+const getMusicHelpText = () => {
+  return [
+    "Muzik komutlari:",
+    "/play <yt-link veya sarki adi>",
+    "/search <sarki adi>",
+    "/queue",
+    "/skip",
+    "/pause",
+    "/resume",
+    "/stop",
+    "/np",
+    "/volume <0-200>"
+  ].join("\n");
+};
+
+const handleMusicCommand = async ({ socket, roomId, user, commandText }) => {
+  const [command, ...args] = commandText.trim().split(/\s+/);
+  const normalized = command.toLowerCase();
+  const voiceRoomId = socketToRoom[socket.id];
+
+  if (normalized === "/help") {
+    sendSystemMessage(roomId, getMusicHelpText());
+    return true;
+  }
+
+  if (!voiceRoomId) {
+    sendSystemMessage(roomId, "Muzik komutlari icin once bir voice kanalina katilmalisin.");
+    return true;
+  }
+
+  if (!voiceRoomId.startsWith(`${roomId}-`)) {
+    sendSystemMessage(roomId, "Komut sadece bulundugun odanin voice kanalinda calisir.");
+    return true;
+  }
+
+  if (normalized === "/search") {
+    const query = args.join(" ").trim();
+    if (!query) {
+      sendSystemMessage(roomId, "Kullanim: /search <sarki adi>");
+      return true;
+    }
+
+    try {
+      const results = await play.search(query, {
+        source: { youtube: "video" },
+        limit: 5,
+        language: "tr"
+      });
+
+      if (!results || results.length === 0) {
+        sendSystemMessage(roomId, `Arama sonucu bulunamadi: ${query}`);
+        return true;
+      }
+
+      const lines = results.map((item, index) => `${index + 1}. ${item.title}`);
+      sendSystemMessage(roomId, `Arama sonuclari (${query}):\n${lines.join("\n")}`);
+    } catch (err) {
+      sendSystemMessage(roomId, "Arama sirasinda bir hata olustu.");
+    }
+
+    return true;
+  }
+
+  if (normalized === "/play") {
+    const query = args.join(" ").trim();
+    if (!query) {
+      sendSystemMessage(roomId, "Kullanim: /play <yt-link veya sarki adi>");
+      return true;
+    }
+
+    try {
+      const track = await resolveTrack(query);
+      const session = getOrCreateMusicSession(voiceRoomId);
+
+      session.queue.push({
+        ...track,
+        requestedBy: user.username
+      });
+
+      sendSystemMessage(roomId, `Kuyruga eklendi: ${track.title}`);
+      void playNextInSession(voiceRoomId);
+    } catch (err) {
+      console.error("[MusicBot] /play error:", err.message);
+      sendSystemMessage(roomId, `Parca bulunamadi: ${query}`);
+    }
+
+    return true;
+  }
+
+  const session = musicSessions.get(voiceRoomId);
+
+  if (normalized === "/queue") {
+    if (!session || (!session.current && session.queue.length === 0)) {
+      sendSystemMessage(roomId, "Kuyruk bos.");
+      return true;
+    }
+
+    const lines = [];
+    if (session.current) {
+      lines.push(`Simdi calan: ${session.current.title}`);
+    }
+
+    if (session.queue.length > 0) {
+      lines.push("Siradakiler:");
+      session.queue.slice(0, 10).forEach((item, index) => {
+        lines.push(`${index + 1}. ${item.title}`);
+      });
+    }
+
+    sendSystemMessage(roomId, lines.join("\n"));
+    return true;
+  }
+
+  if (normalized === "/np") {
+    if (!session || !session.current) {
+      sendSystemMessage(roomId, "Su an calan bir parca yok.");
+      return true;
+    }
+
+    sendSystemMessage(roomId, `Simdi calan: ${session.current.title}`);
+    return true;
+  }
+
+  if (normalized === "/skip") {
+    if (!session || !session.isPlaying) {
+      sendSystemMessage(roomId, "Atlanacak bir parca yok.");
+      return true;
+    }
+
+    stopCurrentPlayback(session);
+    sendSystemMessage(roomId, "Parca atlandi.");
+    void playNextInSession(voiceRoomId);
+    return true;
+  }
+
+  if (normalized === "/pause") {
+    if (!session || !session.ffmpegProcess || session.isPaused) {
+      sendSystemMessage(roomId, "Duraklatilacak bir oynatma yok.");
+      return true;
+    }
+
+    if (process.platform === "win32") {
+      sendSystemMessage(roomId, "Pause komutu bu platformda desteklenmiyor.");
+      return true;
+    }
+
+    try {
+      session.ffmpegProcess.kill("SIGSTOP");
+      session.isPaused = true;
+      sendSystemMessage(roomId, "Muzik duraklatildi.");
+    } catch {
+      sendSystemMessage(roomId, "Muzik duraklatilamadi.");
+    }
+
+    return true;
+  }
+
+  if (normalized === "/resume") {
+    if (!session || !session.ffmpegProcess || !session.isPaused) {
+      sendSystemMessage(roomId, "Devam ettirilecek bir oynatma yok.");
+      return true;
+    }
+
+    if (process.platform === "win32") {
+      sendSystemMessage(roomId, "Resume komutu bu platformda desteklenmiyor.");
+      return true;
+    }
+
+    try {
+      session.ffmpegProcess.kill("SIGCONT");
+      session.isPaused = false;
+      sendSystemMessage(roomId, "Muzik devam ediyor.");
+    } catch {
+      sendSystemMessage(roomId, "Muzik devam ettirilemedi.");
+    }
+
+    return true;
+  }
+
+  if (normalized === "/stop") {
+    if (!session) {
+      sendSystemMessage(roomId, "Aktif muzik oturumu yok.");
+      return true;
+    }
+
+    closeMusicSession(voiceRoomId, "Muzik durduruldu.");
+    return true;
+  }
+
+  if (normalized === "/volume") {
+    if (!session) {
+      sendSystemMessage(roomId, "Aktif muzik oturumu yok.");
+      return true;
+    }
+
+    const raw = Number(args[0]);
+    if (Number.isNaN(raw) || raw < 0 || raw > 200) {
+      sendSystemMessage(roomId, "Kullanim: /volume <0-200>");
+      return true;
+    }
+
+    session.volume = raw;
+    sendSystemMessage(roomId, `Volume ayarlandi: ${raw}%`);
+    return true;
+  }
+
+  return false;
+};
 
 // Health check - also keeps Render awake
 app.get("/", (req, res) => {
@@ -636,6 +1209,19 @@ io.on("connection", (socket) => {
     }
     
     try {
+      if (type === "text" && typeof content === "string" && content.trim().startsWith("/")) {
+        const wasHandled = await handleMusicCommand({
+          socket,
+          roomId,
+          user,
+          commandText: content.trim()
+        });
+
+        if (wasHandled) {
+          return;
+        }
+      }
+
       const stmt = db.prepare("INSERT INTO messages (content, user_id, username, type, room_id) VALUES (?, ?, ?, ?, ?)");
       const info = stmt.run(content, userId, user.username, type, roomId);
       
@@ -686,6 +1272,13 @@ io.on("connection", (socket) => {
       usersInVoice[roomID] = room;
       socket.broadcast.to(roomID).emit('user-left-voice', socket.id);
       broadcastAllVoiceUsers();
+
+      const session = musicSessions.get(roomID);
+      if (session) {
+        destroyMusicPeer(session, socket.id);
+      }
+
+      maybeAutoStopMusicForRoom(roomID);
       
       // Check if voice room's server is now empty
       if (room.length === 0 && roomID) {
@@ -737,23 +1330,84 @@ io.on("connection", (socket) => {
     }
 
     // Send existing users to the new joiner
-    const usersInThisRoom = usersInVoice[roomId].filter(u => u.id !== socket.id);
+    const usersInThisRoom = usersInVoice[roomId].filter(u => u.id !== socket.id && !isMusicBotId(u.id));
     socket.emit("all-voice-users", usersInThisRoom);
+
+    // If music bot is active in this room, connect it to the newly joined user.
+    if (musicSessions.has(roomId)) {
+      connectBotToUser(roomId, socket.id);
+    }
     
     // Broadcast updated room list to everyone
     broadcastAllVoiceUsers();
   });
 
-  socket.on("sending-signal", payload => {
-    io.to(payload.userToSignal).emit('user-joined-voice', { 
-      signal: payload.signal, 
+  socket.on("sending-signal", (payload) => {
+    // Fallback: if client ever tries to signal directly to the music bot id,
+    // handle it server-side as an answerer peer.
+    if (isMusicBotId(payload.userToSignal)) {
+      const voiceRoomId = socketToRoom[socket.id];
+      const session = musicSessions.get(voiceRoomId);
+      if (!session) return;
+
+      const RTC = wrtc.default || wrtc;
+      let peer = session.peers.get(socket.id);
+
+      if (!peer) {
+        peer = new Peer({
+          initiator: false,
+          trickle: false,
+          stream: session.stream,
+          wrtc: RTC,
+          config: {
+            iceServers: [
+              { urls: "stun:stun.l.google.com:19302" },
+              { urls: "stun:global.stun.twilio.com:3478" }
+            ]
+          }
+        });
+
+        peer.on("signal", (signal) => {
+          io.to(socket.id).emit("receiving-returned-signal", { signal, id: session.botId });
+        });
+
+        peer.on("error", (err) => {
+          console.error("[MusicBot] Fallback peer error:", err.message);
+          destroyMusicPeer(session, socket.id);
+        });
+
+        peer.on("close", () => {
+          destroyMusicPeer(session, socket.id);
+        });
+
+        session.peers.set(socket.id, peer);
+      }
+
+      peer.signal(payload.signal);
+      return;
+    }
+
+    io.to(payload.userToSignal).emit("user-joined-voice", {
+      signal: payload.signal,
       callerID: payload.callerID,
       username: payload.username
     });
   });
 
-  socket.on("returning-signal", payload => {
-    io.to(payload.callerID).emit('receiving-returned-signal', { signal: payload.signal, id: socket.id });
+  socket.on("returning-signal", (payload) => {
+    if (isMusicBotId(payload.callerID)) {
+      const voiceRoomId = socketToRoom[socket.id];
+      const session = musicSessions.get(voiceRoomId);
+      if (!session) return;
+
+      const peer = session.peers.get(socket.id);
+      if (peer) {
+        peer.signal(payload.signal);
+      }
+      return;
+    }
+
+    io.to(payload.callerID).emit("receiving-returned-signal", { signal: payload.signal, id: socket.id });
   });
 
   socket.on("leave-voice", () => {
@@ -768,6 +1422,13 @@ io.on("connection", (socket) => {
       usersInVoice[roomID] = room;
       socket.broadcast.to(roomID).emit('user-left-voice', socket.id);
       broadcastAllVoiceUsers();
+
+      const session = musicSessions.get(roomID);
+      if (session) {
+        destroyMusicPeer(session, socket.id);
+      }
+
+      maybeAutoStopMusicForRoom(roomID);
       
       // Check if voice room's server is now empty
       if (room.length === 0 && roomID) {
