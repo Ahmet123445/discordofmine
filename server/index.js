@@ -287,9 +287,13 @@ const io = new SocketIOServer(httpServer, {
 
 const FRAME_SIZE_BYTES = 1920;
 const FRAME_DURATION_MS = 10;
-const MUSIC_PREBUFFER_FRAMES = 20;
+const MUSIC_PREBUFFER_FRAMES = 8;
 const MUSIC_BOT_USERNAME = "Music Bot";
 const musicSessions = new Map();
+const resolvedTrackCache = new Map();
+const directStreamUrlCache = new Map();
+const TRACK_CACHE_TTL_MS = 10 * 60 * 1000;
+const STREAM_URL_CACHE_TTL_MS = 4 * 60 * 1000;
 const ytDlpBinary = process.env.YTDLP_PATH || "yt-dlp";
 const ytDlpCookiesPath = process.env.YTDLP_COOKIES_PATH || path.join(process.cwd(), "yt-cookies.txt");
 const hasYtDlpCookies = () => fs.existsSync(ytDlpCookiesPath);
@@ -417,6 +421,7 @@ const resetPlaybackState = (session) => {
   stopPlaybackTimer(session);
   session.buffer = Buffer.alloc(0);
   session.hasPlaybackStarted = false;
+  session.hasAnnouncedPlaybackStart = false;
   session.sourceEnded = false;
   session.sentSilenceFrames = 0;
 };
@@ -479,9 +484,26 @@ const closeMusicSession = (voiceRoomId, reason = null) => {
   }
 };
 
-const runYtDlpJson = (input) => {
+const getCachedValue = (cache, key) => {
+  const entry = cache.get(key);
+  if (!entry) return null;
+  if (entry.expiresAt <= Date.now()) {
+    cache.delete(key);
+    return null;
+  }
+  return entry.value;
+};
+
+const setCachedValue = (cache, key, value, ttlMs) => {
+  cache.set(key, {
+    value,
+    expiresAt: Date.now() + ttlMs
+  });
+};
+
+const runYtDlpJson = (input, extraArgs = []) => {
   return new Promise((resolve, reject) => {
-    const args = [...getYtDlpBaseArgs(), "--skip-download", "--dump-single-json", input];
+    const args = [...getYtDlpBaseArgs(), ...extraArgs, "--skip-download", "--dump-single-json", input];
     const proc = spawn(ytDlpBinary, args, {
       stdio: ["ignore", "pipe", "pipe"]
     });
@@ -520,10 +542,49 @@ const runYtDlpJson = (input) => {
   });
 };
 
+const runYtDlpText = (args) => {
+  return new Promise((resolve, reject) => {
+    const proc = spawn(ytDlpBinary, [...getYtDlpBaseArgs(), ...args], {
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+
+    let stdout = "";
+    let stderr = "";
+
+    proc.stdout.on("data", (chunk) => {
+      stdout += chunk.toString();
+    });
+
+    proc.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+
+    proc.on("error", (err) => {
+      if (err.code === "ENOENT") {
+        reject(new Error("yt-dlp bulunamadi. Sunucuda yt-dlp kurulumu gerekli."));
+        return;
+      }
+      reject(err);
+    });
+
+    proc.on("close", (code) => {
+      if (code !== 0) {
+        reject(new Error(stderr.trim() || `yt-dlp komutu ${code} koduyla sonlandi.`));
+        return;
+      }
+
+      resolve(stdout.trim());
+    });
+  });
+};
+
 const normalizeYtDlpTrack = (entry) => {
+  const videoId = entry.id || entry.url;
+  const webpageUrl = entry.webpage_url || entry.url || (videoId ? `https://www.youtube.com/watch?v=${videoId}` : null);
+
   return {
     title: entry.title || "Bilinmeyen Sarki",
-    url: entry.webpage_url || entry.url,
+    url: webpageUrl,
     durationInSec: Number(entry.duration || 0)
   };
 };
@@ -568,7 +629,7 @@ const normalizeYtDlpTrackEntries = (result, limit = 5) => {
 
 const searchTracksWithYtDlp = async (query, limit = 5) => {
   const searchQuery = `ytsearch${Math.max(limit, 1)}:${query}`;
-  const result = await runYtDlpJson(searchQuery);
+  const result = await runYtDlpJson(searchQuery, ["--flat-playlist"]);
   return normalizeYtDlpTrackEntries(result, limit);
 };
 
@@ -609,6 +670,11 @@ const resolveTrack = async (query) => {
     throw new Error("Arama sorgusu bos olamaz.");
   }
 
+  const cachedTrack = getCachedValue(resolvedTrackCache, trimmed.toLowerCase());
+  if (cachedTrack) {
+    return cachedTrack;
+  }
+
   const isUrl = /^https?:\/\//i.test(trimmed);
   if (isUrl) {
     const result = await runYtDlpJson(trimmed);
@@ -616,7 +682,9 @@ const resolveTrack = async (query) => {
     if (!entry) {
       throw new Error("Verilen link cozumlenemedi.");
     }
-    return normalizeYtDlpTrack(entry);
+    const normalizedTrack = normalizeYtDlpTrack(entry);
+    setCachedValue(resolvedTrackCache, trimmed.toLowerCase(), normalizedTrack, TRACK_CACHE_TTL_MS);
+    return normalizedTrack;
   }
 
   const results = await getPlayableTracksFromSearch(trimmed, 10);
@@ -624,7 +692,31 @@ const resolveTrack = async (query) => {
     throw new Error("Arama sonucu bulunamadi.");
   }
 
+  setCachedValue(resolvedTrackCache, trimmed.toLowerCase(), results[0], TRACK_CACHE_TTL_MS);
   return results[0];
+};
+
+const getDirectAudioStreamUrl = async (trackUrl) => {
+  const cachedUrl = getCachedValue(directStreamUrlCache, trackUrl);
+  if (cachedUrl) {
+    return cachedUrl;
+  }
+
+  const output = await runYtDlpText([
+    "--no-playlist",
+    "-f",
+    "bestaudio[ext=m4a]/bestaudio/best",
+    "-g",
+    trackUrl
+  ]);
+
+  const directUrl = output.split(/\r?\n/).map((line) => line.trim()).find(Boolean);
+  if (!directUrl) {
+    throw new Error("Dogrudan stream linki alinamadi.");
+  }
+
+  setCachedValue(directStreamUrlCache, trackUrl, directUrl, STREAM_URL_CACHE_TTL_MS);
+  return directUrl;
 };
 
 const searchTracks = async (query, limit = 5) => {
@@ -660,6 +752,7 @@ const getOrCreateMusicSession = (voiceRoomId) => {
     buffer: Buffer.alloc(0),
     playbackInterval: null,
     hasPlaybackStarted: false,
+    hasAnnouncedPlaybackStart: false,
     sourceEnded: false,
     sentSilenceFrames: 0
   };
@@ -773,6 +866,12 @@ const startPlaybackTimer = (session) => {
 
     const flushed = flushBufferedFrameToRtcSource(session);
     if (flushed) {
+      if (!session.hasAnnouncedPlaybackStart && session.current) {
+        const serverRoomId = session.voiceRoomId.substring(0, session.voiceRoomId.lastIndexOf("-"));
+        sendSystemMessage(serverRoomId, `Caliniyor: ${session.current.title}`);
+        session.hasAnnouncedPlaybackStart = true;
+      }
+
       session.sentSilenceFrames = 0;
       return;
     }
@@ -806,23 +905,15 @@ const playNextInSession = async (voiceRoomId) => {
   resetPlaybackState(session);
 
   try {
-    const ytDlpArgs = [
-      ...getYtDlpBaseArgs(),
-      "--no-playlist",
-      "-f",
-      "bestaudio[ext=m4a]/bestaudio/best",
-      "-o",
-      "-",
-      nextTrack.url
-    ];
-
-    const sourceProcess = spawn(ytDlpBinary, ytDlpArgs, {
-      stdio: ["ignore", "pipe", "pipe"]
-    });
+    const directAudioUrl = await getDirectAudioStreamUrl(nextTrack.url);
 
     const ffmpegArgs = [
       "-loglevel", "error",
-      "-i", "pipe:0",
+      "-reconnect", "1",
+      "-reconnect_streamed", "1",
+      "-reconnect_delay_max", "2",
+      "-rw_timeout", "15000000",
+      "-i", directAudioUrl,
       "-filter:a", `volume=${Math.max(0, session.volume) / 100}`,
       "-f", "s16le",
       "-ar", "48000",
@@ -838,38 +929,10 @@ const playNextInSession = async (voiceRoomId) => {
     let sourceFailed = false;
     let sourceErrorText = "";
 
-    session.sourceProcess = sourceProcess;
+    session.sourceProcess = null;
     session.ffmpegProcess = ffmpeg;
     session.isStoppingCurrent = false;
     startPlaybackTimer(session);
-
-    sourceProcess.on("error", (err) => {
-      console.error("[MusicBot] yt-dlp process error:", err.message);
-      try {
-        ffmpeg.kill("SIGKILL");
-      } catch {}
-    });
-
-    sourceProcess.stderr.on("data", (data) => {
-      const msg = data.toString().trim();
-      if (msg) {
-        sourceErrorText += `${msg}\n`;
-        console.error("[MusicBot][yt-dlp]", msg);
-      }
-    });
-
-    sourceProcess.on("close", (code) => {
-      if (code !== 0) {
-        sourceFailed = true;
-      }
-
-      session.sourceEnded = true;
-      if (session.buffer.length < FRAME_SIZE_BYTES) {
-        session.hasPlaybackStarted = true;
-      }
-    });
-
-    sourceProcess.stdout.pipe(ffmpeg.stdin);
 
     ffmpeg.stdout.on("data", (chunk) => {
       if (!session.isPaused) {
@@ -880,14 +943,19 @@ const playNextInSession = async (voiceRoomId) => {
     ffmpeg.stderr.on("data", (data) => {
       const msg = data.toString().trim();
       if (msg) {
+        sourceErrorText += `${msg}\n`;
         console.error("[MusicBot][FFmpeg]", msg);
       }
     });
 
-    ffmpeg.on("close", () => {
+    ffmpeg.on("close", (code) => {
       session.sourceProcess = null;
       session.ffmpegProcess = null;
       session.sourceEnded = true;
+
+      if (code !== 0) {
+        sourceFailed = true;
+      }
 
       if (session.playbackInterval && session.buffer.length >= FRAME_SIZE_BYTES) {
         const finalizeWhenDrained = setInterval(() => {
@@ -946,9 +1014,6 @@ const playNextInSession = async (voiceRoomId) => {
       session.isStoppingCurrent = false;
       void playNextInSession(voiceRoomId);
     });
-
-    const serverRoomId = voiceRoomId.substring(0, voiceRoomId.lastIndexOf("-"));
-    sendSystemMessage(serverRoomId, `Caliniyor: ${nextTrack.title}`);
   } catch (err) {
     console.error("[MusicBot] Failed to start track:", err.message);
     session.current = null;
@@ -1044,8 +1109,11 @@ const handleMusicCommand = async ({ socket, roomId, user, commandText }) => {
     }
 
     try {
-      const track = await resolveTrack(query);
       const session = getOrCreateMusicSession(voiceRoomId);
+      ensureBotConnectedToRoomUsers(voiceRoomId);
+      sendSystemMessage(roomId, `Muzik botu hazirlaniyor, parca araniyor: ${query}`);
+
+      const track = await resolveTrack(query);
 
       session.queue.push({
         ...track,
