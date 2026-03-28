@@ -289,7 +289,7 @@ const FRAME_SIZE_BYTES = 1920;
 const MUSIC_BOT_USERNAME = "Music Bot";
 const musicSessions = new Map();
 const ytDlpBinary = process.env.YTDLP_PATH || "yt-dlp";
-const ytDlpCookiesPath = process.env.YTDLP_COOKIES_PATH || "/opt/discordofmine/server/yt-cookies.txt";
+const ytDlpCookiesPath = process.env.YTDLP_COOKIES_PATH || path.join(process.cwd(), "yt-cookies.txt");
 const hasYtDlpCookies = () => fs.existsSync(ytDlpCookiesPath);
 
 const getYtDlpBaseArgs = () => {
@@ -528,8 +528,34 @@ const searchYouTubeIdsByHtml = async (query, limit = 20) => {
   return ids;
 };
 
+const normalizeYtDlpTrackEntries = (result, limit = 5) => {
+  const entries = Array.isArray(result?.entries)
+    ? result.entries.filter(Boolean)
+    : (result ? [result] : []);
+
+  return entries.slice(0, limit).map(normalizeYtDlpTrack).filter((item) => !!item.url);
+};
+
+const searchTracksWithYtDlp = async (query, limit = 5) => {
+  const searchQuery = `ytsearch${Math.max(limit, 1)}:${query}`;
+  const result = await runYtDlpJson(searchQuery);
+  return normalizeYtDlpTrackEntries(result, limit);
+};
+
 const getPlayableTracksFromSearch = async (query, limit = 5) => {
-  const ids = await searchYouTubeIdsByHtml(query, 25);
+  const trimmed = (query || "").trim();
+  if (!trimmed) return [];
+
+  // Primary strategy: yt-dlp's native search (more reliable than HTML scraping).
+  try {
+    const directTracks = await searchTracksWithYtDlp(trimmed, limit);
+    if (directTracks.length > 0) {
+      return directTracks;
+    }
+  } catch {}
+
+  // Fallback strategy: scrape ids from YouTube search HTML, then resolve each id.
+  const ids = await searchYouTubeIdsByHtml(trimmed, Math.max(limit * 4, 20));
   const tracks = [];
 
   for (const id of ids) {
@@ -549,6 +575,10 @@ const getPlayableTracksFromSearch = async (query, limit = 5) => {
 
 const resolveTrack = async (query) => {
   const trimmed = (query || "").trim();
+  if (!trimmed) {
+    throw new Error("Arama sorgusu bos olamaz.");
+  }
+
   const isUrl = /^https?:\/\//i.test(trimmed);
   if (isUrl) {
     const result = await runYtDlpJson(trimmed);
