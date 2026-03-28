@@ -290,6 +290,11 @@ const MUSIC_BOT_USERNAME = "Music Bot";
 const musicSessions = new Map();
 const ytDlpBinary = process.env.YTDLP_PATH || "yt-dlp";
 const ytDlpCookiesPath = process.env.YTDLP_COOKIES_PATH || "/opt/discordofmine/server/yt-cookies.txt";
+const invidiousSearchInstances = [
+  "https://invidious.nerdvpn.de",
+  "https://vid.puffyan.us",
+  "https://inv.nadeko.net"
+];
 
 const getYtDlpBaseArgs = () => {
   const args = [
@@ -493,6 +498,46 @@ const normalizeYtDlpTrack = (entry) => {
   };
 };
 
+const searchViaInvidious = async (query, limit = 10) => {
+  const encoded = encodeURIComponent(query);
+
+  for (const base of invidiousSearchInstances) {
+    try {
+      const url = `${base}/api/v1/search?q=${encoded}&type=video`;
+      const response = await fetch(url, {
+        headers: {
+          "accept": "application/json",
+          "user-agent": "Mozilla/5.0"
+        }
+      });
+
+      if (!response.ok) {
+        continue;
+      }
+
+      const data = await response.json();
+      if (!Array.isArray(data)) {
+        continue;
+      }
+
+      const tracks = data
+        .filter((item) => item && (item.type === "video" || item.videoId))
+        .slice(0, limit)
+        .map((item) => ({
+          title: item.title || "Bilinmeyen Sarki",
+          url: `https://www.youtube.com/watch?v=${item.videoId}`,
+          durationInSec: Number(item.lengthSeconds || 0)
+        }));
+
+      if (tracks.length > 0) {
+        return tracks;
+      }
+    } catch {}
+  }
+
+  throw new Error("Harici arama servislerinden sonuc alinmadi.");
+};
+
 const resolveTrack = async (query) => {
   const trimmed = (query || "").trim();
   const isUrl = /^https?:\/\//i.test(trimmed);
@@ -505,7 +550,7 @@ const resolveTrack = async (query) => {
     return normalizeYtDlpTrack(entry);
   }
 
-  const results = await searchTracks(trimmed, 10);
+  const results = await searchViaInvidious(trimmed, 10);
   if (!results || results.length === 0) {
     throw new Error("Arama sonucu bulunamadi.");
   }
@@ -519,9 +564,7 @@ const resolveTrack = async (query) => {
 };
 
 const searchTracks = async (query, limit = 5) => {
-  const result = await runYtDlpJson(`ytsearch${limit}:${query}`);
-  const entries = Array.isArray(result.entries) ? result.entries.filter(Boolean) : [];
-  return entries.map(normalizeYtDlpTrack);
+  return searchViaInvidious(query, limit);
 };
 
 const getOrCreateMusicSession = (voiceRoomId) => {
