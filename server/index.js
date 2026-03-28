@@ -9,7 +9,6 @@ import uploadRoutes from "./routes/upload.js";
 import path from "path";
 import { spawn } from "child_process";
 import Peer from "simple-peer";
-import play from "play-dl";
 import wrtc from "@roamhq/wrtc";
 import ffmpegPath from "ffmpeg-static";
 
@@ -288,6 +287,7 @@ const io = new SocketIOServer(httpServer, {
 const FRAME_SIZE_BYTES = 1920;
 const MUSIC_BOT_USERNAME = "Music Bot";
 const musicSessions = new Map();
+const ytDlpBinary = process.env.YTDLP_PATH || "yt-dlp";
 
 const buildMusicBotId = (voiceRoomId) => `music-bot:${voiceRoomId}`;
 const isMusicBotId = (id) => typeof id === "string" && id.startsWith("music-bot:");
@@ -358,7 +358,7 @@ const destroyAllMusicPeers = (session) => {
 };
 
 const stopCurrentPlayback = (session) => {
-  if (!session.ffmpegProcess) {
+  if (!session.ffmpegProcess && !session.sourceProcess) {
     session.buffer = Buffer.alloc(0);
     session.current = null;
     session.isPlaying = false;
@@ -374,10 +374,20 @@ const stopCurrentPlayback = (session) => {
   } catch {}
 
   try {
+    session.sourceProcess.stdout?.removeAllListeners();
+    session.sourceProcess.stderr?.removeAllListeners();
+  } catch {}
+
+  try {
     session.ffmpegProcess.kill("SIGKILL");
   } catch {}
 
+  try {
+    session.sourceProcess.kill("SIGKILL");
+  } catch {}
+
   session.ffmpegProcess = null;
+  session.sourceProcess = null;
   session.buffer = Buffer.alloc(0);
   session.current = null;
   session.isPlaying = false;
@@ -405,36 +415,73 @@ const closeMusicSession = (voiceRoomId, reason = null) => {
   }
 };
 
+const runYtDlpJson = (input) => {
+  return new Promise((resolve, reject) => {
+    const args = ["--no-warnings", "--skip-download", "--dump-single-json", input];
+    const proc = spawn(ytDlpBinary, args, {
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+
+    let stdout = "";
+    let stderr = "";
+
+    proc.stdout.on("data", (chunk) => {
+      stdout += chunk.toString();
+    });
+
+    proc.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+
+    proc.on("error", (err) => {
+      if (err.code === "ENOENT") {
+        reject(new Error("yt-dlp bulunamadi. Sunucuda yt-dlp kurulumu gerekli."));
+        return;
+      }
+      reject(err);
+    });
+
+    proc.on("close", (code) => {
+      if (code !== 0) {
+        reject(new Error(stderr.trim() || `yt-dlp komutu ${code} koduyla sonlandi.`));
+        return;
+      }
+
+      try {
+        resolve(JSON.parse(stdout));
+      } catch {
+        reject(new Error("yt-dlp JSON cikti parse edilemedi."));
+      }
+    });
+  });
+};
+
+const normalizeYtDlpTrack = (entry) => {
+  return {
+    title: entry.title || "Bilinmeyen Sarki",
+    url: entry.webpage_url || entry.url,
+    durationInSec: Number(entry.duration || 0)
+  };
+};
+
 const resolveTrack = async (query) => {
   const trimmed = (query || "").trim();
-  const isYouTubeUrl = /^(https?:\/\/)?(www\.)?(youtube\.com|youtu\.be)\//i.test(trimmed);
+  const isUrl = /^https?:\/\//i.test(trimmed);
+  const input = isUrl ? trimmed : `ytsearch1:${trimmed}`;
+  const result = await runYtDlpJson(input);
 
-  if (isYouTubeUrl) {
-    const info = await play.video_basic_info(trimmed);
-    const video = info.video_details;
-    return {
-      title: video.title,
-      url: video.url,
-      durationInSec: Number(video.durationInSec || 0)
-    };
-  }
-
-  const results = await play.search(trimmed, {
-    source: { youtube: "video" },
-    limit: 1,
-    language: "tr"
-  });
-
-  if (!results || results.length === 0) {
+  const entry = Array.isArray(result.entries) ? result.entries.find(Boolean) : result;
+  if (!entry) {
     throw new Error("Arama sonucu bulunamadi.");
   }
 
-  const first = results[0];
-  return {
-    title: first.title,
-    url: first.url,
-    durationInSec: Number(first.durationInSec || 0)
-  };
+  return normalizeYtDlpTrack(entry);
+};
+
+const searchTracks = async (query, limit = 5) => {
+  const result = await runYtDlpJson(`ytsearch${limit}:${query}`);
+  const entries = Array.isArray(result.entries) ? result.entries.filter(Boolean) : [];
+  return entries.map(normalizeYtDlpTrack);
 };
 
 const getOrCreateMusicSession = (voiceRoomId) => {
@@ -456,6 +503,7 @@ const getOrCreateMusicSession = (voiceRoomId) => {
     stream,
     queue: [],
     peers: new Map(),
+    sourceProcess: null,
     ffmpegProcess: null,
     current: null,
     isPlaying: false,
@@ -557,9 +605,18 @@ const playNextInSession = async (voiceRoomId) => {
   session.buffer = Buffer.alloc(0);
 
   try {
-    const audioStream = await play.stream(nextTrack.url, {
-      quality: 2,
-      discordPlayerCompatibility: true
+    const ytDlpArgs = [
+      "--no-warnings",
+      "--no-playlist",
+      "-f",
+      "bestaudio[ext=m4a]/bestaudio/best",
+      "-o",
+      "-",
+      nextTrack.url
+    ];
+
+    const sourceProcess = spawn(ytDlpBinary, ytDlpArgs, {
+      stdio: ["ignore", "pipe", "pipe"]
     });
 
     const ffmpegArgs = [
@@ -577,17 +634,25 @@ const playNextInSession = async (voiceRoomId) => {
       stdio: ["pipe", "pipe", "pipe"]
     });
 
+    session.sourceProcess = sourceProcess;
     session.ffmpegProcess = ffmpeg;
     session.isStoppingCurrent = false;
 
-    audioStream.stream.on("error", (err) => {
-      console.error("[MusicBot] Source stream error:", err.message);
+    sourceProcess.on("error", (err) => {
+      console.error("[MusicBot] yt-dlp process error:", err.message);
       try {
         ffmpeg.kill("SIGKILL");
       } catch {}
     });
 
-    audioStream.stream.pipe(ffmpeg.stdin);
+    sourceProcess.stderr.on("data", (data) => {
+      const msg = data.toString().trim();
+      if (msg) {
+        console.error("[MusicBot][yt-dlp]", msg);
+      }
+    });
+
+    sourceProcess.stdout.pipe(ffmpeg.stdin);
 
     ffmpeg.stdout.on("data", (chunk) => {
       if (!session.isPaused) {
@@ -603,6 +668,7 @@ const playNextInSession = async (voiceRoomId) => {
     });
 
     ffmpeg.on("close", () => {
+      session.sourceProcess = null;
       session.ffmpegProcess = null;
       session.buffer = Buffer.alloc(0);
       session.current = null;
@@ -687,11 +753,7 @@ const handleMusicCommand = async ({ socket, roomId, user, commandText }) => {
     }
 
     try {
-      const results = await play.search(query, {
-        source: { youtube: "video" },
-        limit: 5,
-        language: "tr"
-      });
+      const results = await searchTracks(query, 5);
 
       if (!results || results.length === 0) {
         sendSystemMessage(roomId, `Arama sonucu bulunamadi: ${query}`);
