@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useRef, Suspense, useCallback } from "react";
+import { useEffect, useState, useRef, Suspense, useCallback, useMemo } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import io, { Socket } from "socket.io-client";
 import dynamic from "next/dynamic";
@@ -20,11 +20,24 @@ interface Message {
   username: string;
   user_id: number;
   created_at: string;
-  type: "text" | "file";
+  type: "text" | "file" | "command";
   fileUrl?: string;
   fileName?: string;
   room_id?: string;
 }
+
+const SLASH_COMMANDS = [
+  { command: "/play", usage: "/play <yt-link veya sarki adi>", description: "Sarkiyi cal veya kuyruga ekle" },
+  { command: "/search", usage: "/search <sarki adi>", description: "Ilk sonuc adaylarini listele" },
+  { command: "/queue", usage: "/queue", description: "Siradaki parcayi goster" },
+  { command: "/skip", usage: "/skip", description: "Calan parcayi atla" },
+  { command: "/pause", usage: "/pause", description: "Muzigi duraklat" },
+  { command: "/resume", usage: "/resume", description: "Muzigi devam ettir" },
+  { command: "/stop", usage: "/stop", description: "Botu durdur ve kapat" },
+  { command: "/np", usage: "/np", description: "Simdi calani goster" },
+  { command: "/volume", usage: "/volume <0-200>", description: "Ses seviyesini ayarla" },
+  { command: "/help", usage: "/help", description: "Tum muzik komutlarini goster" }
+];
 
 function ChatContent() {
   const router = useRouter();
@@ -44,6 +57,7 @@ function ChatContent() {
   const [usernameError, setUsernameError] = useState("");
   const [isUpdatingUsername, setIsUpdatingUsername] = useState(false);
   const [copiedMessageId, setCopiedMessageId] = useState<number | null>(null);
+  const [activeCommandIndex, setActiveCommandIndex] = useState(0);
   
   // Voice Settings State
   const [noiseThreshold, setNoiseThreshold] = useState(-42); // Default -42 dB
@@ -51,6 +65,27 @@ function ChatContent() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const copyFeedbackTimeoutRef = useRef<number | null>(null);
+
+  const filteredCommands = useMemo(() => {
+    const trimmed = inputValue.trimStart();
+    if (!trimmed.startsWith("/")) return [];
+
+    const [commandPart] = trimmed.split(/\s+/, 1);
+    const query = commandPart.toLowerCase();
+
+    return SLASH_COMMANDS.filter((item) => item.command.startsWith(query)).slice(0, 6);
+  }, [inputValue]);
+
+  const showCommandSuggestions = filteredCommands.length > 0 && inputValue.trimStart().startsWith("/");
+
+  useEffect(() => {
+    if (!showCommandSuggestions) {
+      setActiveCommandIndex(0);
+      return;
+    }
+
+    setActiveCommandIndex((prev) => Math.min(prev, filteredCommands.length - 1));
+  }, [filteredCommands.length, showCommandSuggestions]);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -374,6 +409,15 @@ function ChatContent() {
     setInputValue("");
   };
 
+  const applyCommandSuggestion = (index: number) => {
+    const selected = filteredCommands[index];
+    if (!selected) return;
+
+    const nextValue = selected.usage.includes("<") ? `${selected.usage} ` : selected.command;
+    setInputValue(nextValue);
+    setActiveCommandIndex(index);
+  };
+
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file || !socket || !user || !roomId) return;
@@ -567,6 +611,7 @@ function ChatContent() {
 
           {messages.map((msg, index) => {
             const isMe = msg.user_id === user.id;
+            const isCommand = msg.type === "command";
             const showHeader = index === 0 || messages[index - 1].user_id !== msg.user_id;
 
             return (
@@ -613,9 +658,13 @@ function ChatContent() {
                     )}
                     <div
                       className={`px-4 py-2.5 rounded-2xl break-words shadow-sm ${
-                        isMe
-                          ? "bg-indigo-600 text-white rounded-tr-none"
-                          : "bg-zinc-800 text-zinc-200 rounded-tl-none"
+                        isCommand
+                          ? isMe
+                            ? "bg-indigo-950 border border-indigo-700/60 text-indigo-100 rounded-tr-none font-mono"
+                            : "bg-zinc-900 border border-zinc-700 text-zinc-200 rounded-tl-none font-mono"
+                          : isMe
+                            ? "bg-indigo-600 text-white rounded-tr-none"
+                            : "bg-zinc-800 text-zinc-200 rounded-tl-none"
                       }`}
                     >
                       {msg.type === "file" ? (
@@ -689,11 +738,71 @@ function ChatContent() {
             <input type="file" ref={fileInputRef} className="hidden" onChange={handleFileUpload} />
 
             <div className="flex-1 relative">
+              {showCommandSuggestions && (
+                <div className="absolute bottom-full left-0 right-0 mb-2 overflow-hidden rounded-xl border border-zinc-800 bg-zinc-950/95 shadow-2xl backdrop-blur">
+                  {filteredCommands.map((item, index) => {
+                    const isActive = index === activeCommandIndex;
+
+                    return (
+                      <button
+                        key={item.command}
+                        type="button"
+                        onMouseDown={(e) => {
+                          e.preventDefault();
+                          applyCommandSuggestion(index);
+                        }}
+                        className={`flex w-full items-start justify-between gap-3 px-4 py-3 text-left transition-colors ${
+                          isActive ? "bg-zinc-800 text-white" : "text-zinc-300 hover:bg-zinc-900"
+                        }`}
+                      >
+                        <div>
+                          <div className="text-sm font-semibold">{item.command}</div>
+                          <div className="mt-0.5 text-xs text-zinc-500">{item.description}</div>
+                        </div>
+                        <div className="text-[11px] text-zinc-500">{item.usage}</div>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+
               <input
                 type="text"
                 value={inputValue}
                 onChange={(e) => setInputValue(e.target.value)}
                 onKeyDown={(e) => {
+                  if (showCommandSuggestions) {
+                    if (e.key === "ArrowDown") {
+                      e.preventDefault();
+                      setActiveCommandIndex((prev) => (prev + 1) % filteredCommands.length);
+                      return;
+                    }
+
+                    if (e.key === "ArrowUp") {
+                      e.preventDefault();
+                      setActiveCommandIndex((prev) => (prev - 1 + filteredCommands.length) % filteredCommands.length);
+                      return;
+                    }
+
+                    if ((e.key === "Tab" || e.key === "Enter") && filteredCommands[activeCommandIndex]) {
+                      const trimmed = inputValue.trim();
+                      const hasArguments = trimmed.includes(" ");
+
+                      if (e.key === "Tab" || !hasArguments) {
+                        e.preventDefault();
+                        applyCommandSuggestion(activeCommandIndex);
+                        return;
+                      }
+                    }
+
+                    if (e.key === "Escape") {
+                      e.preventDefault();
+                      setInputValue((prev) => prev.replace(/^\/[\w-]*/, "/"));
+                      setActiveCommandIndex(0);
+                      return;
+                    }
+                  }
+
                   if (e.key === "Enter" && !e.shiftKey && inputValue.trim()) {
                     e.preventDefault();
                     handleSendMessage(e as unknown as React.FormEvent);
@@ -726,7 +835,9 @@ function ChatContent() {
               <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
             </button>
           </form>
-          <p className="mt-2 text-[10px] text-zinc-500">Muzik komutlari icin <span className="text-zinc-400">/help</span> yazabilirsin.</p>
+          <p className="mt-2 text-[10px] text-zinc-500">
+            Muzik komutlari icin <span className="text-zinc-400">/help</span> yaz. <span className="text-zinc-600">Tab ile oneri sec, Enter ile gonder.</span>
+          </p>
         </div>
       </div>
 

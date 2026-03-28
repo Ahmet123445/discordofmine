@@ -286,6 +286,8 @@ const io = new SocketIOServer(httpServer, {
 });
 
 const FRAME_SIZE_BYTES = 1920;
+const FRAME_DURATION_MS = 10;
+const MUSIC_PREBUFFER_FRAMES = 20;
 const MUSIC_BOT_USERNAME = "Music Bot";
 const musicSessions = new Map();
 const ytDlpBinary = process.env.YTDLP_PATH || "yt-dlp";
@@ -327,6 +329,28 @@ const sendSystemMessage = (roomId, content) => {
     room_id: roomId,
     created_at: new Date().toISOString()
   });
+};
+
+const saveAndBroadcastMessage = ({ content, userId, username, type = "text", roomId = "general", fileUrl, fileName }) => {
+  const stmt = db.prepare("INSERT INTO messages (content, user_id, username, type, room_id) VALUES (?, ?, ?, ?, ?)");
+  const info = stmt.run(content, userId, username, type, roomId);
+
+  const message = {
+    id: Number(info.lastInsertRowid),
+    content,
+    user_id: userId,
+    username,
+    type,
+    fileUrl,
+    fileName,
+    room_id: roomId,
+    created_at: new Date().toISOString()
+  };
+
+  io.to(roomId).emit("message-received", message);
+  console.log(`[Message] Sent to room ${roomId} by ${username} (${userId})`);
+
+  return message;
 };
 
 const getVoiceUsers = (voiceRoomId) => usersInVoice[voiceRoomId] || [];
@@ -382,9 +406,24 @@ const destroyAllMusicPeers = (session) => {
   }
 };
 
+const stopPlaybackTimer = (session) => {
+  if (!session.playbackInterval) return;
+
+  clearInterval(session.playbackInterval);
+  session.playbackInterval = null;
+};
+
+const resetPlaybackState = (session) => {
+  stopPlaybackTimer(session);
+  session.buffer = Buffer.alloc(0);
+  session.hasPlaybackStarted = false;
+  session.sourceEnded = false;
+  session.sentSilenceFrames = 0;
+};
+
 const stopCurrentPlayback = (session) => {
   if (!session.ffmpegProcess && !session.sourceProcess) {
-    session.buffer = Buffer.alloc(0);
+    resetPlaybackState(session);
     session.current = null;
     session.isPlaying = false;
     session.isPaused = false;
@@ -413,7 +452,7 @@ const stopCurrentPlayback = (session) => {
 
   session.ffmpegProcess = null;
   session.sourceProcess = null;
-  session.buffer = Buffer.alloc(0);
+  resetPlaybackState(session);
   session.current = null;
   session.isPlaying = false;
   session.isPaused = false;
@@ -479,15 +518,6 @@ const runYtDlpJson = (input) => {
       }
     });
   });
-};
-
-const canResolveTrack = async (url) => {
-  try {
-    await runYtDlpJson(url);
-    return true;
-  } catch {
-    return false;
-  }
 };
 
 const normalizeYtDlpTrack = (entry) => {
@@ -594,12 +624,7 @@ const resolveTrack = async (query) => {
     throw new Error("Arama sonucu bulunamadi.");
   }
 
-  for (const candidate of results) {
-    const ok = await canResolveTrack(candidate.url);
-    if (ok) return candidate;
-  }
-
-  throw new Error("Arama sonucu bulundu ama oynatilabilir bir kaynak bulunamadi.");
+  return results[0];
 };
 
 const searchTracks = async (query, limit = 5) => {
@@ -632,7 +657,11 @@ const getOrCreateMusicSession = (voiceRoomId) => {
     isPaused: false,
     isStoppingCurrent: false,
     volume: 80,
-    buffer: Buffer.alloc(0)
+    buffer: Buffer.alloc(0),
+    playbackInterval: null,
+    hasPlaybackStarted: false,
+    sourceEnded: false,
+    sentSilenceFrames: 0
   };
 
   musicSessions.set(voiceRoomId, session);
@@ -687,6 +716,29 @@ const ensureBotConnectedToRoomUsers = (voiceRoomId) => {
 const pumpChunkToRtcSource = (session, chunk) => {
   session.buffer = Buffer.concat([session.buffer, chunk]);
 
+  if (!session.hasPlaybackStarted) {
+    const minimumBytes = FRAME_SIZE_BYTES * MUSIC_PREBUFFER_FRAMES;
+    if (session.buffer.length >= minimumBytes || session.sourceEnded) {
+      session.hasPlaybackStarted = true;
+    }
+  }
+
+  session.sentSilenceFrames = 0;
+};
+
+const pushSilenceFrame = (session) => {
+  const arrayBuffer = new ArrayBuffer(FRAME_SIZE_BYTES);
+  const samples = new Int16Array(arrayBuffer);
+  session.audioSource.onData({
+    samples,
+    sampleRate: 48000,
+    bitsPerSample: 16,
+    channelCount: 2,
+    numberOfFrames: 480
+  });
+};
+
+const flushBufferedFrameToRtcSource = (session) => {
   while (session.buffer.length >= FRAME_SIZE_BYTES) {
     const frameData = session.buffer.subarray(0, FRAME_SIZE_BYTES);
     session.buffer = session.buffer.subarray(FRAME_SIZE_BYTES);
@@ -705,7 +757,34 @@ const pumpChunkToRtcSource = (session, chunk) => {
       channelCount: 2,
       numberOfFrames: 480
     });
+
+    return true;
   }
+
+  return false;
+};
+
+const startPlaybackTimer = (session) => {
+  stopPlaybackTimer(session);
+
+  session.playbackInterval = setInterval(() => {
+    if (!session.isPlaying || session.isPaused) return;
+    if (!session.hasPlaybackStarted) return;
+
+    const flushed = flushBufferedFrameToRtcSource(session);
+    if (flushed) {
+      session.sentSilenceFrames = 0;
+      return;
+    }
+
+    if (!session.sourceEnded) {
+      session.sentSilenceFrames += 1;
+      pushSilenceFrame(session);
+      return;
+    }
+
+    stopPlaybackTimer(session);
+  }, FRAME_DURATION_MS);
 };
 
 const playNextInSession = async (voiceRoomId) => {
@@ -724,7 +803,7 @@ const playNextInSession = async (voiceRoomId) => {
   session.current = nextTrack;
   session.isPlaying = true;
   session.isPaused = false;
-  session.buffer = Buffer.alloc(0);
+  resetPlaybackState(session);
 
   try {
     const ytDlpArgs = [
@@ -762,6 +841,7 @@ const playNextInSession = async (voiceRoomId) => {
     session.sourceProcess = sourceProcess;
     session.ffmpegProcess = ffmpeg;
     session.isStoppingCurrent = false;
+    startPlaybackTimer(session);
 
     sourceProcess.on("error", (err) => {
       console.error("[MusicBot] yt-dlp process error:", err.message);
@@ -781,6 +861,11 @@ const playNextInSession = async (voiceRoomId) => {
     sourceProcess.on("close", (code) => {
       if (code !== 0) {
         sourceFailed = true;
+      }
+
+      session.sourceEnded = true;
+      if (session.buffer.length < FRAME_SIZE_BYTES) {
+        session.hasPlaybackStarted = true;
       }
     });
 
@@ -802,7 +887,42 @@ const playNextInSession = async (voiceRoomId) => {
     ffmpeg.on("close", () => {
       session.sourceProcess = null;
       session.ffmpegProcess = null;
-      session.buffer = Buffer.alloc(0);
+      session.sourceEnded = true;
+
+      if (session.playbackInterval && session.buffer.length >= FRAME_SIZE_BYTES) {
+        const finalizeWhenDrained = setInterval(() => {
+          if (session.buffer.length >= FRAME_SIZE_BYTES) return;
+          clearInterval(finalizeWhenDrained);
+          stopPlaybackTimer(session);
+          resetPlaybackState(session);
+          session.current = null;
+          session.isPlaying = false;
+          session.isPaused = false;
+
+          const serverRoomId = voiceRoomId.substring(0, voiceRoomId.lastIndexOf("-"));
+
+          if (sourceFailed && !session.isStoppingCurrent) {
+            const detail = isYouTubeBotCheckError(sourceErrorText)
+              ? " (YouTube bot dogrulamasi engeli - cookie gerekebilir)"
+              : "";
+            sendSystemMessage(serverRoomId, `Sarki oynatilamadi: ${nextTrack.title}${detail}`);
+            session.isStoppingCurrent = false;
+            void playNextInSession(voiceRoomId);
+            return;
+          }
+
+          if (!session.isStoppingCurrent) {
+            sendSystemMessage(serverRoomId, `Sarki bitti: ${nextTrack.title}`);
+          }
+
+          session.isStoppingCurrent = false;
+          void playNextInSession(voiceRoomId);
+        }, FRAME_DURATION_MS);
+        return;
+      }
+
+      stopPlaybackTimer(session);
+      resetPlaybackState(session);
       session.current = null;
       session.isPlaying = false;
       session.isPaused = false;
@@ -834,7 +954,7 @@ const playNextInSession = async (voiceRoomId) => {
     session.current = null;
     session.isPlaying = false;
     session.isPaused = false;
-    session.buffer = Buffer.alloc(0);
+    resetPlaybackState(session);
 
     const serverRoomId = voiceRoomId.substring(0, voiceRoomId.lastIndexOf("-"));
     sendSystemMessage(serverRoomId, `Sarki oynatilamadi: ${nextTrack.title}`);
@@ -1426,37 +1546,43 @@ io.on("connection", (socket) => {
     }
     
     try {
-      if (type === "text" && typeof content === "string" && content.trim().startsWith("/")) {
+      const trimmedContent = typeof content === "string" ? content.trim() : "";
+      const isSlashCommand = type === "text" && trimmedContent.startsWith("/");
+
+      if (isSlashCommand) {
+        saveAndBroadcastMessage({
+          content: trimmedContent,
+          userId,
+          username: user.username,
+          type: "command",
+          roomId,
+          fileUrl,
+          fileName
+        });
+
         const wasHandled = await handleMusicCommand({
           socket,
           roomId,
           user,
-          commandText: content.trim()
+          commandText: trimmedContent
         });
 
         if (wasHandled) {
           return;
         }
+
+        return;
       }
 
-      const stmt = db.prepare("INSERT INTO messages (content, user_id, username, type, room_id) VALUES (?, ?, ?, ?, ?)");
-      const info = stmt.run(content, userId, user.username, type, roomId);
-      
-      const message = {
-        id: Number(info.lastInsertRowid),
+      saveAndBroadcastMessage({
         content,
-        user_id: userId,
+        userId,
         username: user.username,
         type,
+        roomId,
         fileUrl,
-        fileName,
-        room_id: roomId,
-        created_at: new Date().toISOString()
-      };
-
-      // Emit to all users in the room
-      io.to(roomId).emit("message-received", message);
-      console.log(`[Message] Sent to room ${roomId} by ${user.username} (${userId})`);
+        fileName
+      });
       
     } catch (err) {
       console.error("[Message] Error saving message:", err);
