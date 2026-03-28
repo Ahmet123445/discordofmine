@@ -11,6 +11,7 @@ import { spawn } from "child_process";
 import Peer from "simple-peer";
 import wrtc from "@roamhq/wrtc";
 import ffmpegPath from "ffmpeg-static";
+import fs from "fs";
 
 // Version: 2.0.0 - Database-based session tracking for reliability
 dotenv.config();
@@ -288,6 +289,25 @@ const FRAME_SIZE_BYTES = 1920;
 const MUSIC_BOT_USERNAME = "Music Bot";
 const musicSessions = new Map();
 const ytDlpBinary = process.env.YTDLP_PATH || "yt-dlp";
+const ytDlpCookiesPath = process.env.YTDLP_COOKIES_PATH || "/opt/discordofmine/server/yt-cookies.txt";
+
+const getYtDlpBaseArgs = () => {
+  const args = [
+    "--no-warnings",
+    "--extractor-args",
+    "youtube:player_client=android,web_safari,tv"
+  ];
+
+  if (fs.existsSync(ytDlpCookiesPath)) {
+    args.push("--cookies", ytDlpCookiesPath);
+  }
+
+  return args;
+};
+
+const isYouTubeBotCheckError = (msg = "") => {
+  return /sign in to confirm you're not a bot|not a bot/i.test(msg);
+};
 
 const buildMusicBotId = (voiceRoomId) => `music-bot:${voiceRoomId}`;
 const isMusicBotId = (id) => typeof id === "string" && id.startsWith("music-bot:");
@@ -417,7 +437,7 @@ const closeMusicSession = (voiceRoomId, reason = null) => {
 
 const runYtDlpJson = (input) => {
   return new Promise((resolve, reject) => {
-    const args = ["--no-warnings", "--skip-download", "--dump-single-json", input];
+    const args = [...getYtDlpBaseArgs(), "--skip-download", "--dump-single-json", input];
     const proc = spawn(ytDlpBinary, args, {
       stdio: ["ignore", "pipe", "pipe"]
     });
@@ -456,6 +476,15 @@ const runYtDlpJson = (input) => {
   });
 };
 
+const canResolveTrack = async (url) => {
+  try {
+    await runYtDlpJson(url);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
 const normalizeYtDlpTrack = (entry) => {
   return {
     title: entry.title || "Bilinmeyen Sarki",
@@ -467,15 +496,26 @@ const normalizeYtDlpTrack = (entry) => {
 const resolveTrack = async (query) => {
   const trimmed = (query || "").trim();
   const isUrl = /^https?:\/\//i.test(trimmed);
-  const input = isUrl ? trimmed : `ytsearch1:${trimmed}`;
-  const result = await runYtDlpJson(input);
+  if (isUrl) {
+    const result = await runYtDlpJson(trimmed);
+    const entry = Array.isArray(result.entries) ? result.entries.find(Boolean) : result;
+    if (!entry) {
+      throw new Error("Verilen link cozumlenemedi.");
+    }
+    return normalizeYtDlpTrack(entry);
+  }
 
-  const entry = Array.isArray(result.entries) ? result.entries.find(Boolean) : result;
-  if (!entry) {
+  const results = await searchTracks(trimmed, 10);
+  if (!results || results.length === 0) {
     throw new Error("Arama sonucu bulunamadi.");
   }
 
-  return normalizeYtDlpTrack(entry);
+  for (const candidate of results) {
+    const ok = await canResolveTrack(candidate.url);
+    if (ok) return candidate;
+  }
+
+  throw new Error("Arama sonucu bulundu ama oynatilabilir bir kaynak bulunamadi.");
 };
 
 const searchTracks = async (query, limit = 5) => {
@@ -606,7 +646,7 @@ const playNextInSession = async (voiceRoomId) => {
 
   try {
     const ytDlpArgs = [
-      "--no-warnings",
+      ...getYtDlpBaseArgs(),
       "--no-playlist",
       "-f",
       "bestaudio[ext=m4a]/bestaudio/best",
@@ -634,6 +674,9 @@ const playNextInSession = async (voiceRoomId) => {
       stdio: ["pipe", "pipe", "pipe"]
     });
 
+    let sourceFailed = false;
+    let sourceErrorText = "";
+
     session.sourceProcess = sourceProcess;
     session.ffmpegProcess = ffmpeg;
     session.isStoppingCurrent = false;
@@ -648,7 +691,14 @@ const playNextInSession = async (voiceRoomId) => {
     sourceProcess.stderr.on("data", (data) => {
       const msg = data.toString().trim();
       if (msg) {
+        sourceErrorText += `${msg}\n`;
         console.error("[MusicBot][yt-dlp]", msg);
+      }
+    });
+
+    sourceProcess.on("close", (code) => {
+      if (code !== 0) {
+        sourceFailed = true;
       }
     });
 
@@ -676,6 +726,16 @@ const playNextInSession = async (voiceRoomId) => {
       session.isPaused = false;
 
       const serverRoomId = voiceRoomId.substring(0, voiceRoomId.lastIndexOf("-"));
+
+      if (sourceFailed && !session.isStoppingCurrent) {
+        const detail = isYouTubeBotCheckError(sourceErrorText)
+          ? " (YouTube bot dogrulamasi engeli - cookie gerekebilir)"
+          : "";
+        sendSystemMessage(serverRoomId, `Sarki oynatilamadi: ${nextTrack.title}${detail}`);
+        session.isStoppingCurrent = false;
+        void playNextInSession(voiceRoomId);
+        return;
+      }
 
       if (!session.isStoppingCurrent) {
         sendSystemMessage(serverRoomId, `Sarki bitti: ${nextTrack.title}`);
@@ -763,7 +823,12 @@ const handleMusicCommand = async ({ socket, roomId, user, commandText }) => {
       const lines = results.map((item, index) => `${index + 1}. ${item.title}`);
       sendSystemMessage(roomId, `Arama sonuclari (${query}):\n${lines.join("\n")}`);
     } catch (err) {
-      sendSystemMessage(roomId, "Arama sirasinda bir hata olustu.");
+      const message = err?.message || "";
+      if (isYouTubeBotCheckError(message)) {
+        sendSystemMessage(roomId, "YouTube arama engeline takildi (bot dogrulamasi). Biraz sonra tekrar dene.");
+      } else {
+        sendSystemMessage(roomId, "Arama sirasinda bir hata olustu.");
+      }
     }
 
     return true;
@@ -788,8 +853,13 @@ const handleMusicCommand = async ({ socket, roomId, user, commandText }) => {
       sendSystemMessage(roomId, `Kuyruga eklendi: ${track.title}`);
       void playNextInSession(voiceRoomId);
     } catch (err) {
-      console.error("[MusicBot] /play error:", err.message);
-      sendSystemMessage(roomId, `Parca bulunamadi: ${query}`);
+      const message = err?.message || "Bilinmeyen hata";
+      console.error("[MusicBot] /play error:", message);
+      if (isYouTubeBotCheckError(message)) {
+        sendSystemMessage(roomId, "YouTube bu parca icin bot dogrulamasi istiyor. Baska bir sarki dene veya sunucuya yt-dlp cookie tanimla.");
+      } else {
+        sendSystemMessage(roomId, `Parca bulunamadi/oynatilamadi: ${query}`);
+      }
     }
 
     return true;
