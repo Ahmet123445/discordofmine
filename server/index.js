@@ -290,11 +290,6 @@ const MUSIC_BOT_USERNAME = "Music Bot";
 const musicSessions = new Map();
 const ytDlpBinary = process.env.YTDLP_PATH || "yt-dlp";
 const ytDlpCookiesPath = process.env.YTDLP_COOKIES_PATH || "/opt/discordofmine/server/yt-cookies.txt";
-const invidiousSearchInstances = [
-  "https://invidious.nerdvpn.de",
-  "https://vid.puffyan.us",
-  "https://inv.nadeko.net"
-];
 
 const getYtDlpBaseArgs = () => {
   const args = [
@@ -498,44 +493,53 @@ const normalizeYtDlpTrack = (entry) => {
   };
 };
 
-const searchViaInvidious = async (query, limit = 10) => {
+const searchYouTubeIdsByHtml = async (query, limit = 20) => {
   const encoded = encodeURIComponent(query);
+  const response = await fetch(`https://www.youtube.com/results?search_query=${encoded}`, {
+    headers: {
+      "user-agent": "Mozilla/5.0"
+    }
+  });
 
-  for (const base of invidiousSearchInstances) {
+  if (!response.ok) {
+    throw new Error("YouTube arama sayfasi acilamadi.");
+  }
+
+  const html = await response.text();
+  const ids = [];
+  const seen = new Set();
+  const regex = /\"videoId\":\"([A-Za-z0-9_-]{11})\"/g;
+  let match = null;
+
+  while ((match = regex.exec(html)) !== null) {
+    const id = match[1];
+    if (!seen.has(id)) {
+      seen.add(id);
+      ids.push(id);
+      if (ids.length >= limit) break;
+    }
+  }
+
+  return ids;
+};
+
+const getPlayableTracksFromSearch = async (query, limit = 5) => {
+  const ids = await searchYouTubeIdsByHtml(query, 25);
+  const tracks = [];
+
+  for (const id of ids) {
+    const url = `https://www.youtube.com/watch?v=${id}`;
     try {
-      const url = `${base}/api/v1/search?q=${encoded}&type=video`;
-      const response = await fetch(url, {
-        headers: {
-          "accept": "application/json",
-          "user-agent": "Mozilla/5.0"
-        }
-      });
-
-      if (!response.ok) {
-        continue;
+      const result = await runYtDlpJson(url);
+      const entry = Array.isArray(result.entries) ? result.entries.find(Boolean) : result;
+      if (entry) {
+        tracks.push(normalizeYtDlpTrack(entry));
       }
-
-      const data = await response.json();
-      if (!Array.isArray(data)) {
-        continue;
-      }
-
-      const tracks = data
-        .filter((item) => item && (item.type === "video" || item.videoId))
-        .slice(0, limit)
-        .map((item) => ({
-          title: item.title || "Bilinmeyen Sarki",
-          url: `https://www.youtube.com/watch?v=${item.videoId}`,
-          durationInSec: Number(item.lengthSeconds || 0)
-        }));
-
-      if (tracks.length > 0) {
-        return tracks;
-      }
+      if (tracks.length >= limit) break;
     } catch {}
   }
 
-  throw new Error("Harici arama servislerinden sonuc alinmadi.");
+  return tracks;
 };
 
 const resolveTrack = async (query) => {
@@ -550,7 +554,7 @@ const resolveTrack = async (query) => {
     return normalizeYtDlpTrack(entry);
   }
 
-  const results = await searchViaInvidious(trimmed, 10);
+  const results = await getPlayableTracksFromSearch(trimmed, 10);
   if (!results || results.length === 0) {
     throw new Error("Arama sonucu bulunamadi.");
   }
@@ -564,7 +568,7 @@ const resolveTrack = async (query) => {
 };
 
 const searchTracks = async (query, limit = 5) => {
-  return searchViaInvidious(query, limit);
+  return getPlayableTracksFromSearch(query, limit);
 };
 
 const getOrCreateMusicSession = (voiceRoomId) => {
