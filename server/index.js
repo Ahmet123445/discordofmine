@@ -295,6 +295,10 @@ const hasYtDlpCookies = () => fs.existsSync(ytDlpCookiesPath);
 const getYtDlpBaseArgs = () => {
   const args = [
     "--no-warnings",
+    "--js-runtimes",
+    "node",
+    "--remote-components",
+    "ejs:github",
     "--extractor-args",
     "youtube:player_client=android,web_safari,tv"
   ];
