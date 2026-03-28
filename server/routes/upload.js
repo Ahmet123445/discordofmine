@@ -32,8 +32,7 @@ router.post("/", upload.single("file"), (req, res) => {
     return res.status(400).json({ error: "No file uploaded" });
   }
 
-  // Generate URL (for now, served statically from server)
-  // In production (Render), local files are ephemeral. 
+  // Generate URL (served statically from server)
   // TODO: Switch to S3/Cloudinary if persistence is critical.
   const fileUrl = `/uploads/${req.file.filename}`;
 

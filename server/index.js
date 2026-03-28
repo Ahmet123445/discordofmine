@@ -278,9 +278,9 @@ const io = new SocketIOServer(httpServer, {
     origin: "*", 
     methods: ["GET", "POST"]
   },
-  // CRITICAL: Ping/Pong settings to prevent Render timeout
+  // CRITICAL: Ping/Pong settings for stable socket connections
   pingTimeout: 60000,      // 60 seconds
-  pingInterval: 20000,     // 20 seconds - more frequent pings to keep Render alive
+  pingInterval: 20000,     // 20 seconds
   transports: ['websocket', 'polling'],
   allowUpgrades: true
 });
@@ -853,7 +853,7 @@ const handleMusicCommand = async ({ socket, roomId, user, commandText }) => {
   return false;
 };
 
-// Health check - also keeps Render awake
+// Health check endpoint
 app.get("/", (req, res) => {
   res.send("Server is running - " + new Date().toISOString());
 });

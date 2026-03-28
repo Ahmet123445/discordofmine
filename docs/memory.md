@@ -81,8 +81,8 @@ cd client && npm run dev
 
 ## Deployment Checklist
 1. Ensure all changes committed and pushed
-2. Vercel auto-deploys from main branch
-3. Render auto-deploys from main branch
-4. Check Vercel logs for build errors
-5. Check Render logs for runtime errors
+2. Connect to server with SSH (`root@167.86.99.131`)
+3. Run `/opt/discordofmine/deploy.sh main`
+4. Check PM2 process status (`pm2 ls`)
+5. Verify health endpoints (`http://127.0.0.1:3001/health`, `http://127.0.0.1:3002`)
 6. Test voice connection between two users

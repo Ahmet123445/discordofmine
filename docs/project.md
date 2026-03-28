@@ -21,11 +21,9 @@ Build a private, low-latency communication platform for a small group of friends
 - **Frontend:** Next.js (React), Tailwind CSS, Lucide React (Icons).
 - **Backend:** Node.js (Express or Fastify).
 - **Real-time:** Socket.io (Signaling & Chat), SimplePeer/WebRTC (Voice/Screen).
-- **Database:** PostgreSQL (via Supabase or Render managed) or lightweight SQLite (if persistence requirements are low).
+- **Database:** PostgreSQL (managed or self-hosted) or lightweight SQLite (if persistence requirements are low).
 - **Storage:** Cloud object storage (AWS S3 compatible) for file sharing.
-- **Deployment:** 
-  - Frontend: Vercel
-  - Backend: Render.com
+- **Deployment:** Self-hosted VPS (frontend + backend managed with PM2).
 
 ## Folder Structure (LOCKED)
 ```

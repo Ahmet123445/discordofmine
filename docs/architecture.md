@@ -13,7 +13,7 @@ Future AI models must adhere to this flow:
 3.  **/repair:** specific fixes only. Do not refactor unless critical.
 
 ## Core Patterns
-- **Adapter Pattern:** Use adapters for external services (Storage, DB) to allow easy switching if Render/Vercel constraints change.
+- **Adapter Pattern:** Use adapters for external services (Storage, DB) to allow easy switching if infrastructure constraints change.
 - **Repository Pattern:** Database access must be abstracted.
 
 ## Forbidden Patterns

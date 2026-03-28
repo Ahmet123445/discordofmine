@@ -15,6 +15,6 @@
 - **Bootstrap/Material UI:** Use Tailwind CSS for custom, lightweight design.
 - **NestJS:** Too heavy for this scope; use standard Express/Fastify.
 
-## Render/Vercel Constraints
-- **Render Free Tier:** Server spins down after inactivity. Keep-alive mechanism may be needed.
-- **Vercel Functions:** 10s execution limit (avoid long polling or heavy computation in serverless functions).
+## Self-Hosted Constraints
+- **Single VPS:** Capacity depends on current server resources and PM2 process health.
+- **Ops Responsibility:** Backups, monitoring, and security updates must be maintained on the server.

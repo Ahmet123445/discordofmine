@@ -4,12 +4,13 @@
 
 ## Current Status
 - **Phase:** Production (Live)
-- **Last Updated:** 2026-01-31
+- **Last Updated:** 2026-03-28
 - **App Name:** V A T A N A S K I (renamed from DiscordOfMine)
 
 ## Deployment URLs
-- **Frontend:** https://discordofmine-56ee.vercel.app
-- **Backend:** Render.com (Node.js service)
+- **Server:** root@167.86.99.131
+- **Frontend:** http://167.86.99.131:3002
+- **Backend:** http://167.86.99.131:3001
 - **Repository:** https://github.com/Ahmet123445/discordofmine
 
 ## Completed Features
@@ -43,8 +44,7 @@
 
 ### Phase 4: Deployment
 - [x] Environment Variables configured
-- [x] Vercel deployment (Frontend)
-- [x] Render.com deployment (Backend)
+- [x] Self-hosted VPS deployment (Frontend + Backend)
 - [x] CORS configured for production
 
 ## Known Issues / Limitations
@@ -53,7 +53,7 @@
 - **Speaking Indicator REMOVED:** Was causing audio crackling due to Web Audio API overhead. Need alternative approach (server-side or optimized).
 
 ### Architectural Limitations
-- **Ephemeral Storage:** Uploads on Render Free Tier are temporary (lost on restart).
+- **Local Storage Risk:** Uploads are on local disk; regular backup is required.
 - **WebRTC NAT:** Some restrictive networks may block P2P. TURN server would help but not implemented.
 - **Mesh Network Limit:** Voice quality may degrade with 6+ users in same room.
 
@@ -84,15 +84,15 @@
 
 ## Environment Variables
 
-### Vercel (Frontend)
+### Frontend (VPS)
 ```
-NEXT_PUBLIC_API_URL=https://your-render-backend-url.onrender.com
+NEXT_PUBLIC_API_URL=http://167.86.99.131:3001
 ```
 
-### Render (Backend)
+### Backend (VPS)
 ```
 JWT_SECRET=your-secure-random-string
-PORT=10000
+PORT=3001
 ```
 
 ## File Structure

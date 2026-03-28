@@ -16,7 +16,7 @@
 ### ADR-001: Monolithic Backend
 - **Status:** Accepted
 - **Context:** The app serves only 5-10 users.
-- **Decision:** Use a single Node.js server instance on Render.
+- **Decision:** Use a single Node.js server instance on self-hosted VPS.
 - **Consequences:**
   - (+) Simple deployment and state management for sockets.
   - (-) Scaling beyond vertical limits is harder (not an issue for 10 users).
