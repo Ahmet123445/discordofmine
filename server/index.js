@@ -290,6 +290,7 @@ const MUSIC_BOT_USERNAME = "Music Bot";
 const musicSessions = new Map();
 const ytDlpBinary = process.env.YTDLP_PATH || "yt-dlp";
 const ytDlpCookiesPath = process.env.YTDLP_COOKIES_PATH || "/opt/discordofmine/server/yt-cookies.txt";
+const hasYtDlpCookies = () => fs.existsSync(ytDlpCookiesPath);
 
 const getYtDlpBaseArgs = () => {
   const args = [
@@ -903,7 +904,10 @@ const handleMusicCommand = async ({ socket, roomId, user, commandText }) => {
       const message = err?.message || "Bilinmeyen hata";
       console.error("[MusicBot] /play error:", message);
       if (isYouTubeBotCheckError(message)) {
-        sendSystemMessage(roomId, "YouTube bu parca icin bot dogrulamasi istiyor. Baska bir sarki dene veya sunucuya yt-dlp cookie tanimla.");
+        const cookieHint = hasYtDlpCookies()
+          ? "Cookie dosyasi var ama gecersiz olabilir; yenileyip tekrar dene."
+          : `Sunucuya cookie dosyasi ekle: ${ytDlpCookiesPath}`;
+        sendSystemMessage(roomId, `YouTube bu parca icin bot dogrulamasi istiyor. ${cookieHint}`);
       } else {
         sendSystemMessage(roomId, `Parca bulunamadi/oynatilamadi: ${query}`);
       }
@@ -1633,4 +1637,6 @@ io.on("connection", (socket) => {
 
 httpServer.listen(port, () => {
   console.log(`Server running on port ${port}`);
+  console.log(`[MusicBot] yt-dlp binary: ${ytDlpBinary}`);
+  console.log(`[MusicBot] yt-dlp cookies: ${hasYtDlpCookies() ? `found (${ytDlpCookiesPath})` : `missing (${ytDlpCookiesPath})`}`);
 });
