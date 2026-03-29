@@ -287,7 +287,8 @@ const io = new SocketIOServer(httpServer, {
 
 const FRAME_SIZE_BYTES = 1920;
 const FRAME_DURATION_MS = 10;
-const MUSIC_PREBUFFER_FRAMES = 8;
+const MUSIC_PREBUFFER_FRAMES = Number(process.env.MUSIC_PREBUFFER_FRAMES || 30);
+const MUSIC_REBUFFER_FRAMES = Number(process.env.MUSIC_REBUFFER_FRAMES || 14);
 const MUSIC_BOT_USERNAME = "Music Bot";
 const musicSessions = new Map();
 const resolvedTrackCache = new Map();
@@ -454,6 +455,7 @@ const resetPlaybackState = (session) => {
   session.buffer = Buffer.alloc(0);
   session.hasPlaybackStarted = false;
   session.hasAnnouncedPlaybackStart = false;
+  session.isRebuffering = false;
   session.sourceEnded = false;
   session.sentSilenceFrames = 0;
 };
@@ -683,7 +685,7 @@ const resolveTrack = async (query) => {
     return normalizedTrack;
   }
 
-  const results = await getPlayableTracksFromSearch(trimmed, 10);
+  const results = await getPlayableTracksFromSearch(trimmed, 3);
   if (!results || results.length === 0) {
     throw new Error("Arama sonucu bulunamadi.");
   }
@@ -726,6 +728,7 @@ const getOrCreateMusicSession = (voiceRoomId) => {
     playbackInterval: null,
     hasPlaybackStarted: false,
     hasAnnouncedPlaybackStart: false,
+    isRebuffering: false,
     sourceEnded: false,
     sentSilenceFrames: 0
   };
@@ -834,6 +837,14 @@ const startPlaybackTimer = (session) => {
     if (!session.isPlaying || session.isPaused) return;
     if (!session.hasPlaybackStarted) return;
 
+    if (session.isRebuffering) {
+      const minimumBytes = FRAME_SIZE_BYTES * MUSIC_REBUFFER_FRAMES;
+      if (session.buffer.length < minimumBytes && !session.sourceEnded) {
+        return;
+      }
+      session.isRebuffering = false;
+    }
+
     const flushed = flushBufferedFrameToRtcSource(session);
     if (flushed) {
       if (!session.hasAnnouncedPlaybackStart && session.current) {
@@ -848,6 +859,13 @@ const startPlaybackTimer = (session) => {
 
     if (!session.sourceEnded) {
       session.sentSilenceFrames += 1;
+
+      if (session.sentSilenceFrames >= 2) {
+        session.sentSilenceFrames = 0;
+        session.isRebuffering = true;
+        return;
+      }
+
       pushSilenceFrame(session);
       return;
     }
@@ -880,8 +898,9 @@ const playNextInSession = async (voiceRoomId) => {
       "--no-playlist",
       "--no-progress",
       "--newline",
-      "--buffer-size", "16K",
-      "--http-chunk-size", "10M",
+      "--buffer-size", "64K",
+      "--http-chunk-size", "1M",
+      "--socket-timeout", "15",
       "-f",
       "bestaudio[ext=m4a]/bestaudio/best",
       "-o",
@@ -899,6 +918,7 @@ const playNextInSession = async (voiceRoomId) => {
       "-probesize", "32k",
       "-analyzeduration", "0",
       "-i", "pipe:0",
+      "-vn",
       "-filter:a", `volume=${Math.max(0, session.volume) / 100}`,
       "-f", "s16le",
       "-ar", "48000",
