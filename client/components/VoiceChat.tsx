@@ -57,14 +57,43 @@ const playScreenStartSound = () => {
   }
 };
 
-// --- WebRTC Quality Boosters ---
-const setBitrate = (sdp: string, bitrate: number) => {
-  // Increase bitrate for both video and audio
-  // Target: 8000 kbps for 1080p 60fps
-  return sdp.replace(/a=fmtp:(102|121|127|96|97|98|99|100|101).*/g, (match) => {
-    return match + ";x-google-max-bitrate=" + bitrate + ";x-google-min-bitrate=" + bitrate + ";x-google-start-bitrate=" + bitrate;
-  });
+const DEFAULT_ICE_SERVERS = [
+  { urls: "stun:stun.l.google.com:19302" },
+  { urls: "stun:global.stun.twilio.com:3478" }
+];
+
+const parseIceServers = () => {
+  const custom = (process.env.NEXT_PUBLIC_ICE_SERVERS_JSON || "").trim();
+  if (custom) {
+    try {
+      const parsed = JSON.parse(custom);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        return parsed;
+      }
+    } catch (err) {
+      console.error("ICE server parse hatasi", err);
+    }
+  }
+
+  const turnUrls = (process.env.NEXT_PUBLIC_TURN_URL || "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+
+  if (turnUrls.length === 0) {
+    return DEFAULT_ICE_SERVERS;
+  }
+
+  const username = process.env.NEXT_PUBLIC_TURN_USERNAME || "";
+  const credential = process.env.NEXT_PUBLIC_TURN_PASSWORD || "";
+
+  return [
+    ...DEFAULT_ICE_SERVERS,
+    ...turnUrls.map((urls) => ({ urls, username, credential }))
+  ];
 };
+
+const ICE_SERVERS = parseIceServers();
 
   // SIMD Check Helper
   // const isSimdSupported = async () => { ... } // No longer needed for DeepFilterNet (WASM handles it)
@@ -569,21 +598,14 @@ const setBitrate = (sdp: string, bitrate: number) => {
   const createPeer = (userToSignal: string, callerID: string, stream: MediaStream, myUsername: string) => {
     const peer = new PeerClass({
       initiator: true,
-      trickle: false,
+      trickle: true,
       stream,
       config: {
-        iceServers: [
-          { urls: "stun:stun.l.google.com:19302" },
-          { urls: "stun:global.stun.twilio.com:3478" }
-        ]
+        iceServers: ICE_SERVERS
       }
     });
 
     peer.on("signal", (signal: any) => {
-      // If it's an offer or answer, boost the bitrate in the SDP
-      if (signal.type === "offer" || signal.type === "answer") {
-        signal.sdp = setBitrate(signal.sdp, 8000); // 8 Mbps for high quality
-      }
       socket?.emit("sending-signal", { userToSignal, callerID, signal, username: myUsername });
     });
 
@@ -603,21 +625,14 @@ const setBitrate = (sdp: string, bitrate: number) => {
   const addPeer = (incomingSignal: any, callerID: string, stream: MediaStream) => {
     const peer = new PeerClass({
       initiator: false,
-      trickle: false,
+      trickle: true,
       stream,
       config: {
-        iceServers: [
-          { urls: "stun:stun.l.google.com:19302" },
-          { urls: "stun:global.stun.twilio.com:3478" }
-        ]
+        iceServers: ICE_SERVERS
       }
     });
 
     peer.on("signal", (signal: any) => {
-      // If it's an offer or answer, boost the bitrate in the SDP
-      if (signal.type === "offer" || signal.type === "answer") {
-        signal.sdp = setBitrate(signal.sdp, 8000); // 8 Mbps for high quality
-      }
       socket?.emit("returning-signal", { signal, callerID });
     });
 

@@ -296,6 +296,40 @@ const ytDlpBinary = process.env.YTDLP_PATH || "yt-dlp";
 const ytDlpCookiesPath = process.env.YTDLP_COOKIES_PATH || path.join(process.cwd(), "yt-cookies.txt");
 const hasYtDlpCookies = () => fs.existsSync(ytDlpCookiesPath);
 
+const DEFAULT_ICE_SERVERS = [
+  { urls: "stun:stun.l.google.com:19302" },
+  { urls: "stun:global.stun.twilio.com:3478" }
+];
+
+const parseIceServers = () => {
+  const custom = (process.env.ICE_SERVERS_JSON || "").trim();
+  if (custom) {
+    try {
+      const parsed = JSON.parse(custom);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        return parsed;
+      }
+    } catch (err) {
+      console.error("[Voice] ICE_SERVERS_JSON parse hatasi:", err.message);
+    }
+  }
+
+  const turnUrls = (process.env.TURN_URL || "").split(",").map((item) => item.trim()).filter(Boolean);
+  if (turnUrls.length > 0) {
+    const username = process.env.TURN_USERNAME || "";
+    const credential = process.env.TURN_PASSWORD || "";
+
+    return [
+      ...DEFAULT_ICE_SERVERS,
+      ...turnUrls.map((urls) => ({ urls, username, credential }))
+    ];
+  }
+
+  return DEFAULT_ICE_SERVERS;
+};
+
+const ICE_SERVERS = parseIceServers();
+
 const getYtDlpBaseArgs = () => {
   const args = [
     "--no-warnings",
@@ -709,14 +743,11 @@ const connectBotToUser = (voiceRoomId, userSocketId) => {
   const RTC = wrtc.default || wrtc;
   const peer = new Peer({
     initiator: true,
-    trickle: false,
+    trickle: true,
     stream: session.stream,
     wrtc: RTC,
     config: {
-      iceServers: [
-        { urls: "stun:stun.l.google.com:19302" },
-        { urls: "stun:global.stun.twilio.com:3478" }
-      ]
+      iceServers: ICE_SERVERS
     }
   });
 
@@ -1755,14 +1786,11 @@ io.on("connection", (socket) => {
       if (!peer) {
         peer = new Peer({
           initiator: false,
-          trickle: false,
+          trickle: true,
           stream: session.stream,
           wrtc: RTC,
           config: {
-            iceServers: [
-              { urls: "stun:stun.l.google.com:19302" },
-              { urls: "stun:global.stun.twilio.com:3478" }
-            ]
+            iceServers: ICE_SERVERS
           }
         });
 
@@ -1854,5 +1882,6 @@ io.on("connection", (socket) => {
 httpServer.listen(port, () => {
   console.log(`Server running on port ${port}`);
   console.log(`[MusicBot] yt-dlp binary: ${ytDlpBinary}`);
+  console.log(`[Voice] ICE servers: ${ICE_SERVERS.map((item) => item.urls).join(", ")}`);
   console.log(`[MusicBot] yt-dlp cookies: ${hasYtDlpCookies() ? `found (${ytDlpCookiesPath})` : `missing (${ytDlpCookiesPath})`}`);
 });
