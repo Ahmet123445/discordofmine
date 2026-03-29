@@ -26,6 +26,33 @@ interface Message {
   room_id?: string;
 }
 
+interface MusicTrack {
+  id: string;
+  title: string;
+  durationInSec: number;
+  thumbnail?: string | null;
+  requestedBy?: string | null;
+  prefetchStatus?: string;
+}
+
+interface MusicState {
+  roomId: string;
+  voiceRoomId: string | null;
+  isPlaying: boolean;
+  isPaused: boolean;
+  volume: number;
+  positionSec: number;
+  current: MusicTrack | null;
+  queue: MusicTrack[];
+}
+
+const formatClock = (seconds: number) => {
+  const safe = Math.max(0, Math.floor(seconds || 0));
+  const mins = Math.floor(safe / 60);
+  const secs = safe % 60;
+  return `${mins}:${secs.toString().padStart(2, "0")}`;
+};
+
 const SLASH_COMMANDS = [
   { command: "/play", usage: "/play <yt-link veya sarki adi>", description: "Sarkiyi cal veya kuyruga ekle" },
   { command: "/search", usage: "/search <sarki adi>", description: "Ilk sonuc adaylarini listele" },
@@ -58,6 +85,9 @@ function ChatContent() {
   const [isUpdatingUsername, setIsUpdatingUsername] = useState(false);
   const [copiedMessageId, setCopiedMessageId] = useState<number | null>(null);
   const [activeCommandIndex, setActiveCommandIndex] = useState(0);
+  const [musicState, setMusicState] = useState<MusicState | null>(null);
+  const [musicControlError, setMusicControlError] = useState("");
+  const [seekDragValue, setSeekDragValue] = useState<number | null>(null);
   
   // Voice Settings State
   const [noiseThreshold, setNoiseThreshold] = useState(-42); // Default -42 dB
@@ -345,9 +375,23 @@ function ChatContent() {
       alert(`Mesaj gönderilemedi: ${data.error}`);
     });
 
+    newSocket.on("music-state", (state: MusicState) => {
+      if (!state || state.roomId !== roomId) return;
+      setMusicState(state);
+    });
+
+    newSocket.on("music-control-error", (data: { error: string }) => {
+      const message = data?.error || "Muzik kontrolu basarisiz.";
+      setMusicControlError(message);
+      window.setTimeout(() => {
+        setMusicControlError((prev) => (prev === message ? "" : prev));
+      }, 2500);
+    });
+
     return () => {
       clearInterval(heartbeatInterval);
       setIsConnected(false);
+      setMusicState(null);
       newSocket.disconnect();
     };
   }, [router, roomId]);
@@ -504,6 +548,15 @@ function ChatContent() {
     setNoiseThreshold(value);
     localStorage.setItem("voiceNoiseThreshold", value.toString());
   };
+
+  const sendMusicControl = useCallback((action: string, value?: number) => {
+    if (!socket || !roomId) return;
+    socket.emit("music-control", { roomId, action, value });
+  }, [socket, roomId]);
+
+  const canRenderMusicPlayer = !!musicState?.current || (musicState?.queue?.length || 0) > 0;
+  const currentDuration = Number(musicState?.current?.durationInSec || 0);
+  const effectiveSeekValue = seekDragValue ?? Number(musicState?.positionSec || 0);
 
   if (!user || !roomId) return null;
 
@@ -699,6 +752,103 @@ function ChatContent() {
         </div>
 
         <div className="p-4 bg-zinc-900 border-t border-zinc-800">
+          {canRenderMusicPlayer && musicState && (
+            <div className="mb-3 overflow-hidden rounded-2xl border border-zinc-700 bg-gradient-to-r from-zinc-900 via-zinc-900 to-indigo-950/50 shadow-xl">
+              <div className="flex items-center gap-3 p-3">
+                <div className="h-14 w-14 shrink-0 overflow-hidden rounded-xl bg-zinc-800">
+                  {musicState.current?.thumbnail ? (
+                    <img src={musicState.current.thumbnail} alt={musicState.current.title} className="h-full w-full object-cover" />
+                  ) : (
+                    <div className="flex h-full w-full items-center justify-center text-zinc-500">♪</div>
+                  )}
+                </div>
+
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-sm font-semibold text-white">
+                    {musicState.current?.title || "Sira bekleniyor"}
+                  </div>
+                  <div className="mt-0.5 text-xs text-zinc-400">
+                    {musicState.current?.requestedBy ? `Ekleyen: ${musicState.current.requestedBy}` : "Muzik botu"}
+                    <span className="mx-2 text-zinc-600">•</span>
+                    {musicState.isPaused ? "Duraklatildi" : musicState.isPlaying ? "Caliyor" : "Hazir"}
+                  </div>
+                </div>
+
+                <div className="hidden items-center gap-2 sm:flex">
+                  <button onClick={() => sendMusicControl("toggle")} className="rounded-lg bg-zinc-800 p-2 text-zinc-200 hover:bg-zinc-700">
+                    {musicState.isPaused ? "▶" : "⏸"}
+                  </button>
+                  <button onClick={() => sendMusicControl("skip")} className="rounded-lg bg-zinc-800 p-2 text-zinc-200 hover:bg-zinc-700">⏭</button>
+                  <button onClick={() => sendMusicControl("stop")} className="rounded-lg bg-zinc-800 p-2 text-zinc-200 hover:bg-red-700/60">⏹</button>
+                </div>
+              </div>
+
+              <div className="px-3 pb-3">
+                <input
+                  type="range"
+                  min={0}
+                  max={Math.max(1, currentDuration)}
+                  step={1}
+                  value={Math.max(0, Math.min(Math.floor(effectiveSeekValue), Math.max(1, currentDuration)))}
+                  onChange={(e) => setSeekDragValue(Number(e.target.value))}
+                  onMouseUp={(e) => {
+                    const val = Number((e.target as HTMLInputElement).value);
+                    setSeekDragValue(null);
+                    sendMusicControl("seek", val);
+                  }}
+                  onTouchEnd={(e) => {
+                    const val = Number((e.target as HTMLInputElement).value);
+                    setSeekDragValue(null);
+                    sendMusicControl("seek", val);
+                  }}
+                  className="w-full accent-emerald-400"
+                />
+                <div className="mt-1 flex items-center justify-between text-[11px] text-zinc-400">
+                  <span>{formatClock(effectiveSeekValue)}</span>
+                  <span>{currentDuration > 0 ? formatClock(currentDuration) : "--:--"}</span>
+                </div>
+
+                <div className="mt-2 flex items-center gap-2 sm:hidden">
+                  <button onClick={() => sendMusicControl("toggle")} className="rounded-lg bg-zinc-800 px-3 py-1.5 text-xs text-zinc-200">
+                    {musicState.isPaused ? "Devam" : "Duraklat"}
+                  </button>
+                  <button onClick={() => sendMusicControl("skip")} className="rounded-lg bg-zinc-800 px-3 py-1.5 text-xs text-zinc-200">Atla</button>
+                  <button onClick={() => sendMusicControl("stop")} className="rounded-lg bg-zinc-800 px-3 py-1.5 text-xs text-zinc-200">Durdur</button>
+                </div>
+
+                <div className="mt-2 flex items-center gap-3">
+                  <span className="text-[11px] text-zinc-400">Ses</span>
+                  <input
+                    type="range"
+                    min={0}
+                    max={200}
+                    value={Math.max(0, Math.min(200, Number(musicState.volume || 80)))}
+                    onChange={(e) => sendMusicControl("volume", Number(e.target.value))}
+                    className="w-full accent-indigo-400"
+                  />
+                  <span className="w-10 text-right text-[11px] text-zinc-400">{Math.round(musicState.volume || 0)}%</span>
+                </div>
+
+                {musicState.queue.length > 0 && (
+                  <div className="mt-2 rounded-lg border border-zinc-800 bg-zinc-950/70 p-2">
+                    <div className="mb-1 text-[11px] uppercase tracking-wider text-zinc-500">Sıradaki</div>
+                    <div className="space-y-1">
+                      {musicState.queue.slice(0, 3).map((item, idx) => (
+                        <div key={`${item.id}-${idx}`} className="truncate text-xs text-zinc-300">{idx + 1}. {item.title}</div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {musicControlError && (
+                  <div className="mt-2 rounded-lg border border-amber-700/40 bg-amber-900/20 px-2 py-1 text-xs text-amber-300">
+                    {musicControlError}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
           {/* Paste Preview */}
           {pastePreview && (
             <div className="mb-3 p-3 bg-zinc-950 rounded-xl border border-zinc-800 shadow-lg animate-in slide-in-from-bottom-2 fade-in duration-200">

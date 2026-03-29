@@ -292,6 +292,7 @@ const MUSIC_PREBUFFER_FRAMES = Number(process.env.MUSIC_PREBUFFER_FRAMES || 30);
 const MUSIC_REBUFFER_FRAMES = Number(process.env.MUSIC_REBUFFER_FRAMES || 14);
 const MUSIC_PREFETCH_TRACKS = Number(process.env.MUSIC_PREFETCH_TRACKS || 2);
 const MUSIC_PREFETCH_WAIT_TIMEOUT_MS = Number(process.env.MUSIC_PREFETCH_WAIT_TIMEOUT_MS || 2500);
+const MUSIC_STATE_EMIT_INTERVAL_MS = Number(process.env.MUSIC_STATE_EMIT_INTERVAL_MS || 1000);
 const MUSIC_BOT_USERNAME = "Music Bot";
 const musicSessions = new Map();
 const resolvedTrackCache = new Map();
@@ -361,6 +362,10 @@ const isYouTubeBotCheckError = (msg = "") => {
 
 const buildMusicBotId = (voiceRoomId) => `music-bot:${voiceRoomId}`;
 const isMusicBotId = (id) => typeof id === "string" && id.startsWith("music-bot:");
+const getServerRoomIdFromVoiceRoomId = (voiceRoomId = "") => {
+  const lastDash = voiceRoomId.lastIndexOf("-");
+  return lastDash > 0 ? voiceRoomId.substring(0, lastDash) : "";
+};
 
 const sendSystemMessage = (roomId, content) => {
   io.to(roomId).emit("message-received", {
@@ -464,6 +469,9 @@ const resetPlaybackState = (session) => {
   session.isRebuffering = false;
   session.sourceEnded = false;
   session.sentSilenceFrames = 0;
+  session.playedFrames = 0;
+  session.seekOffsetSec = 0;
+  session.currentPositionSec = 0;
 };
 
 const stopCurrentPlayback = (session) => {
@@ -507,6 +515,7 @@ const closeMusicSession = (voiceRoomId, reason = null) => {
   const session = musicSessions.get(voiceRoomId);
   if (!session) return;
 
+  const serverRoomId = getServerRoomIdFromVoiceRoomId(voiceRoomId);
   const activeTrack = session.current;
   stopCurrentPlayback(session);
   destroyAllMusicPeers(session);
@@ -518,11 +527,13 @@ const closeMusicSession = (voiceRoomId, reason = null) => {
   disposeTrack(activeTrack);
   session.queue.forEach((track) => disposeTrack(track));
   session.queue = [];
+  session.current = null;
+  session.currentPositionSec = 0;
+  emitMusicState(session, true);
   musicSessions.delete(voiceRoomId);
   removeMusicBotPresence(voiceRoomId);
 
   if (reason) {
-    const serverRoomId = voiceRoomId.substring(0, voiceRoomId.lastIndexOf("-"));
     sendSystemMessage(serverRoomId, reason);
   }
 };
@@ -684,7 +695,8 @@ const normalizeYtDlpTrack = (entry) => {
   return {
     title: entry.title || "Bilinmeyen Sarki",
     url: webpageUrl,
-    durationInSec: Number(entry.duration || 0)
+    durationInSec: Number(entry.duration || 0),
+    thumbnail: entry.thumbnail || null
   };
 };
 
@@ -952,6 +964,68 @@ const schedulePrefetchForSession = async (session) => {
   }
 };
 
+const serializeTrackForClient = (track) => {
+  if (!track) return null;
+
+  return {
+    id: track.id,
+    title: track.title,
+    url: track.url,
+    durationInSec: Number(track.durationInSec || 0),
+    thumbnail: track.thumbnail || null,
+    requestedBy: track.requestedBy || null,
+    prefetchStatus: track.prefetchStatus || "queued"
+  };
+};
+
+const buildMusicStatePayload = (session) => {
+  return {
+    voiceRoomId: session.voiceRoomId,
+    roomId: getServerRoomIdFromVoiceRoomId(session.voiceRoomId),
+    isPlaying: !!session.isPlaying,
+    isPaused: !!session.isPaused,
+    volume: Number(session.volume || 0),
+    positionSec: Number(session.currentPositionSec || 0),
+    current: serializeTrackForClient(session.current),
+    queue: session.queue.map(serializeTrackForClient).filter(Boolean)
+  };
+};
+
+const buildEmptyMusicStatePayload = (roomId) => ({
+  roomId,
+  voiceRoomId: null,
+  isPlaying: false,
+  isPaused: false,
+  volume: 80,
+  positionSec: 0,
+  current: null,
+  queue: []
+});
+
+const emitMusicState = (session, force = false) => {
+  if (!session) return;
+
+  const now = Date.now();
+  if (!force && now - (session.lastMusicStateEmitAt || 0) < MUSIC_STATE_EMIT_INTERVAL_MS) {
+    return;
+  }
+
+  session.lastMusicStateEmitAt = now;
+  const roomId = getServerRoomIdFromVoiceRoomId(session.voiceRoomId);
+  if (!roomId) return;
+  io.to(roomId).emit("music-state", buildMusicStatePayload(session));
+};
+
+const findMusicSessionByServerRoomId = (roomId) => {
+  for (const session of musicSessions.values()) {
+    if (getServerRoomIdFromVoiceRoomId(session.voiceRoomId) === roomId) {
+      return session;
+    }
+  }
+
+  return null;
+};
+
 const getOrCreateMusicSession = (voiceRoomId) => {
   if (musicSessions.has(voiceRoomId)) {
     return musicSessions.get(voiceRoomId);
@@ -985,8 +1059,12 @@ const getOrCreateMusicSession = (voiceRoomId) => {
     isRebuffering: false,
     sourceEnded: false,
     sentSilenceFrames: 0,
+    playedFrames: 0,
+    seekOffsetSec: 0,
+    currentPositionSec: 0,
     prefetchSyncRunning: false,
-    prefetchSyncQueued: false
+    prefetchSyncQueued: false,
+    lastMusicStateEmitAt: 0
   };
 
   musicSessions.set(voiceRoomId, session);
@@ -1080,6 +1158,12 @@ const flushBufferedFrameToRtcSource = (session) => {
       numberOfFrames: 480
     });
 
+    session.playedFrames += 1;
+    session.currentPositionSec = session.seekOffsetSec + (session.playedFrames * FRAME_DURATION_MS) / 1000;
+    if (session.current?.durationInSec > 0) {
+      session.currentPositionSec = Math.min(session.currentPositionSec, session.current.durationInSec);
+    }
+
     return true;
   }
 
@@ -1104,12 +1188,14 @@ const startPlaybackTimer = (session) => {
     const flushed = flushBufferedFrameToRtcSource(session);
     if (flushed) {
       if (!session.hasAnnouncedPlaybackStart && session.current) {
-        const serverRoomId = session.voiceRoomId.substring(0, session.voiceRoomId.lastIndexOf("-"));
+        const serverRoomId = getServerRoomIdFromVoiceRoomId(session.voiceRoomId);
         sendSystemMessage(serverRoomId, `Caliniyor: ${session.current.title}`);
         session.hasAnnouncedPlaybackStart = true;
+        emitMusicState(session, true);
       }
 
       session.sentSilenceFrames = 0;
+      emitMusicState(session, false);
       return;
     }
 
@@ -1127,6 +1213,7 @@ const startPlaybackTimer = (session) => {
     }
 
     stopPlaybackTimer(session);
+    emitMusicState(session, true);
   }, FRAME_DURATION_MS);
 };
 
@@ -1138,6 +1225,9 @@ const playNextInSession = async (voiceRoomId) => {
   if (!nextTrack) {
     session.current = null;
     session.isPaused = false;
+    session.isPlaying = false;
+    session.currentPositionSec = 0;
+    emitMusicState(session, true);
     return;
   }
 
@@ -1147,7 +1237,10 @@ const playNextInSession = async (voiceRoomId) => {
   session.isPlaying = true;
   session.isPaused = false;
   resetPlaybackState(session);
+  session.seekOffsetSec = 0;
+  session.currentPositionSec = 0;
   void schedulePrefetchForSession(session);
+  emitMusicState(session, true);
 
   try {
     await waitForPrefetchIfNeeded(nextTrack);
@@ -1297,6 +1390,7 @@ const playNextInSession = async (voiceRoomId) => {
           }
 
           session.isStoppingCurrent = false;
+          emitMusicState(session, true);
           void playNextInSession(voiceRoomId);
         }, FRAME_DURATION_MS);
         return;
@@ -1326,6 +1420,7 @@ const playNextInSession = async (voiceRoomId) => {
       }
 
       session.isStoppingCurrent = false;
+      emitMusicState(session, true);
       void playNextInSession(voiceRoomId);
     });
   } catch (err) {
@@ -1338,6 +1433,7 @@ const playNextInSession = async (voiceRoomId) => {
 
     const serverRoomId = voiceRoomId.substring(0, voiceRoomId.lastIndexOf("-"));
     sendSystemMessage(serverRoomId, `Sarki oynatilamadi: ${nextTrack.title}`);
+    emitMusicState(session, true);
     void playNextInSession(voiceRoomId);
   }
 };
@@ -1434,6 +1530,7 @@ const handleMusicCommand = async ({ socket, roomId, user, commandText }) => {
       if (session.current || session.isPlaying) {
         void schedulePrefetchForSession(session);
       }
+      emitMusicState(session, true);
 
       sendSystemMessage(roomId, `Kuyruga eklendi: ${track.title}`);
       void playNextInSession(voiceRoomId);
@@ -1495,6 +1592,7 @@ const handleMusicCommand = async ({ socket, roomId, user, commandText }) => {
 
     stopCurrentPlayback(session);
     sendSystemMessage(roomId, "Parca atlandi.");
+    emitMusicState(session, true);
     void playNextInSession(voiceRoomId);
     return true;
   }
@@ -1514,6 +1612,7 @@ const handleMusicCommand = async ({ socket, roomId, user, commandText }) => {
       session.ffmpegProcess.kill("SIGSTOP");
       session.isPaused = true;
       sendSystemMessage(roomId, "Muzik duraklatildi.");
+      emitMusicState(session, true);
     } catch {
       sendSystemMessage(roomId, "Muzik duraklatilamadi.");
     }
@@ -1536,6 +1635,7 @@ const handleMusicCommand = async ({ socket, roomId, user, commandText }) => {
       session.ffmpegProcess.kill("SIGCONT");
       session.isPaused = false;
       sendSystemMessage(roomId, "Muzik devam ediyor.");
+      emitMusicState(session, true);
     } catch {
       sendSystemMessage(roomId, "Muzik devam ettirilemedi.");
     }
@@ -1567,6 +1667,7 @@ const handleMusicCommand = async ({ socket, roomId, user, commandText }) => {
 
     session.volume = raw;
     sendSystemMessage(roomId, `Volume ayarlandi: ${raw}%`);
+    emitMusicState(session, true);
     return true;
   }
 
@@ -1895,6 +1996,9 @@ io.on("connection", (socket) => {
     
     // CRITICAL: Mark room as occupied - cancels any pending deletion
     markRoomAsOccupied(roomId);
+
+    const activeMusicSession = findMusicSessionByServerRoomId(roomId);
+    socket.emit("music-state", activeMusicSession ? buildMusicStatePayload(activeMusicSession) : buildEmptyMusicStatePayload(roomId));
     
     console.log(`[Join] User ${socket.id} (${username}) joined room ${roomId}`);
 
@@ -1971,6 +2075,173 @@ io.on("connection", (socket) => {
       console.error("[Message] Error saving message:", err);
       socket.emit("message-error", { error: "Failed to save message" });
     }
+  });
+
+  socket.on("music-control", async (payload = {}) => {
+    const roomId = typeof payload.roomId === "string" ? payload.roomId : "";
+    const action = typeof payload.action === "string" ? payload.action : "";
+    const voiceRoomId = socketToRoom[socket.id];
+
+    if (!roomId || !voiceRoomId || !voiceRoomId.startsWith(`${roomId}-`)) {
+      socket.emit("music-control-error", { error: "Muzik kontrolu icin voice kanalinda olmalisin." });
+      return;
+    }
+
+    const session = musicSessions.get(voiceRoomId);
+    if (!session) {
+      socket.emit("music-control-error", { error: "Bu odada aktif muzik yok." });
+      return;
+    }
+
+    if (action === "toggle") {
+      if (!session.ffmpegProcess) {
+        socket.emit("music-control-error", { error: "Kontrol edilecek aktif oynatma yok." });
+        return;
+      }
+
+      if (session.isPaused) {
+        if (process.platform === "win32") {
+          socket.emit("music-control-error", { error: "Bu platformda devam ettirme desteklenmiyor." });
+          return;
+        }
+        try {
+          session.ffmpegProcess.kill("SIGCONT");
+          session.isPaused = false;
+          sendSystemMessage(roomId, "Muzik devam ediyor.");
+          emitMusicState(session, true);
+        } catch {
+          socket.emit("music-control-error", { error: "Muzik devam ettirilemedi." });
+        }
+        return;
+      }
+
+      if (process.platform === "win32") {
+        socket.emit("music-control-error", { error: "Bu platformda duraklatma desteklenmiyor." });
+        return;
+      }
+
+      try {
+        session.ffmpegProcess.kill("SIGSTOP");
+        session.isPaused = true;
+        sendSystemMessage(roomId, "Muzik duraklatildi.");
+        emitMusicState(session, true);
+      } catch {
+        socket.emit("music-control-error", { error: "Muzik duraklatilamadi." });
+      }
+      return;
+    }
+
+    if (action === "skip") {
+      stopCurrentPlayback(session);
+      sendSystemMessage(roomId, "Parca atlandi.");
+      emitMusicState(session, true);
+      void playNextInSession(voiceRoomId);
+      return;
+    }
+
+    if (action === "stop") {
+      closeMusicSession(voiceRoomId, "Muzik durduruldu.");
+      return;
+    }
+
+    if (action === "volume") {
+      const nextVolume = Number(payload.value);
+      if (Number.isNaN(nextVolume) || nextVolume < 0 || nextVolume > 200) {
+        socket.emit("music-control-error", { error: "Ses 0-200 arasinda olmali." });
+        return;
+      }
+
+      session.volume = nextVolume;
+      emitMusicState(session, true);
+      return;
+    }
+
+    if (action === "seek") {
+      const current = session.current;
+      const duration = Number(current?.durationInSec || 0);
+      const target = Number(payload.value);
+      if (!current || duration <= 0 || Number.isNaN(target)) {
+        socket.emit("music-control-error", { error: "Bu parca icin ilerletme kullanilamiyor." });
+        return;
+      }
+
+      const filePath = getExistingPrefetchFilePath(current);
+      if (!filePath) {
+        socket.emit("music-control-error", { error: "Ilerletme icin parcanin onbellege alinmasi gerekiyor." });
+        return;
+      }
+
+      const seekSec = Math.max(0, Math.min(target, duration));
+
+      try {
+        stopCurrentPlayback(session);
+        session.current = current;
+        session.isPlaying = true;
+        session.isPaused = false;
+        session.seekOffsetSec = seekSec;
+        session.currentPositionSec = seekSec;
+
+        const ffmpegArgs = [
+          "-loglevel", "error",
+          "-fflags", "nobuffer",
+          "-probesize", "32k",
+          "-analyzeduration", "0",
+          "-ss", `${seekSec}`,
+          "-i", filePath,
+          "-vn",
+          "-filter:a", `volume=${Math.max(0, session.volume) / 100}`,
+          "-f", "s16le",
+          "-ar", "48000",
+          "-ac", "2",
+          "pipe:1"
+        ];
+
+        const ffmpegBinary = process.env.FFMPEG_PATH || ffmpegPath || "ffmpeg";
+        const ffmpeg = spawn(ffmpegBinary, ffmpegArgs, {
+          stdio: ["ignore", "pipe", "pipe"]
+        });
+
+        session.sourceProcess = null;
+        session.ffmpegProcess = ffmpeg;
+        session.sourceEnded = false;
+        session.isStoppingCurrent = false;
+
+        ffmpeg.stdout.on("data", (chunk) => {
+          if (!session.isPaused) {
+            pumpChunkToRtcSource(session, chunk);
+          }
+        });
+
+        ffmpeg.stderr.on("data", (data) => {
+          const msg = data.toString().trim();
+          if (msg) {
+            console.error("[MusicBot][FFmpeg][seek]", msg);
+          }
+        });
+
+        ffmpeg.on("close", () => {
+          session.sourceProcess = null;
+          session.ffmpegProcess = null;
+          session.sourceEnded = true;
+          stopPlaybackTimer(session);
+          resetPlaybackState(session);
+          disposeTrack(current);
+          session.current = null;
+          session.isPlaying = false;
+          session.isPaused = false;
+          emitMusicState(session, true);
+          void playNextInSession(voiceRoomId);
+        });
+
+        startPlaybackTimer(session);
+        emitMusicState(session, true);
+      } catch (err) {
+        socket.emit("music-control-error", { error: err?.message || "Ilerletme basarisiz." });
+      }
+      return;
+    }
+
+    socket.emit("music-control-error", { error: "Desteklenmeyen muzik kontrolu." });
   });
 
   socket.on("disconnect", () => {
@@ -2061,7 +2332,9 @@ io.on("connection", (socket) => {
 
     // If music bot is active in this room, connect it to the newly joined user.
     if (musicSessions.has(roomId)) {
+      const session = musicSessions.get(roomId);
       connectBotToUser(roomId, socket.id);
+      emitMusicState(session, true);
     }
     
     // Broadcast updated room list to everyone
