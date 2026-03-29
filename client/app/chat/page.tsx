@@ -832,9 +832,12 @@ function ChatContent() {
                 {musicState.queue.length > 0 && (
                   <div className="mt-2 rounded-lg border border-zinc-800 bg-zinc-950/70 p-2">
                     <div className="mb-1 text-[11px] uppercase tracking-wider text-zinc-500">Sıradaki</div>
-                    <div className="space-y-1">
-                      {musicState.queue.slice(0, 3).map((item, idx) => (
-                        <div key={`${item.id}-${idx}`} className="truncate text-xs text-zinc-300">{idx + 1}. {item.title}</div>
+                    <div className="max-h-28 space-y-1 overflow-y-auto pr-1">
+                      {musicState.queue.slice(0, 8).map((item, idx) => (
+                        <div key={`${item.id}-${idx}`} className="flex items-center justify-between gap-2 text-xs text-zinc-300">
+                          <span className="truncate">{idx + 1}. {item.title}</span>
+                          <span className="shrink-0 text-zinc-500">{formatClock(item.durationInSec || 0)}</span>
+                        </div>
                       ))}
                     </div>
                   </div>

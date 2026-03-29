@@ -292,6 +292,7 @@ const MUSIC_PREBUFFER_FRAMES = Number(process.env.MUSIC_PREBUFFER_FRAMES || 30);
 const MUSIC_REBUFFER_FRAMES = Number(process.env.MUSIC_REBUFFER_FRAMES || 14);
 const MUSIC_PREFETCH_TRACKS = Number(process.env.MUSIC_PREFETCH_TRACKS || 2);
 const MUSIC_PREFETCH_WAIT_TIMEOUT_MS = Number(process.env.MUSIC_PREFETCH_WAIT_TIMEOUT_MS || 2500);
+const MUSIC_CURRENT_PREFETCH_WAIT_TIMEOUT_MS = Number(process.env.MUSIC_CURRENT_PREFETCH_WAIT_TIMEOUT_MS || 4500);
 const MUSIC_STATE_EMIT_INTERVAL_MS = Number(process.env.MUSIC_STATE_EMIT_INTERVAL_MS || 1000);
 const MUSIC_BOT_USERNAME = "Music Bot";
 const musicSessions = new Map();
@@ -341,6 +342,14 @@ const ICE_SERVERS = parseIceServers();
 const getYtDlpBaseArgs = () => {
   const args = [
     "--no-warnings",
+    "--user-agent",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "--add-header",
+    "Accept:text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "--add-header",
+    "Accept-Language:en-us,en;q=0.5",
+    "--add-header",
+    "Sec-Fetch-Mode:navigate",
     "--js-runtimes",
     "node",
     "--remote-components",
@@ -1240,10 +1249,11 @@ const playNextInSession = async (voiceRoomId) => {
   session.seekOffsetSec = 0;
   session.currentPositionSec = 0;
   void schedulePrefetchForSession(session);
+  void prefetchTrack(nextTrack).catch(() => {});
   emitMusicState(session, true);
 
   try {
-    await waitForPrefetchIfNeeded(nextTrack);
+    await waitForPrefetchIfNeeded(nextTrack, MUSIC_CURRENT_PREFETCH_WAIT_TIMEOUT_MS);
 
     const localFilePath = getExistingPrefetchFilePath(nextTrack);
     const isUsingPrefetchedFile = !!localFilePath;
@@ -2081,17 +2091,22 @@ io.on("connection", (socket) => {
     const roomId = typeof payload.roomId === "string" ? payload.roomId : "";
     const action = typeof payload.action === "string" ? payload.action : "";
     const voiceRoomId = socketToRoom[socket.id];
+    const textRoomId = socketToTextRoom[socket.id];
 
-    if (!roomId || !voiceRoomId || !voiceRoomId.startsWith(`${roomId}-`)) {
-      socket.emit("music-control-error", { error: "Muzik kontrolu icin voice kanalinda olmalisin." });
+    if (!roomId || textRoomId !== roomId) {
+      socket.emit("music-control-error", { error: "Bu odadaki muzik kontrolu icin once odaya katilmalisin." });
       return;
     }
 
-    const session = musicSessions.get(voiceRoomId);
+    const session = voiceRoomId && voiceRoomId.startsWith(`${roomId}-`)
+      ? musicSessions.get(voiceRoomId)
+      : findMusicSessionByServerRoomId(roomId);
     if (!session) {
       socket.emit("music-control-error", { error: "Bu odada aktif muzik yok." });
       return;
     }
+
+    const sessionVoiceRoomId = session.voiceRoomId;
 
     if (action === "toggle") {
       if (!session.ffmpegProcess) {
@@ -2135,12 +2150,12 @@ io.on("connection", (socket) => {
       stopCurrentPlayback(session);
       sendSystemMessage(roomId, "Parca atlandi.");
       emitMusicState(session, true);
-      void playNextInSession(voiceRoomId);
+      void playNextInSession(sessionVoiceRoomId);
       return;
     }
 
     if (action === "stop") {
-      closeMusicSession(voiceRoomId, "Muzik durduruldu.");
+      closeMusicSession(sessionVoiceRoomId, "Muzik durduruldu.");
       return;
     }
 
@@ -2230,7 +2245,7 @@ io.on("connection", (socket) => {
           session.isPlaying = false;
           session.isPaused = false;
           emitMusicState(session, true);
-          void playNextInSession(voiceRoomId);
+          void playNextInSession(sessionVoiceRoomId);
         });
 
         startPlaybackTimer(session);
