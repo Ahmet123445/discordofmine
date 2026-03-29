@@ -292,7 +292,7 @@ const MUSIC_PREBUFFER_FRAMES = Number(process.env.MUSIC_PREBUFFER_FRAMES || 30);
 const MUSIC_REBUFFER_FRAMES = Number(process.env.MUSIC_REBUFFER_FRAMES || 14);
 const MUSIC_PREFETCH_TRACKS = Number(process.env.MUSIC_PREFETCH_TRACKS || 2);
 const MUSIC_PREFETCH_WAIT_TIMEOUT_MS = Number(process.env.MUSIC_PREFETCH_WAIT_TIMEOUT_MS || 2500);
-const MUSIC_CURRENT_PREFETCH_WAIT_TIMEOUT_MS = Number(process.env.MUSIC_CURRENT_PREFETCH_WAIT_TIMEOUT_MS || 4500);
+const MUSIC_CURRENT_PREFETCH_WAIT_TIMEOUT_MS = Number(process.env.MUSIC_CURRENT_PREFETCH_WAIT_TIMEOUT_MS || 12000);
 const MUSIC_STATE_EMIT_INTERVAL_MS = Number(process.env.MUSIC_STATE_EMIT_INTERVAL_MS || 1000);
 const MUSIC_BOT_USERNAME = "Music Bot";
 const musicSessions = new Map();
@@ -484,6 +484,8 @@ const resetPlaybackState = (session) => {
 };
 
 const stopCurrentPlayback = (session) => {
+  session.activePlaybackToken += 1;
+
   if (!session.ffmpegProcess && !session.sourceProcess) {
     resetPlaybackState(session);
     session.current = null;
@@ -1073,7 +1075,8 @@ const getOrCreateMusicSession = (voiceRoomId) => {
     currentPositionSec: 0,
     prefetchSyncRunning: false,
     prefetchSyncQueued: false,
-    lastMusicStateEmitAt: 0
+    lastMusicStateEmitAt: 0,
+    activePlaybackToken: 0
   };
 
   musicSessions.set(voiceRoomId, session);
@@ -1256,18 +1259,29 @@ const playNextInSession = async (voiceRoomId) => {
     await waitForPrefetchIfNeeded(nextTrack, MUSIC_CURRENT_PREFETCH_WAIT_TIMEOUT_MS);
 
     const localFilePath = getExistingPrefetchFilePath(nextTrack);
-    const isUsingPrefetchedFile = !!localFilePath;
-
-    if (!isUsingPrefetchedFile && nextTrack.prefetchStatus === "prefetching") {
-      cancelTrackPrefetch(nextTrack);
+    if (!localFilePath) {
+      const serverRoomId = getServerRoomIdFromVoiceRoomId(voiceRoomId);
+      sendSystemMessage(serverRoomId, `Sarki oynatilamadi (indirme tamamlanamadi): ${nextTrack.title}`);
+      disposeTrack(nextTrack);
+      session.current = null;
+      session.isPlaying = false;
+      session.isPaused = false;
+      resetPlaybackState(session);
+      emitMusicState(session, true);
+      void playNextInSession(voiceRoomId);
+      return;
     }
+
+    nextTrack.prefetchStatus = "playing";
+    const playbackToken = session.activePlaybackToken + 1;
+    session.activePlaybackToken = playbackToken;
 
     const ffmpegArgs = [
       "-loglevel", "error",
       "-fflags", "nobuffer",
       "-probesize", "32k",
       "-analyzeduration", "0",
-      "-i", localFilePath || "pipe:0",
+      "-i", localFilePath,
       "-vn",
       "-filter:a", `volume=${Math.max(0, session.volume) / 100}`,
       "-f", "s16le",
@@ -1278,102 +1292,48 @@ const playNextInSession = async (voiceRoomId) => {
 
     const ffmpegBinary = process.env.FFMPEG_PATH || ffmpegPath || "ffmpeg";
     const ffmpeg = spawn(ffmpegBinary, ffmpegArgs, {
-      stdio: [isUsingPrefetchedFile ? "ignore" : "pipe", "pipe", "pipe"]
+      stdio: ["ignore", "pipe", "pipe"]
     });
 
-    let sourceProcess = null;
-    let sourceFailed = false;
-    let sourceErrorText = "";
+    let ffmpegErrorText = "";
 
-    session.sourceProcess = sourceProcess;
+    session.sourceProcess = null;
     session.ffmpegProcess = ffmpeg;
     session.isStoppingCurrent = false;
     startPlaybackTimer(session);
 
-    if (!isUsingPrefetchedFile) {
-      const ytDlpArgs = [
-        ...getYtDlpBaseArgs(),
-        "--no-playlist",
-        "--no-progress",
-        "--newline",
-        "--buffer-size", "64K",
-        "--http-chunk-size", "1M",
-        "--socket-timeout", "15",
-        "-f",
-        "bestaudio[ext=m4a]/bestaudio/best",
-        "-o",
-        "-",
-        nextTrack.url
-      ];
-
-      sourceProcess = spawn(ytDlpBinary, ytDlpArgs, {
-        stdio: ["ignore", "pipe", "pipe"]
-      });
-
-      session.sourceProcess = sourceProcess;
-
-      sourceProcess.on("error", (err) => {
-        console.error("[MusicBot] yt-dlp process error:", err.message);
-        try {
-          ffmpeg.kill("SIGKILL");
-        } catch {}
-      });
-
-      sourceProcess.stderr.on("data", (data) => {
-        const msg = data.toString().trim();
-        if (msg) {
-          sourceErrorText += `${msg}\n`;
-          console.error("[MusicBot][yt-dlp]", msg);
-        }
-      });
-
-      sourceProcess.on("close", (code) => {
-        if (code !== 0 && !session.isStoppingCurrent) {
-          sourceFailed = true;
-        }
-
-        session.sourceEnded = true;
-        if (session.buffer.length < FRAME_SIZE_BYTES) {
-          session.hasPlaybackStarted = true;
-        }
-      });
-
-      ffmpeg.stdin.on("error", (err) => {
-        if (err.code !== "EPIPE") {
-          console.error("[MusicBot][FFmpeg stdin]", err.message);
-        }
-      });
-
-      sourceProcess.stdout.pipe(ffmpeg.stdin);
-    } else {
-      nextTrack.prefetchStatus = "playing";
-    }
-
     ffmpeg.stdout.on("data", (chunk) => {
+      if (session.activePlaybackToken !== playbackToken) return;
       if (!session.isPaused) {
         pumpChunkToRtcSource(session, chunk);
       }
     });
 
     ffmpeg.stderr.on("data", (data) => {
+      if (session.activePlaybackToken !== playbackToken) return;
       const msg = data.toString().trim();
       if (msg) {
-        sourceErrorText += `${msg}\n`;
+        ffmpegErrorText += `${msg}\n`;
         console.error("[MusicBot][FFmpeg]", msg);
       }
     });
 
     ffmpeg.on("close", (code) => {
+      if (session.activePlaybackToken !== playbackToken) {
+        return;
+      }
+
       session.sourceProcess = null;
       session.ffmpegProcess = null;
       session.sourceEnded = true;
 
-      if (code !== 0) {
-        sourceFailed = true;
-      }
-
       if (session.playbackInterval && session.buffer.length >= FRAME_SIZE_BYTES) {
         const finalizeWhenDrained = setInterval(() => {
+          if (session.activePlaybackToken !== playbackToken) {
+            clearInterval(finalizeWhenDrained);
+            return;
+          }
+
           if (session.buffer.length >= FRAME_SIZE_BYTES) return;
           clearInterval(finalizeWhenDrained);
           stopPlaybackTimer(session);
@@ -1383,13 +1343,13 @@ const playNextInSession = async (voiceRoomId) => {
           session.isPlaying = false;
           session.isPaused = false;
 
-          const serverRoomId = voiceRoomId.substring(0, voiceRoomId.lastIndexOf("-"));
+          const serverRoomId = getServerRoomIdFromVoiceRoomId(voiceRoomId);
 
-          if (sourceFailed && !session.isStoppingCurrent) {
-            const detail = isYouTubeBotCheckError(sourceErrorText)
-              ? " (YouTube bot dogrulamasi engeli - cookie gerekebilir)"
-              : "";
-            sendSystemMessage(serverRoomId, `Sarki oynatilamadi: ${nextTrack.title}${detail}`);
+          if (code !== 0 && !session.isStoppingCurrent) {
+            sendSystemMessage(serverRoomId, `Sarki oynatilamadi: ${nextTrack.title}`);
+            if (ffmpegErrorText.trim()) {
+              console.error("[MusicBot] Local playback close error:", ffmpegErrorText.trim());
+            }
             session.isStoppingCurrent = false;
             void playNextInSession(voiceRoomId);
             return;
@@ -1413,13 +1373,13 @@ const playNextInSession = async (voiceRoomId) => {
       session.isPlaying = false;
       session.isPaused = false;
 
-      const serverRoomId = voiceRoomId.substring(0, voiceRoomId.lastIndexOf("-"));
+      const serverRoomId = getServerRoomIdFromVoiceRoomId(voiceRoomId);
 
-      if (sourceFailed && !session.isStoppingCurrent) {
-        const detail = isYouTubeBotCheckError(sourceErrorText)
-          ? " (YouTube bot dogrulamasi engeli - cookie gerekebilir)"
-          : "";
-        sendSystemMessage(serverRoomId, `Sarki oynatilamadi: ${nextTrack.title}${detail}`);
+      if (code !== 0 && !session.isStoppingCurrent) {
+        sendSystemMessage(serverRoomId, `Sarki oynatilamadi: ${nextTrack.title}`);
+        if (ffmpegErrorText.trim()) {
+          console.error("[MusicBot] Local playback close error:", ffmpegErrorText.trim());
+        }
         session.isStoppingCurrent = false;
         void playNextInSession(voiceRoomId);
         return;
@@ -2195,6 +2155,8 @@ io.on("connection", (socket) => {
         session.isPaused = false;
         session.seekOffsetSec = seekSec;
         session.currentPositionSec = seekSec;
+        const playbackToken = session.activePlaybackToken + 1;
+        session.activePlaybackToken = playbackToken;
 
         const ffmpegArgs = [
           "-loglevel", "error",
@@ -2222,12 +2184,14 @@ io.on("connection", (socket) => {
         session.isStoppingCurrent = false;
 
         ffmpeg.stdout.on("data", (chunk) => {
+          if (session.activePlaybackToken !== playbackToken) return;
           if (!session.isPaused) {
             pumpChunkToRtcSource(session, chunk);
           }
         });
 
         ffmpeg.stderr.on("data", (data) => {
+          if (session.activePlaybackToken !== playbackToken) return;
           const msg = data.toString().trim();
           if (msg) {
             console.error("[MusicBot][FFmpeg][seek]", msg);
@@ -2235,6 +2199,10 @@ io.on("connection", (socket) => {
         });
 
         ffmpeg.on("close", () => {
+          if (session.activePlaybackToken !== playbackToken) {
+            return;
+          }
+
           session.sourceProcess = null;
           session.ffmpegProcess = null;
           session.sourceEnded = true;
