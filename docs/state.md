@@ -54,7 +54,7 @@
 
 ### Architectural Limitations
 - **Local Storage Risk:** Uploads are on local disk; regular backup is required.
-- **WebRTC NAT:** Some restrictive networks may block P2P. TURN server would help but not implemented.
+- **WebRTC NAT:** TURN support is now configurable via env vars; quality still depends on TURN reachability and region latency.
 - **Mesh Network Limit:** Voice quality may degrade with 6+ users in same room.
 
 ## Recent Changes (Last Session)
