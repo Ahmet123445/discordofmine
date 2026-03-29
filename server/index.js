@@ -291,9 +291,7 @@ const MUSIC_PREBUFFER_FRAMES = 8;
 const MUSIC_BOT_USERNAME = "Music Bot";
 const musicSessions = new Map();
 const resolvedTrackCache = new Map();
-const directStreamUrlCache = new Map();
 const TRACK_CACHE_TTL_MS = 10 * 60 * 1000;
-const STREAM_URL_CACHE_TTL_MS = 4 * 60 * 1000;
 const ytDlpBinary = process.env.YTDLP_PATH || "yt-dlp";
 const ytDlpCookiesPath = process.env.YTDLP_COOKIES_PATH || path.join(process.cwd(), "yt-cookies.txt");
 const hasYtDlpCookies = () => fs.existsSync(ytDlpCookiesPath);
@@ -542,42 +540,6 @@ const runYtDlpJson = (input, extraArgs = []) => {
   });
 };
 
-const runYtDlpText = (args) => {
-  return new Promise((resolve, reject) => {
-    const proc = spawn(ytDlpBinary, [...getYtDlpBaseArgs(), ...args], {
-      stdio: ["ignore", "pipe", "pipe"]
-    });
-
-    let stdout = "";
-    let stderr = "";
-
-    proc.stdout.on("data", (chunk) => {
-      stdout += chunk.toString();
-    });
-
-    proc.stderr.on("data", (chunk) => {
-      stderr += chunk.toString();
-    });
-
-    proc.on("error", (err) => {
-      if (err.code === "ENOENT") {
-        reject(new Error("yt-dlp bulunamadi. Sunucuda yt-dlp kurulumu gerekli."));
-        return;
-      }
-      reject(err);
-    });
-
-    proc.on("close", (code) => {
-      if (code !== 0) {
-        reject(new Error(stderr.trim() || `yt-dlp komutu ${code} koduyla sonlandi.`));
-        return;
-      }
-
-      resolve(stdout.trim());
-    });
-  });
-};
-
 const normalizeYtDlpTrack = (entry) => {
   const videoId = entry.id || entry.url;
   const webpageUrl = entry.webpage_url || entry.url || (videoId ? `https://www.youtube.com/watch?v=${videoId}` : null);
@@ -694,29 +656,6 @@ const resolveTrack = async (query) => {
 
   setCachedValue(resolvedTrackCache, trimmed.toLowerCase(), results[0], TRACK_CACHE_TTL_MS);
   return results[0];
-};
-
-const getDirectAudioStreamUrl = async (trackUrl) => {
-  const cachedUrl = getCachedValue(directStreamUrlCache, trackUrl);
-  if (cachedUrl) {
-    return cachedUrl;
-  }
-
-  const output = await runYtDlpText([
-    "--no-playlist",
-    "-f",
-    "bestaudio[ext=m4a]/bestaudio/best",
-    "-g",
-    trackUrl
-  ]);
-
-  const directUrl = output.split(/\r?\n/).map((line) => line.trim()).find(Boolean);
-  if (!directUrl) {
-    throw new Error("Dogrudan stream linki alinamadi.");
-  }
-
-  setCachedValue(directStreamUrlCache, trackUrl, directUrl, STREAM_URL_CACHE_TTL_MS);
-  return directUrl;
 };
 
 const searchTracks = async (query, limit = 5) => {
@@ -905,15 +844,30 @@ const playNextInSession = async (voiceRoomId) => {
   resetPlaybackState(session);
 
   try {
-    const directAudioUrl = await getDirectAudioStreamUrl(nextTrack.url);
+    const ytDlpArgs = [
+      ...getYtDlpBaseArgs(),
+      "--no-playlist",
+      "--no-progress",
+      "--newline",
+      "--buffer-size", "16K",
+      "--http-chunk-size", "10M",
+      "-f",
+      "bestaudio[ext=m4a]/bestaudio/best",
+      "-o",
+      "-",
+      nextTrack.url
+    ];
+
+    const sourceProcess = spawn(ytDlpBinary, ytDlpArgs, {
+      stdio: ["ignore", "pipe", "pipe"]
+    });
 
     const ffmpegArgs = [
       "-loglevel", "error",
-      "-reconnect", "1",
-      "-reconnect_streamed", "1",
-      "-reconnect_delay_max", "2",
-      "-rw_timeout", "15000000",
-      "-i", directAudioUrl,
+      "-fflags", "nobuffer",
+      "-probesize", "32k",
+      "-analyzeduration", "0",
+      "-i", "pipe:0",
       "-filter:a", `volume=${Math.max(0, session.volume) / 100}`,
       "-f", "s16le",
       "-ar", "48000",
@@ -929,10 +883,44 @@ const playNextInSession = async (voiceRoomId) => {
     let sourceFailed = false;
     let sourceErrorText = "";
 
-    session.sourceProcess = null;
+    session.sourceProcess = sourceProcess;
     session.ffmpegProcess = ffmpeg;
     session.isStoppingCurrent = false;
     startPlaybackTimer(session);
+
+    sourceProcess.on("error", (err) => {
+      console.error("[MusicBot] yt-dlp process error:", err.message);
+      try {
+        ffmpeg.kill("SIGKILL");
+      } catch {}
+    });
+
+    sourceProcess.stderr.on("data", (data) => {
+      const msg = data.toString().trim();
+      if (msg) {
+        sourceErrorText += `${msg}\n`;
+        console.error("[MusicBot][yt-dlp]", msg);
+      }
+    });
+
+    sourceProcess.on("close", (code) => {
+      if (code !== 0 && !session.isStoppingCurrent) {
+        sourceFailed = true;
+      }
+
+      session.sourceEnded = true;
+      if (session.buffer.length < FRAME_SIZE_BYTES) {
+        session.hasPlaybackStarted = true;
+      }
+    });
+
+    ffmpeg.stdin.on("error", (err) => {
+      if (err.code !== "EPIPE") {
+        console.error("[MusicBot][FFmpeg stdin]", err.message);
+      }
+    });
+
+    sourceProcess.stdout.pipe(ffmpeg.stdin);
 
     ffmpeg.stdout.on("data", (chunk) => {
       if (!session.isPaused) {
