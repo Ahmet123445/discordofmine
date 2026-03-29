@@ -8,6 +8,7 @@ import authRoutes from "./routes/auth.js";
 import uploadRoutes from "./routes/upload.js";
 import path from "path";
 import { spawn } from "child_process";
+import { randomUUID } from "crypto";
 import Peer from "simple-peer";
 import wrtc from "@roamhq/wrtc";
 import ffmpegPath from "ffmpeg-static";
@@ -289,13 +290,18 @@ const FRAME_SIZE_BYTES = 1920;
 const FRAME_DURATION_MS = 10;
 const MUSIC_PREBUFFER_FRAMES = Number(process.env.MUSIC_PREBUFFER_FRAMES || 30);
 const MUSIC_REBUFFER_FRAMES = Number(process.env.MUSIC_REBUFFER_FRAMES || 14);
+const MUSIC_PREFETCH_TRACKS = Number(process.env.MUSIC_PREFETCH_TRACKS || 2);
+const MUSIC_PREFETCH_WAIT_TIMEOUT_MS = Number(process.env.MUSIC_PREFETCH_WAIT_TIMEOUT_MS || 2500);
 const MUSIC_BOT_USERNAME = "Music Bot";
 const musicSessions = new Map();
 const resolvedTrackCache = new Map();
 const TRACK_CACHE_TTL_MS = 10 * 60 * 1000;
 const ytDlpBinary = process.env.YTDLP_PATH || "yt-dlp";
 const ytDlpCookiesPath = process.env.YTDLP_COOKIES_PATH || path.join(process.cwd(), "yt-cookies.txt");
+const musicCacheDir = process.env.MUSIC_CACHE_DIR || path.join(process.cwd(), "music-cache");
 const hasYtDlpCookies = () => fs.existsSync(ytDlpCookiesPath);
+
+fs.mkdirSync(musicCacheDir, { recursive: true });
 
 const DEFAULT_ICE_SERVERS = [
   { urls: "stun:stun.l.google.com:19302" },
@@ -501,6 +507,7 @@ const closeMusicSession = (voiceRoomId, reason = null) => {
   const session = musicSessions.get(voiceRoomId);
   if (!session) return;
 
+  const activeTrack = session.current;
   stopCurrentPlayback(session);
   destroyAllMusicPeers(session);
 
@@ -508,6 +515,8 @@ const closeMusicSession = (voiceRoomId, reason = null) => {
     session.track.stop();
   } catch {}
 
+  disposeTrack(activeTrack);
+  session.queue.forEach((track) => disposeTrack(track));
   session.queue = [];
   musicSessions.delete(voiceRoomId);
   removeMusicBotPresence(voiceRoomId);
@@ -533,6 +542,98 @@ const setCachedValue = (cache, key, value, ttlMs) => {
     value,
     expiresAt: Date.now() + ttlMs
   });
+};
+
+const createQueuedTrack = (track, requestedBy) => {
+  return {
+    id: randomUUID(),
+    ...track,
+    requestedBy,
+    prefetchStatus: "queued",
+    prefetchFilePath: null,
+    prefetchProcess: null,
+    prefetchPromise: null,
+    prefetchError: null
+  };
+};
+
+const getPrefetchOutputTemplate = (track) => {
+  return path.join(musicCacheDir, `${track.id}.%(ext)s`);
+};
+
+const findPrefetchedFilePath = (track) => {
+  try {
+    const prefix = `${track.id}.`;
+    const fileName = fs.readdirSync(musicCacheDir).find((name) => name.startsWith(prefix));
+    return fileName ? path.join(musicCacheDir, fileName) : null;
+  } catch {
+    return null;
+  }
+};
+
+const getExistingPrefetchFilePath = (track) => {
+  if (track?.prefetchFilePath && fs.existsSync(track.prefetchFilePath)) {
+    return track.prefetchFilePath;
+  }
+
+  const discoveredPath = findPrefetchedFilePath(track);
+  if (discoveredPath) {
+    track.prefetchFilePath = discoveredPath;
+    track.prefetchStatus = "prefetched";
+    return discoveredPath;
+  }
+
+  track.prefetchFilePath = null;
+  if (track?.prefetchStatus === "prefetched") {
+    track.prefetchStatus = "queued";
+  }
+  return null;
+};
+
+const cleanupTrackFile = (track) => {
+  if (!track) return;
+
+  const filePath = track.prefetchFilePath || findPrefetchedFilePath(track);
+  if (filePath && fs.existsSync(filePath)) {
+    try {
+      fs.unlinkSync(filePath);
+    } catch (err) {
+      console.error(`[MusicBot] Failed to remove cached track ${filePath}:`, err.message);
+    }
+  }
+
+  if (track) {
+    track.prefetchFilePath = null;
+  }
+};
+
+const cancelTrackPrefetch = (track, resetStatus = true) => {
+  if (!track) return;
+
+  try {
+    track.prefetchProcess?.stdout?.removeAllListeners();
+    track.prefetchProcess?.stderr?.removeAllListeners();
+  } catch {}
+
+  try {
+    track.prefetchProcess?.kill("SIGKILL");
+  } catch {}
+
+  track.prefetchProcess = null;
+  track.prefetchPromise = null;
+  cleanupTrackFile(track);
+  track.prefetchError = null;
+
+  if (resetStatus) {
+    track.prefetchStatus = "queued";
+  }
+};
+
+const disposeTrack = (track) => {
+  if (!track) return;
+  cancelTrackPrefetch(track, false);
+  cleanupTrackFile(track);
+  track.prefetchStatus = "done";
 };
 
 const runYtDlpJson = (input, extraArgs = []) => {
@@ -698,6 +799,159 @@ const searchTracks = async (query, limit = 5) => {
   return getPlayableTracksFromSearch(query, limit);
 };
 
+const prefetchTrack = (track) => {
+  const existingFilePath = getExistingPrefetchFilePath(track);
+  if (existingFilePath) {
+    track.prefetchStatus = "prefetched";
+    return Promise.resolve(track);
+  }
+
+  if (track.prefetchPromise) {
+    return track.prefetchPromise;
+  }
+
+  track.prefetchStatus = "prefetching";
+  track.prefetchError = null;
+
+  const ytDlpArgs = [
+    ...getYtDlpBaseArgs(),
+    "--no-playlist",
+    "--no-progress",
+    "--newline",
+    "--buffer-size", "64K",
+    "--http-chunk-size", "1M",
+    "--socket-timeout", "15",
+    "-f",
+    "bestaudio[ext=m4a]/bestaudio/best",
+    "-o",
+    getPrefetchOutputTemplate(track),
+    "--print",
+    "after_move:filepath",
+    track.url
+  ];
+
+  const proc = spawn(ytDlpBinary, ytDlpArgs, {
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+
+  track.prefetchProcess = proc;
+
+  let stdout = "";
+  let stderr = "";
+
+  const promise = new Promise((resolve, reject) => {
+    proc.stdout.on("data", (chunk) => {
+      stdout += chunk.toString();
+    });
+
+    proc.stderr.on("data", (chunk) => {
+      const msg = chunk.toString().trim();
+      if (!msg) return;
+      stderr += `${msg}\n`;
+      console.error(`[MusicBot][prefetch:${track.title}]`, msg);
+    });
+
+    proc.on("error", (err) => {
+      track.prefetchProcess = null;
+      track.prefetchStatus = "failed";
+      track.prefetchError = err.message;
+      reject(err);
+    });
+
+    proc.on("close", (code) => {
+      track.prefetchProcess = null;
+
+      const printedPath = stdout
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter(Boolean)
+        .pop();
+
+      const filePath = printedPath && fs.existsSync(printedPath)
+        ? printedPath
+        : findPrefetchedFilePath(track);
+
+      if (code === 0 && filePath) {
+        track.prefetchFilePath = filePath;
+        track.prefetchStatus = "prefetched";
+        track.prefetchError = null;
+        resolve(track);
+        return;
+      }
+
+      cleanupTrackFile(track);
+      track.prefetchStatus = "failed";
+      track.prefetchError = stderr.trim() || `yt-dlp prefetch ${code} koduyla sonlandi.`;
+      reject(new Error(track.prefetchError));
+    });
+  }).finally(() => {
+    track.prefetchPromise = null;
+    track.prefetchProcess = null;
+  });
+
+  track.prefetchPromise = promise;
+  return promise;
+};
+
+const waitForPrefetchIfNeeded = async (track, timeoutMs = MUSIC_PREFETCH_WAIT_TIMEOUT_MS) => {
+  if (!track) return false;
+  if (getExistingPrefetchFilePath(track)) return true;
+  if (!track.prefetchPromise) return false;
+
+  let timeoutHandle = null;
+
+  try {
+    await Promise.race([
+      track.prefetchPromise.catch(() => false),
+      new Promise((resolve) => {
+        timeoutHandle = setTimeout(resolve, timeoutMs);
+      })
+    ]);
+  } finally {
+    if (timeoutHandle) {
+      clearTimeout(timeoutHandle);
+    }
+  }
+
+  return !!getExistingPrefetchFilePath(track);
+};
+
+const schedulePrefetchForSession = async (session) => {
+  if (!session) return;
+
+  if (session.prefetchSyncRunning) {
+    session.prefetchSyncQueued = true;
+    return;
+  }
+
+  session.prefetchSyncRunning = true;
+
+  try {
+    for (const track of session.queue.slice(0, MUSIC_PREFETCH_TRACKS)) {
+      if (track.prefetchStatus === "prefetched" && getExistingPrefetchFilePath(track)) {
+        continue;
+      }
+
+      if (track.prefetchStatus === "prefetching") {
+        continue;
+      }
+
+      try {
+        await prefetchTrack(track);
+      } catch (err) {
+        console.error(`[MusicBot] Prefetch failed for ${track.title}:`, err.message);
+      }
+    }
+  } finally {
+    session.prefetchSyncRunning = false;
+
+    if (session.prefetchSyncQueued) {
+      session.prefetchSyncQueued = false;
+      void schedulePrefetchForSession(session);
+    }
+  }
+};
+
 const getOrCreateMusicSession = (voiceRoomId) => {
   if (musicSessions.has(voiceRoomId)) {
     return musicSessions.get(voiceRoomId);
@@ -730,7 +984,9 @@ const getOrCreateMusicSession = (voiceRoomId) => {
     hasAnnouncedPlaybackStart: false,
     isRebuffering: false,
     sourceEnded: false,
-    sentSilenceFrames: 0
+    sentSilenceFrames: 0,
+    prefetchSyncRunning: false,
+    prefetchSyncQueued: false
   };
 
   musicSessions.set(voiceRoomId, session);
@@ -891,33 +1147,24 @@ const playNextInSession = async (voiceRoomId) => {
   session.isPlaying = true;
   session.isPaused = false;
   resetPlaybackState(session);
+  void schedulePrefetchForSession(session);
 
   try {
-    const ytDlpArgs = [
-      ...getYtDlpBaseArgs(),
-      "--no-playlist",
-      "--no-progress",
-      "--newline",
-      "--buffer-size", "64K",
-      "--http-chunk-size", "1M",
-      "--socket-timeout", "15",
-      "-f",
-      "bestaudio[ext=m4a]/bestaudio/best",
-      "-o",
-      "-",
-      nextTrack.url
-    ];
+    await waitForPrefetchIfNeeded(nextTrack);
 
-    const sourceProcess = spawn(ytDlpBinary, ytDlpArgs, {
-      stdio: ["ignore", "pipe", "pipe"]
-    });
+    const localFilePath = getExistingPrefetchFilePath(nextTrack);
+    const isUsingPrefetchedFile = !!localFilePath;
+
+    if (!isUsingPrefetchedFile && nextTrack.prefetchStatus === "prefetching") {
+      cancelTrackPrefetch(nextTrack);
+    }
 
     const ffmpegArgs = [
       "-loglevel", "error",
       "-fflags", "nobuffer",
       "-probesize", "32k",
       "-analyzeduration", "0",
-      "-i", "pipe:0",
+      "-i", localFilePath || "pipe:0",
       "-vn",
       "-filter:a", `volume=${Math.max(0, session.volume) / 100}`,
       "-f", "s16le",
@@ -928,9 +1175,10 @@ const playNextInSession = async (voiceRoomId) => {
 
     const ffmpegBinary = process.env.FFMPEG_PATH || ffmpegPath || "ffmpeg";
     const ffmpeg = spawn(ffmpegBinary, ffmpegArgs, {
-      stdio: ["pipe", "pipe", "pipe"]
+      stdio: [isUsingPrefetchedFile ? "ignore" : "pipe", "pipe", "pipe"]
     });
 
+    let sourceProcess = null;
     let sourceFailed = false;
     let sourceErrorText = "";
 
@@ -939,39 +1187,64 @@ const playNextInSession = async (voiceRoomId) => {
     session.isStoppingCurrent = false;
     startPlaybackTimer(session);
 
-    sourceProcess.on("error", (err) => {
-      console.error("[MusicBot] yt-dlp process error:", err.message);
-      try {
-        ffmpeg.kill("SIGKILL");
-      } catch {}
-    });
+    if (!isUsingPrefetchedFile) {
+      const ytDlpArgs = [
+        ...getYtDlpBaseArgs(),
+        "--no-playlist",
+        "--no-progress",
+        "--newline",
+        "--buffer-size", "64K",
+        "--http-chunk-size", "1M",
+        "--socket-timeout", "15",
+        "-f",
+        "bestaudio[ext=m4a]/bestaudio/best",
+        "-o",
+        "-",
+        nextTrack.url
+      ];
 
-    sourceProcess.stderr.on("data", (data) => {
-      const msg = data.toString().trim();
-      if (msg) {
-        sourceErrorText += `${msg}\n`;
-        console.error("[MusicBot][yt-dlp]", msg);
-      }
-    });
+      sourceProcess = spawn(ytDlpBinary, ytDlpArgs, {
+        stdio: ["ignore", "pipe", "pipe"]
+      });
 
-    sourceProcess.on("close", (code) => {
-      if (code !== 0 && !session.isStoppingCurrent) {
-        sourceFailed = true;
-      }
+      session.sourceProcess = sourceProcess;
 
-      session.sourceEnded = true;
-      if (session.buffer.length < FRAME_SIZE_BYTES) {
-        session.hasPlaybackStarted = true;
-      }
-    });
+      sourceProcess.on("error", (err) => {
+        console.error("[MusicBot] yt-dlp process error:", err.message);
+        try {
+          ffmpeg.kill("SIGKILL");
+        } catch {}
+      });
 
-    ffmpeg.stdin.on("error", (err) => {
-      if (err.code !== "EPIPE") {
-        console.error("[MusicBot][FFmpeg stdin]", err.message);
-      }
-    });
+      sourceProcess.stderr.on("data", (data) => {
+        const msg = data.toString().trim();
+        if (msg) {
+          sourceErrorText += `${msg}\n`;
+          console.error("[MusicBot][yt-dlp]", msg);
+        }
+      });
 
-    sourceProcess.stdout.pipe(ffmpeg.stdin);
+      sourceProcess.on("close", (code) => {
+        if (code !== 0 && !session.isStoppingCurrent) {
+          sourceFailed = true;
+        }
+
+        session.sourceEnded = true;
+        if (session.buffer.length < FRAME_SIZE_BYTES) {
+          session.hasPlaybackStarted = true;
+        }
+      });
+
+      ffmpeg.stdin.on("error", (err) => {
+        if (err.code !== "EPIPE") {
+          console.error("[MusicBot][FFmpeg stdin]", err.message);
+        }
+      });
+
+      sourceProcess.stdout.pipe(ffmpeg.stdin);
+    } else {
+      nextTrack.prefetchStatus = "playing";
+    }
 
     ffmpeg.stdout.on("data", (chunk) => {
       if (!session.isPaused) {
@@ -1002,6 +1275,7 @@ const playNextInSession = async (voiceRoomId) => {
           clearInterval(finalizeWhenDrained);
           stopPlaybackTimer(session);
           resetPlaybackState(session);
+          disposeTrack(nextTrack);
           session.current = null;
           session.isPlaying = false;
           session.isPaused = false;
@@ -1030,6 +1304,7 @@ const playNextInSession = async (voiceRoomId) => {
 
       stopPlaybackTimer(session);
       resetPlaybackState(session);
+      disposeTrack(nextTrack);
       session.current = null;
       session.isPlaying = false;
       session.isPaused = false;
@@ -1055,6 +1330,7 @@ const playNextInSession = async (voiceRoomId) => {
     });
   } catch (err) {
     console.error("[MusicBot] Failed to start track:", err.message);
+    disposeTrack(nextTrack);
     session.current = null;
     session.isPlaying = false;
     session.isPaused = false;
@@ -1154,10 +1430,10 @@ const handleMusicCommand = async ({ socket, roomId, user, commandText }) => {
 
       const track = await resolveTrack(query);
 
-      session.queue.push({
-        ...track,
-        requestedBy: user.username
-      });
+      session.queue.push(createQueuedTrack(track, user.username));
+      if (session.current || session.isPlaying) {
+        void schedulePrefetchForSession(session);
+      }
 
       sendSystemMessage(roomId, `Kuyruga eklendi: ${track.title}`);
       void playNextInSession(voiceRoomId);
