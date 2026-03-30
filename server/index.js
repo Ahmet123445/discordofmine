@@ -1415,15 +1415,10 @@ const flushBufferedFrameToRtcSource = (session) => {
       return false;
     }
 
-    let samples;
-    if (frameData.byteOffset % 2 === 0) {
-      samples = new Int16Array(frameData.buffer, frameData.byteOffset, FRAME_SIZE_BYTES / 2);
-    } else {
-      const arrayBuffer = new ArrayBuffer(FRAME_SIZE_BYTES);
-      const view = new Uint8Array(arrayBuffer);
-      view.set(frameData);
-      samples = new Int16Array(arrayBuffer);
-    }
+    const arrayBuffer = new ArrayBuffer(FRAME_SIZE_BYTES);
+    const view = new Uint8Array(arrayBuffer);
+    view.set(frameData);
+    const samples = new Int16Array(arrayBuffer);
 
     session.audioSource.onData({
       samples,
