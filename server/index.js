@@ -313,10 +313,25 @@ fs.mkdirSync(musicCacheDir, { recursive: true });
 const pruneMusicCacheDirectory = () => {
   try {
     const now = Date.now();
+    const protectedCachePaths = new Set();
+
+    for (const session of musicSessions.values()) {
+      const tracks = [session.current, ...(session.queue || [])].filter(Boolean);
+      for (const track of tracks) {
+        const cachedPath = track?.prefetchFilePath;
+        if (cachedPath && fs.existsSync(cachedPath)) {
+          protectedCachePaths.add(cachedPath);
+        }
+      }
+    }
+
     const files = fs.readdirSync(musicCacheDir)
       .map((name) => {
         const fullPath = path.join(musicCacheDir, name);
         const stat = fs.statSync(fullPath);
+        if (!stat.isFile()) {
+          return null;
+        }
         return {
           fullPath,
           mtimeMs: stat.mtimeMs,
@@ -324,10 +339,11 @@ const pruneMusicCacheDirectory = () => {
           ageMs: now - stat.mtimeMs
         };
       })
-      .filter((item) => Number.isFinite(item.size));
+      .filter((item) => item && Number.isFinite(item.size));
 
     for (const item of files) {
       if (item.ageMs <= MUSIC_CACHE_TTL_MS) continue;
+      if (protectedCachePaths.has(item.fullPath)) continue;
       try {
         fs.unlinkSync(item.fullPath);
       } catch {}
@@ -337,16 +353,21 @@ const pruneMusicCacheDirectory = () => {
       .map((name) => {
         const fullPath = path.join(musicCacheDir, name);
         const stat = fs.statSync(fullPath);
+        if (!stat.isFile()) {
+          return null;
+        }
         return {
           fullPath,
           mtimeMs: stat.mtimeMs,
           size: stat.size
         };
       })
-      .sort((a, b) => b.mtimeMs - a.mtimeMs);
+      .filter(Boolean)
+      .sort((a, b) => a.mtimeMs - b.mtimeMs);
 
     let totalBytes = freshFiles.reduce((sum, file) => sum + file.size, 0);
     for (let i = 0; i < freshFiles.length; i++) {
+      if (protectedCachePaths.has(freshFiles[i].fullPath)) continue;
       const overFileLimit = i >= MUSIC_CACHE_MAX_FILES;
       const overSizeLimit = totalBytes > MUSIC_CACHE_MAX_BYTES;
       if (!overFileLimit && !overSizeLimit) break;
