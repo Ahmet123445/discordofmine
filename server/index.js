@@ -288,13 +288,14 @@ const io = new SocketIOServer(httpServer, {
 
 const FRAME_SIZE_BYTES = 1920;
 const FRAME_DURATION_MS = 10;
-const MUSIC_PREBUFFER_FRAMES = Number(process.env.MUSIC_PREBUFFER_FRAMES || 60);
-const MUSIC_REBUFFER_FRAMES = Number(process.env.MUSIC_REBUFFER_FRAMES || 28);
+const MUSIC_PREBUFFER_FRAMES = Number(process.env.MUSIC_PREBUFFER_FRAMES || 36);
+const MUSIC_REBUFFER_FRAMES = Number(process.env.MUSIC_REBUFFER_FRAMES || 20);
 const MUSIC_PREFETCH_TRACKS = Number(process.env.MUSIC_PREFETCH_TRACKS || 2);
 const MUSIC_PREFETCH_WAIT_TIMEOUT_MS = Number(process.env.MUSIC_PREFETCH_WAIT_TIMEOUT_MS || 2500);
-const MUSIC_CURRENT_PREFETCH_WAIT_TIMEOUT_MS = Number(process.env.MUSIC_CURRENT_PREFETCH_WAIT_TIMEOUT_MS || 12000);
+const MUSIC_CURRENT_PREFETCH_WAIT_TIMEOUT_MS = Number(process.env.MUSIC_CURRENT_PREFETCH_WAIT_TIMEOUT_MS || 25000);
 const MUSIC_STATE_EMIT_INTERVAL_MS = Number(process.env.MUSIC_STATE_EMIT_INTERVAL_MS || 1000);
 const MUSIC_CONTROL_COOLDOWN_MS = Number(process.env.MUSIC_CONTROL_COOLDOWN_MS || 140);
+const MUSIC_PREFERRED_AUDIO_EXT = (process.env.MUSIC_PREFERRED_AUDIO_EXT || "mp3").toLowerCase();
 const MUSIC_BOT_USERNAME = "Music Bot";
 const musicSessions = new Map();
 const resolvedTrackCache = new Map();
@@ -746,10 +747,28 @@ const getPrefetchOutputTemplate = (track) => {
   return path.join(musicCacheDir, `${cacheKey}.%(ext)s`);
 };
 
+const isAcceptedPrefetchFile = (filePath = "") => {
+  if (!filePath) return false;
+  const ext = path.extname(filePath).replace(".", "").toLowerCase();
+  if (!ext) return false;
+  if (MUSIC_PREFERRED_AUDIO_EXT === "mp3") {
+    return ext === "mp3";
+  }
+  return true;
+};
+
 const findPrefetchedFilePath = (track) => {
   try {
     const prefix = `${getTrackCacheKey(track) || track.id}.`;
-    const fileName = fs.readdirSync(musicCacheDir).find((name) => name.startsWith(prefix));
+    const fileName = fs.readdirSync(musicCacheDir)
+      .filter((name) => name.startsWith(prefix))
+      .sort((a, b) => {
+        const aIsPreferred = a.toLowerCase().endsWith(`.${MUSIC_PREFERRED_AUDIO_EXT}`);
+        const bIsPreferred = b.toLowerCase().endsWith(`.${MUSIC_PREFERRED_AUDIO_EXT}`);
+        if (aIsPreferred === bIsPreferred) return 0;
+        return aIsPreferred ? -1 : 1;
+      })
+      .find((name) => isAcceptedPrefetchFile(path.join(musicCacheDir, name)));
     return fileName ? path.join(musicCacheDir, fileName) : null;
   } catch {
     return null;
@@ -757,7 +776,7 @@ const findPrefetchedFilePath = (track) => {
 };
 
 const getExistingPrefetchFilePath = (track) => {
-  if (track?.prefetchFilePath && fs.existsSync(track.prefetchFilePath)) {
+  if (track?.prefetchFilePath && fs.existsSync(track.prefetchFilePath) && isAcceptedPrefetchFile(track.prefetchFilePath)) {
     return track.prefetchFilePath;
   }
 
@@ -1040,7 +1059,11 @@ const prefetchTrack = (track) => {
     "--http-chunk-size", "1M",
     "--socket-timeout", "15",
     "-f",
-    "bestaudio[ext=m4a]/bestaudio/best",
+    "bestaudio/best",
+    "--extract-audio",
+    "--audio-format", "mp3",
+    "--audio-quality", "192K",
+    "--prefer-ffmpeg",
     "-o",
     getPrefetchOutputTemplate(track),
     "--print",
@@ -1085,7 +1108,7 @@ const prefetchTrack = (track) => {
         .filter(Boolean)
         .pop();
 
-      const filePath = printedPath && fs.existsSync(printedPath)
+      const filePath = printedPath && fs.existsSync(printedPath) && isAcceptedPrefetchFile(printedPath)
         ? printedPath
         : findPrefetchedFilePath(track);
 
@@ -1705,7 +1728,7 @@ const handleMusicCommand = async ({ socket, roomId, user, commandText }) => {
       session.queue.push(queuedTrack);
 
       if (shouldPrefetchImmediately) {
-        sendSystemMessage(roomId, `Parca indiriliyor: ${track.title}`);
+        sendSystemMessage(roomId, `Parca MP3 olarak indiriliyor: ${track.title}`);
         try {
           await prefetchTrack(queuedTrack);
         } catch (prefetchErr) {
