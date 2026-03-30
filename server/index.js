@@ -633,7 +633,8 @@ const stopPlaybackTimer = (session) => {
 
 const resetPlaybackState = (session) => {
   stopPlaybackTimer(session);
-  session.buffer = Buffer.alloc(0);
+  session.audioChunks = [];
+  session.bufferedBytes = 0;
   session.hasPlaybackStarted = false;
   session.hasAnnouncedPlaybackStart = false;
   session.isRebuffering = false;
@@ -1297,7 +1298,8 @@ const getOrCreateMusicSession = (voiceRoomId) => {
     isPaused: false,
     isStoppingCurrent: false,
     volume: 80,
-    buffer: Buffer.alloc(0),
+    audioChunks: [],
+    bufferedBytes: 0,
     playbackInterval: null,
     hasPlaybackStarted: false,
     hasAnnouncedPlaybackStart: false,
@@ -1362,11 +1364,13 @@ const ensureBotConnectedToRoomUsers = (voiceRoomId) => {
 };
 
 const pumpChunkToRtcSource = (session, chunk) => {
-  session.buffer = Buffer.concat([session.buffer, chunk]);
+  if (!chunk || chunk.length === 0) return;
+  session.audioChunks.push(chunk);
+  session.bufferedBytes += chunk.length;
 
   if (!session.hasPlaybackStarted) {
     const minimumBytes = FRAME_SIZE_BYTES * MUSIC_PREBUFFER_FRAMES;
-    if (session.buffer.length >= minimumBytes || session.sourceEnded) {
+    if (session.bufferedBytes >= minimumBytes || session.sourceEnded) {
       session.hasPlaybackStarted = true;
     }
   }
@@ -1387,15 +1391,34 @@ const pushSilenceFrame = (session) => {
 };
 
 const flushBufferedFrameToRtcSource = (session) => {
-  while (session.buffer.length >= FRAME_SIZE_BYTES) {
-    const frameData = session.buffer.subarray(0, FRAME_SIZE_BYTES);
-    session.buffer = session.buffer.subarray(FRAME_SIZE_BYTES);
+  while (session.bufferedBytes >= FRAME_SIZE_BYTES) {
+    const frameData = Buffer.allocUnsafe(FRAME_SIZE_BYTES);
+    let written = 0;
+
+    while (written < FRAME_SIZE_BYTES && session.audioChunks.length > 0) {
+      const head = session.audioChunks[0];
+      const toCopy = Math.min(head.length, FRAME_SIZE_BYTES - written);
+      head.copy(frameData, written, 0, toCopy);
+      written += toCopy;
+
+      if (toCopy === head.length) {
+        session.audioChunks.shift();
+      } else {
+        session.audioChunks[0] = head.subarray(toCopy);
+      }
+    }
+
+    session.bufferedBytes = Math.max(0, session.bufferedBytes - FRAME_SIZE_BYTES);
+
+    if (written < FRAME_SIZE_BYTES) {
+      session.audioChunks = [];
+      session.bufferedBytes = 0;
+      return false;
+    }
 
     const arrayBuffer = new ArrayBuffer(FRAME_SIZE_BYTES);
     const view = new Uint8Array(arrayBuffer);
-    for (let i = 0; i < FRAME_SIZE_BYTES; i++) {
-      view[i] = frameData[i];
-    }
+    view.set(frameData);
 
     const samples = new Int16Array(arrayBuffer);
     session.audioSource.onData({
@@ -1427,7 +1450,7 @@ const startPlaybackTimer = (session) => {
 
     if (session.isRebuffering) {
       const minimumBytes = FRAME_SIZE_BYTES * MUSIC_REBUFFER_FRAMES;
-      if (session.buffer.length < minimumBytes && !session.sourceEnded) {
+      if (session.bufferedBytes < minimumBytes && !session.sourceEnded) {
         return;
       }
       session.isRebuffering = false;
@@ -1554,14 +1577,14 @@ const playNextInSession = async (voiceRoomId) => {
       session.ffmpegProcess = null;
       session.sourceEnded = true;
 
-      if (session.playbackInterval && session.buffer.length >= FRAME_SIZE_BYTES) {
+      if (session.playbackInterval && session.bufferedBytes >= FRAME_SIZE_BYTES) {
         const finalizeWhenDrained = setInterval(() => {
           if (session.activePlaybackToken !== playbackToken) {
             clearInterval(finalizeWhenDrained);
             return;
           }
 
-          if (session.buffer.length >= FRAME_SIZE_BYTES) return;
+          if (session.bufferedBytes >= FRAME_SIZE_BYTES) return;
           clearInterval(finalizeWhenDrained);
           stopPlaybackTimer(session);
           resetPlaybackState(session);
