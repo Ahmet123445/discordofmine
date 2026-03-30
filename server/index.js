@@ -286,8 +286,8 @@ const io = new SocketIOServer(httpServer, {
   allowUpgrades: true
 });
 
-const FRAME_SIZE_BYTES = 3840;
-const FRAME_DURATION_MS = 20;
+const FRAME_SIZE_BYTES = 1920;
+const FRAME_DURATION_MS = 10;
 const MUSIC_PREBUFFER_FRAMES = Number(process.env.MUSIC_PREBUFFER_FRAMES || 36);
 const MUSIC_REBUFFER_FRAMES = Number(process.env.MUSIC_REBUFFER_FRAMES || 20);
 const MUSIC_PREFETCH_TRACKS = Number(process.env.MUSIC_PREFETCH_TRACKS || 2);
