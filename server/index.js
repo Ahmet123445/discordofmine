@@ -8,7 +8,7 @@ import authRoutes from "./routes/auth.js";
 import uploadRoutes from "./routes/upload.js";
 import path from "path";
 import { spawn } from "child_process";
-import { randomUUID } from "crypto";
+import { createHash, randomUUID } from "crypto";
 import Peer from "simple-peer";
 import wrtc from "@roamhq/wrtc";
 import ffmpegPath from "ffmpeg-static";
@@ -294,16 +294,73 @@ const MUSIC_PREFETCH_TRACKS = Number(process.env.MUSIC_PREFETCH_TRACKS || 2);
 const MUSIC_PREFETCH_WAIT_TIMEOUT_MS = Number(process.env.MUSIC_PREFETCH_WAIT_TIMEOUT_MS || 2500);
 const MUSIC_CURRENT_PREFETCH_WAIT_TIMEOUT_MS = Number(process.env.MUSIC_CURRENT_PREFETCH_WAIT_TIMEOUT_MS || 12000);
 const MUSIC_STATE_EMIT_INTERVAL_MS = Number(process.env.MUSIC_STATE_EMIT_INTERVAL_MS || 1000);
+const MUSIC_CONTROL_COOLDOWN_MS = Number(process.env.MUSIC_CONTROL_COOLDOWN_MS || 140);
 const MUSIC_BOT_USERNAME = "Music Bot";
 const musicSessions = new Map();
 const resolvedTrackCache = new Map();
+const prefetchInFlightByCacheKey = new Map();
 const TRACK_CACHE_TTL_MS = 10 * 60 * 1000;
 const ytDlpBinary = process.env.YTDLP_PATH || "yt-dlp";
 const ytDlpCookiesPath = process.env.YTDLP_COOKIES_PATH || path.join(process.cwd(), "yt-cookies.txt");
 const musicCacheDir = process.env.MUSIC_CACHE_DIR || path.join(process.cwd(), "music-cache");
+const MUSIC_CACHE_TTL_MS = Number(process.env.MUSIC_CACHE_TTL_MS || 24 * 60 * 60 * 1000);
+const MUSIC_CACHE_MAX_FILES = Number(process.env.MUSIC_CACHE_MAX_FILES || 120);
+const MUSIC_CACHE_MAX_BYTES = Number(process.env.MUSIC_CACHE_MAX_BYTES || 2 * 1024 * 1024 * 1024);
 const hasYtDlpCookies = () => fs.existsSync(ytDlpCookiesPath);
 
 fs.mkdirSync(musicCacheDir, { recursive: true });
+
+const pruneMusicCacheDirectory = () => {
+  try {
+    const now = Date.now();
+    const files = fs.readdirSync(musicCacheDir)
+      .map((name) => {
+        const fullPath = path.join(musicCacheDir, name);
+        const stat = fs.statSync(fullPath);
+        return {
+          fullPath,
+          mtimeMs: stat.mtimeMs,
+          size: stat.size,
+          ageMs: now - stat.mtimeMs
+        };
+      })
+      .filter((item) => Number.isFinite(item.size));
+
+    for (const item of files) {
+      if (item.ageMs <= MUSIC_CACHE_TTL_MS) continue;
+      try {
+        fs.unlinkSync(item.fullPath);
+      } catch {}
+    }
+
+    const freshFiles = fs.readdirSync(musicCacheDir)
+      .map((name) => {
+        const fullPath = path.join(musicCacheDir, name);
+        const stat = fs.statSync(fullPath);
+        return {
+          fullPath,
+          mtimeMs: stat.mtimeMs,
+          size: stat.size
+        };
+      })
+      .sort((a, b) => b.mtimeMs - a.mtimeMs);
+
+    let totalBytes = freshFiles.reduce((sum, file) => sum + file.size, 0);
+    for (let i = 0; i < freshFiles.length; i++) {
+      const overFileLimit = i >= MUSIC_CACHE_MAX_FILES;
+      const overSizeLimit = totalBytes > MUSIC_CACHE_MAX_BYTES;
+      if (!overFileLimit && !overSizeLimit) break;
+      try {
+        fs.unlinkSync(freshFiles[i].fullPath);
+        totalBytes -= freshFiles[i].size;
+      } catch {}
+    }
+  } catch (err) {
+    console.error("[MusicBot] Cache prune failed:", err.message);
+  }
+};
+
+pruneMusicCacheDirectory();
 
 const DEFAULT_ICE_SERVERS = [
   { urls: "stun:stun.l.google.com:19302" },
@@ -374,6 +431,64 @@ const isMusicBotId = (id) => typeof id === "string" && id.startsWith("music-bot:
 const getServerRoomIdFromVoiceRoomId = (voiceRoomId = "") => {
   const lastDash = voiceRoomId.lastIndexOf("-");
   return lastDash > 0 ? voiceRoomId.substring(0, lastDash) : "";
+};
+
+const extractYouTubeVideoId = (value = "") => {
+  const trimmed = String(value || "").trim();
+  if (!trimmed) return "";
+
+  if (/^[A-Za-z0-9_-]{11}$/.test(trimmed)) {
+    return trimmed;
+  }
+
+  try {
+    const parsed = new URL(trimmed);
+    const host = parsed.hostname.toLowerCase();
+    const vParam = parsed.searchParams.get("v");
+    if (vParam && /^[A-Za-z0-9_-]{11}$/.test(vParam)) {
+      return vParam;
+    }
+
+    if (host.includes("youtu.be")) {
+      const shortId = parsed.pathname.replace(/^\//, "").split("/")[0];
+      if (/^[A-Za-z0-9_-]{11}$/.test(shortId)) {
+        return shortId;
+      }
+    }
+
+    const parts = parsed.pathname.split("/").filter(Boolean);
+    const watchId = parts.length > 1 && ["shorts", "embed", "live"].includes(parts[0]) ? parts[1] : "";
+    if (/^[A-Za-z0-9_-]{11}$/.test(watchId)) {
+      return watchId;
+    }
+  } catch {}
+
+  return "";
+};
+
+const buildTrackCacheKey = (track = {}) => {
+  const sourceId = extractYouTubeVideoId(track.sourceId || track.url || "");
+  if (sourceId) {
+    return `yt-${sourceId}`;
+  }
+
+  const normalizedUrl = String(track.url || "").trim().toLowerCase();
+  if (normalizedUrl) {
+    const hash = createHash("sha1").update(normalizedUrl).digest("hex").slice(0, 16);
+    return `url-${hash}`;
+  }
+
+  const normalizedTitle = String(track.title || "unknown-track").trim().toLowerCase();
+  const hash = createHash("sha1").update(normalizedTitle).digest("hex").slice(0, 16);
+  return `title-${hash}`;
+};
+
+const getTrackCacheKey = (track) => {
+  if (!track) return "";
+  if (!track.cacheKey) {
+    track.cacheKey = buildTrackCacheKey(track);
+  }
+  return track.cacheKey;
 };
 
 const sendSystemMessage = (roomId, content) => {
@@ -570,6 +685,8 @@ const createQueuedTrack = (track, requestedBy) => {
   return {
     id: randomUUID(),
     ...track,
+    sourceId: track.sourceId || null,
+    cacheKey: buildTrackCacheKey(track),
     requestedBy,
     prefetchStatus: "queued",
     prefetchFilePath: null,
@@ -580,12 +697,13 @@ const createQueuedTrack = (track, requestedBy) => {
 };
 
 const getPrefetchOutputTemplate = (track) => {
-  return path.join(musicCacheDir, `${track.id}.%(ext)s`);
+  const cacheKey = getTrackCacheKey(track) || track.id;
+  return path.join(musicCacheDir, `${cacheKey}.%(ext)s`);
 };
 
 const findPrefetchedFilePath = (track) => {
   try {
-    const prefix = `${track.id}.`;
+    const prefix = `${getTrackCacheKey(track) || track.id}.`;
     const fileName = fs.readdirSync(musicCacheDir).find((name) => name.startsWith(prefix));
     return fileName ? path.join(musicCacheDir, fileName) : null;
   } catch {
@@ -632,6 +750,8 @@ const cleanupTrackFile = (track) => {
 const cancelTrackPrefetch = (track, resetStatus = true) => {
   if (!track) return;
 
+  const hadRunningProcess = !!track.prefetchProcess;
+
   try {
     track.prefetchProcess?.stdout?.removeAllListeners();
     track.prefetchProcess?.stderr?.removeAllListeners();
@@ -643,7 +763,9 @@ const cancelTrackPrefetch = (track, resetStatus = true) => {
 
   track.prefetchProcess = null;
   track.prefetchPromise = null;
-  cleanupTrackFile(track);
+  if (hadRunningProcess) {
+    cleanupTrackFile(track);
+  }
   track.prefetchError = null;
 
   if (resetStatus) {
@@ -654,7 +776,6 @@ const cancelTrackPrefetch = (track, resetStatus = true) => {
 const disposeTrack = (track) => {
   if (!track) return;
   cancelTrackPrefetch(track, false);
-  cleanupTrackFile(track);
   track.prefetchStatus = "done";
 };
 
@@ -702,12 +823,15 @@ const runYtDlpJson = (input, extraArgs = []) => {
 const normalizeYtDlpTrack = (entry) => {
   const videoId = entry.id || entry.url;
   const webpageUrl = entry.webpage_url || entry.url || (videoId ? `https://www.youtube.com/watch?v=${videoId}` : null);
+  const sourceId = extractYouTubeVideoId(entry.id || webpageUrl || "");
 
   return {
     title: entry.title || "Bilinmeyen Sarki",
     url: webpageUrl,
     durationInSec: Number(entry.duration || 0),
-    thumbnail: entry.thumbnail || null
+    thumbnail: entry.thumbnail || null,
+    sourceId: sourceId || null,
+    cacheKey: buildTrackCacheKey({ sourceId, url: webpageUrl, title: entry.title })
   };
 };
 
@@ -825,11 +949,37 @@ const searchTracks = async (query, limit = 5) => {
 const prefetchTrack = (track) => {
   const existingFilePath = getExistingPrefetchFilePath(track);
   if (existingFilePath) {
+    track.prefetchFilePath = existingFilePath;
     track.prefetchStatus = "prefetched";
     return Promise.resolve(track);
   }
 
   if (track.prefetchPromise) {
+    return track.prefetchPromise;
+  }
+
+  const cacheKey = getTrackCacheKey(track);
+  const sharedPrefetch = prefetchInFlightByCacheKey.get(cacheKey);
+  if (sharedPrefetch) {
+    track.prefetchStatus = "prefetching";
+    track.prefetchError = null;
+    track.prefetchPromise = sharedPrefetch
+      .then((filePath) => {
+        track.prefetchFilePath = filePath;
+        track.prefetchStatus = "prefetched";
+        track.prefetchError = null;
+        return track;
+      })
+      .catch((err) => {
+        track.prefetchStatus = "failed";
+        track.prefetchError = err.message;
+        throw err;
+      })
+      .finally(() => {
+        track.prefetchPromise = null;
+        track.prefetchProcess = null;
+      });
+
     return track.prefetchPromise;
   }
 
@@ -862,7 +1012,7 @@ const prefetchTrack = (track) => {
   let stdout = "";
   let stderr = "";
 
-  const promise = new Promise((resolve, reject) => {
+  const sharedPromise = new Promise((resolve, reject) => {
     proc.stdout.on("data", (chunk) => {
       stdout += chunk.toString();
     });
@@ -895,19 +1045,35 @@ const prefetchTrack = (track) => {
         : findPrefetchedFilePath(track);
 
       if (code === 0 && filePath) {
-        track.prefetchFilePath = filePath;
-        track.prefetchStatus = "prefetched";
-        track.prefetchError = null;
-        resolve(track);
+        resolve(filePath);
         return;
       }
 
       cleanupTrackFile(track);
-      track.prefetchStatus = "failed";
-      track.prefetchError = stderr.trim() || `yt-dlp prefetch ${code} koduyla sonlandi.`;
-      reject(new Error(track.prefetchError));
+      reject(new Error(stderr.trim() || `yt-dlp prefetch ${code} koduyla sonlandi.`));
     });
   }).finally(() => {
+    if (prefetchInFlightByCacheKey.get(cacheKey) === sharedPromise) {
+      prefetchInFlightByCacheKey.delete(cacheKey);
+    }
+  });
+
+  prefetchInFlightByCacheKey.set(cacheKey, sharedPromise);
+
+  const promise = sharedPromise
+    .then((filePath) => {
+      track.prefetchFilePath = filePath;
+      track.prefetchStatus = "prefetched";
+      track.prefetchError = null;
+      pruneMusicCacheDirectory();
+      return track;
+    })
+    .catch((err) => {
+      track.prefetchStatus = "failed";
+      track.prefetchError = err.message;
+      throw err;
+    })
+    .finally(() => {
     track.prefetchPromise = null;
     track.prefetchProcess = null;
   });
@@ -1076,7 +1242,9 @@ const getOrCreateMusicSession = (voiceRoomId) => {
     prefetchSyncRunning: false,
     prefetchSyncQueued: false,
     lastMusicStateEmitAt: 0,
-    activePlaybackToken: 0
+    activePlaybackToken: 0,
+    controlActionInFlight: false,
+    lastControlActionAt: 0
   };
 
   musicSessions.set(voiceRoomId, session);
@@ -1496,8 +1664,22 @@ const handleMusicCommand = async ({ socket, roomId, user, commandText }) => {
 
       const track = await resolveTrack(query);
 
-      session.queue.push(createQueuedTrack(track, user.username));
-      if (session.current || session.isPlaying) {
+      const queuedTrack = createQueuedTrack(track, user.username);
+      const shouldPrefetchImmediately = !session.current && !session.isPlaying;
+      session.queue.push(queuedTrack);
+
+      if (shouldPrefetchImmediately) {
+        sendSystemMessage(roomId, `Parca indiriliyor: ${track.title}`);
+        try {
+          await prefetchTrack(queuedTrack);
+        } catch (prefetchErr) {
+          session.queue = session.queue.filter((item) => item.id !== queuedTrack.id);
+          emitMusicState(session, true);
+          throw prefetchErr;
+        }
+      }
+
+      if (session.current || session.isPlaying || !shouldPrefetchImmediately) {
         void schedulePrefetchForSession(session);
       }
       emitMusicState(session, true);
@@ -2068,163 +2250,189 @@ io.on("connection", (socket) => {
 
     const sessionVoiceRoomId = session.voiceRoomId;
 
-    if (action === "toggle") {
-      if (!session.ffmpegProcess) {
-        socket.emit("music-control-error", { error: "Kontrol edilecek aktif oynatma yok." });
-        return;
-      }
+    if (!action) {
+      socket.emit("music-control-error", { error: "Desteklenmeyen muzik kontrolu." });
+      return;
+    }
 
-      if (session.isPaused) {
-        if (process.platform === "win32") {
-          socket.emit("music-control-error", { error: "Bu platformda devam ettirme desteklenmiyor." });
+    const now = Date.now();
+    if (session.controlActionInFlight && action !== "volume") {
+      socket.emit("music-control-error", { error: "Muzik kontrolu isleniyor, tekrar dene." });
+      return;
+    }
+
+    if (action !== "volume" && now - (session.lastControlActionAt || 0) < MUSIC_CONTROL_COOLDOWN_MS) {
+      return;
+    }
+
+    if (action !== "volume") {
+      session.controlActionInFlight = true;
+      session.lastControlActionAt = now;
+    }
+
+    try {
+      if (action === "toggle") {
+        if (!session.ffmpegProcess) {
+          socket.emit("music-control-error", { error: "Kontrol edilecek aktif oynatma yok." });
           return;
         }
+
+        if (session.isPaused) {
+          if (process.platform === "win32") {
+            socket.emit("music-control-error", { error: "Bu platformda devam ettirme desteklenmiyor." });
+            return;
+          }
+          try {
+            session.ffmpegProcess.kill("SIGCONT");
+            session.isPaused = false;
+            sendSystemMessage(roomId, "Muzik devam ediyor.");
+            emitMusicState(session, true);
+          } catch {
+            socket.emit("music-control-error", { error: "Muzik devam ettirilemedi." });
+          }
+          return;
+        }
+
+        if (process.platform === "win32") {
+          socket.emit("music-control-error", { error: "Bu platformda duraklatma desteklenmiyor." });
+          return;
+        }
+
         try {
-          session.ffmpegProcess.kill("SIGCONT");
-          session.isPaused = false;
-          sendSystemMessage(roomId, "Muzik devam ediyor.");
+          session.ffmpegProcess.kill("SIGSTOP");
+          session.isPaused = true;
+          sendSystemMessage(roomId, "Muzik duraklatildi.");
           emitMusicState(session, true);
         } catch {
-          socket.emit("music-control-error", { error: "Muzik devam ettirilemedi." });
+          socket.emit("music-control-error", { error: "Muzik duraklatilamadi." });
         }
         return;
       }
 
-      if (process.platform === "win32") {
-        socket.emit("music-control-error", { error: "Bu platformda duraklatma desteklenmiyor." });
-        return;
-      }
-
-      try {
-        session.ffmpegProcess.kill("SIGSTOP");
-        session.isPaused = true;
-        sendSystemMessage(roomId, "Muzik duraklatildi.");
-        emitMusicState(session, true);
-      } catch {
-        socket.emit("music-control-error", { error: "Muzik duraklatilamadi." });
-      }
-      return;
-    }
-
-    if (action === "skip") {
-      stopCurrentPlayback(session);
-      sendSystemMessage(roomId, "Parca atlandi.");
-      emitMusicState(session, true);
-      void playNextInSession(sessionVoiceRoomId);
-      return;
-    }
-
-    if (action === "stop") {
-      closeMusicSession(sessionVoiceRoomId, "Muzik durduruldu.");
-      return;
-    }
-
-    if (action === "volume") {
-      const nextVolume = Number(payload.value);
-      if (Number.isNaN(nextVolume) || nextVolume < 0 || nextVolume > 200) {
-        socket.emit("music-control-error", { error: "Ses 0-200 arasinda olmali." });
-        return;
-      }
-
-      session.volume = nextVolume;
-      emitMusicState(session, true);
-      return;
-    }
-
-    if (action === "seek") {
-      const current = session.current;
-      const duration = Number(current?.durationInSec || 0);
-      const target = Number(payload.value);
-      if (!current || duration <= 0 || Number.isNaN(target)) {
-        socket.emit("music-control-error", { error: "Bu parca icin ilerletme kullanilamiyor." });
-        return;
-      }
-
-      const filePath = getExistingPrefetchFilePath(current);
-      if (!filePath) {
-        socket.emit("music-control-error", { error: "Ilerletme icin parcanin onbellege alinmasi gerekiyor." });
-        return;
-      }
-
-      const seekSec = Math.max(0, Math.min(target, duration));
-
-      try {
+      if (action === "skip") {
         stopCurrentPlayback(session);
-        session.current = current;
-        session.isPlaying = true;
-        session.isPaused = false;
-        session.seekOffsetSec = seekSec;
-        session.currentPositionSec = seekSec;
-        const playbackToken = session.activePlaybackToken + 1;
-        session.activePlaybackToken = playbackToken;
+        sendSystemMessage(roomId, "Parca atlandi.");
+        emitMusicState(session, true);
+        void playNextInSession(sessionVoiceRoomId);
+        return;
+      }
 
-        const ffmpegArgs = [
-          "-loglevel", "error",
-          "-fflags", "nobuffer",
-          "-probesize", "32k",
-          "-analyzeduration", "0",
-          "-ss", `${seekSec}`,
-          "-i", filePath,
-          "-vn",
-          "-filter:a", `volume=${Math.max(0, session.volume) / 100}`,
-          "-f", "s16le",
-          "-ar", "48000",
-          "-ac", "2",
-          "pipe:1"
-        ];
+      if (action === "stop") {
+        closeMusicSession(sessionVoiceRoomId, "Muzik durduruldu.");
+        return;
+      }
 
-        const ffmpegBinary = process.env.FFMPEG_PATH || ffmpegPath || "ffmpeg";
-        const ffmpeg = spawn(ffmpegBinary, ffmpegArgs, {
-          stdio: ["ignore", "pipe", "pipe"]
-        });
+      if (action === "volume") {
+        const nextVolume = Number(payload.value);
+        if (Number.isNaN(nextVolume) || nextVolume < 0 || nextVolume > 200) {
+          socket.emit("music-control-error", { error: "Ses 0-200 arasinda olmali." });
+          return;
+        }
 
-        session.sourceProcess = null;
-        session.ffmpegProcess = ffmpeg;
-        session.sourceEnded = false;
-        session.isStoppingCurrent = false;
+        session.volume = nextVolume;
+        emitMusicState(session, true);
+        return;
+      }
 
-        ffmpeg.stdout.on("data", (chunk) => {
-          if (session.activePlaybackToken !== playbackToken) return;
-          if (!session.isPaused) {
-            pumpChunkToRtcSource(session, chunk);
-          }
-        });
+      if (action === "seek") {
+        const current = session.current;
+        const duration = Number(current?.durationInSec || 0);
+        const target = Number(payload.value);
+        if (!current || duration <= 0 || Number.isNaN(target)) {
+          socket.emit("music-control-error", { error: "Bu parca icin ilerletme kullanilamiyor." });
+          return;
+        }
 
-        ffmpeg.stderr.on("data", (data) => {
-          if (session.activePlaybackToken !== playbackToken) return;
-          const msg = data.toString().trim();
-          if (msg) {
-            console.error("[MusicBot][FFmpeg][seek]", msg);
-          }
-        });
+        const filePath = getExistingPrefetchFilePath(current);
+        if (!filePath) {
+          socket.emit("music-control-error", { error: "Ilerletme icin parcanin onbellege alinmasi gerekiyor." });
+          return;
+        }
 
-        ffmpeg.on("close", () => {
-          if (session.activePlaybackToken !== playbackToken) {
-            return;
-          }
+        const seekSec = Math.max(0, Math.min(target, duration));
+
+        try {
+          stopCurrentPlayback(session);
+          session.current = current;
+          session.isPlaying = true;
+          session.isPaused = false;
+          session.seekOffsetSec = seekSec;
+          session.currentPositionSec = seekSec;
+          const playbackToken = session.activePlaybackToken + 1;
+          session.activePlaybackToken = playbackToken;
+
+          const ffmpegArgs = [
+            "-loglevel", "error",
+            "-fflags", "nobuffer",
+            "-probesize", "32k",
+            "-analyzeduration", "0",
+            "-ss", `${seekSec}`,
+            "-i", filePath,
+            "-vn",
+            "-filter:a", `volume=${Math.max(0, session.volume) / 100}`,
+            "-f", "s16le",
+            "-ar", "48000",
+            "-ac", "2",
+            "pipe:1"
+          ];
+
+          const ffmpegBinary = process.env.FFMPEG_PATH || ffmpegPath || "ffmpeg";
+          const ffmpeg = spawn(ffmpegBinary, ffmpegArgs, {
+            stdio: ["ignore", "pipe", "pipe"]
+          });
 
           session.sourceProcess = null;
-          session.ffmpegProcess = null;
-          session.sourceEnded = true;
-          stopPlaybackTimer(session);
-          resetPlaybackState(session);
-          disposeTrack(current);
-          session.current = null;
-          session.isPlaying = false;
-          session.isPaused = false;
+          session.ffmpegProcess = ffmpeg;
+          session.sourceEnded = false;
+          session.isStoppingCurrent = false;
+
+          ffmpeg.stdout.on("data", (chunk) => {
+            if (session.activePlaybackToken !== playbackToken) return;
+            if (!session.isPaused) {
+              pumpChunkToRtcSource(session, chunk);
+            }
+          });
+
+          ffmpeg.stderr.on("data", (data) => {
+            if (session.activePlaybackToken !== playbackToken) return;
+            const msg = data.toString().trim();
+            if (msg) {
+              console.error("[MusicBot][FFmpeg][seek]", msg);
+            }
+          });
+
+          ffmpeg.on("close", () => {
+            if (session.activePlaybackToken !== playbackToken) {
+              return;
+            }
+
+            session.sourceProcess = null;
+            session.ffmpegProcess = null;
+            session.sourceEnded = true;
+            stopPlaybackTimer(session);
+            resetPlaybackState(session);
+            disposeTrack(current);
+            session.current = null;
+            session.isPlaying = false;
+            session.isPaused = false;
+            emitMusicState(session, true);
+            void playNextInSession(sessionVoiceRoomId);
+          });
+
+          startPlaybackTimer(session);
           emitMusicState(session, true);
-          void playNextInSession(sessionVoiceRoomId);
-        });
-
-        startPlaybackTimer(session);
-        emitMusicState(session, true);
-      } catch (err) {
-        socket.emit("music-control-error", { error: err?.message || "Ilerletme basarisiz." });
+        } catch (err) {
+          socket.emit("music-control-error", { error: err?.message || "Ilerletme basarisiz." });
+        }
+        return;
       }
-      return;
-    }
 
-    socket.emit("music-control-error", { error: "Desteklenmeyen muzik kontrolu." });
+      socket.emit("music-control-error", { error: "Desteklenmeyen muzik kontrolu." });
+    } finally {
+      if (action !== "volume") {
+        session.controlActionInFlight = false;
+      }
+    }
   });
 
   socket.on("disconnect", () => {

@@ -53,6 +53,21 @@ const formatClock = (seconds: number) => {
   return `${mins}:${secs.toString().padStart(2, "0")}`;
 };
 
+const formatPrefetchStatus = (status?: string) => {
+  switch ((status || "").toLowerCase()) {
+    case "prefetching":
+      return "Indiriliyor";
+    case "prefetched":
+      return "Hazir";
+    case "playing":
+      return "Caliyor";
+    case "failed":
+      return "Indirme hatasi";
+    default:
+      return "Kuyrukta";
+  }
+};
+
 const SLASH_COMMANDS = [
   { command: "/play", usage: "/play <yt-link veya sarki adi>", description: "Sarkiyi cal veya kuyruga ekle" },
   { command: "/search", usage: "/search <sarki adi>", description: "Ilk sonuc adaylarini listele" },
@@ -557,6 +572,9 @@ function ChatContent() {
   const canRenderMusicPlayer = !!musicState?.current || (musicState?.queue?.length || 0) > 0;
   const currentDuration = Number(musicState?.current?.durationInSec || 0);
   const effectiveSeekValue = seekDragValue ?? Number(musicState?.positionSec || 0);
+  const currentPrefetchStatus = formatPrefetchStatus(musicState?.current?.prefetchStatus);
+  const canControlCurrent = !!musicState?.current;
+  const canSeekCurrent = canControlCurrent && currentDuration > 0;
 
   if (!user || !roomId) return null;
 
@@ -771,15 +789,21 @@ function ChatContent() {
                     {musicState.current?.requestedBy ? `Ekleyen: ${musicState.current.requestedBy}` : "Muzik botu"}
                     <span className="mx-2 text-zinc-600">•</span>
                     {musicState.isPaused ? "Duraklatildi" : musicState.isPlaying ? "Caliyor" : "Hazir"}
+                    {musicState.current && (
+                      <>
+                        <span className="mx-2 text-zinc-600">•</span>
+                        {currentPrefetchStatus}
+                      </>
+                    )}
                   </div>
                 </div>
 
                 <div className="hidden items-center gap-2 sm:flex">
-                  <button onClick={() => sendMusicControl("toggle")} className="rounded-lg bg-zinc-800 p-2 text-zinc-200 hover:bg-zinc-700">
+                  <button disabled={!canControlCurrent} onClick={() => sendMusicControl("toggle")} className="rounded-lg bg-zinc-800 p-2 text-zinc-200 hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-50">
                     {musicState.isPaused ? "▶" : "⏸"}
                   </button>
-                  <button onClick={() => sendMusicControl("skip")} className="rounded-lg bg-zinc-800 p-2 text-zinc-200 hover:bg-zinc-700">⏭</button>
-                  <button onClick={() => sendMusicControl("stop")} className="rounded-lg bg-zinc-800 p-2 text-zinc-200 hover:bg-red-700/60">⏹</button>
+                  <button disabled={!canControlCurrent} onClick={() => sendMusicControl("skip")} className="rounded-lg bg-zinc-800 p-2 text-zinc-200 hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-50">⏭</button>
+                  <button disabled={!canControlCurrent} onClick={() => sendMusicControl("stop")} className="rounded-lg bg-zinc-800 p-2 text-zinc-200 hover:bg-red-700/60 disabled:cursor-not-allowed disabled:opacity-50">⏹</button>
                 </div>
               </div>
 
@@ -790,18 +814,21 @@ function ChatContent() {
                   max={Math.max(1, currentDuration)}
                   step={1}
                   value={Math.max(0, Math.min(Math.floor(effectiveSeekValue), Math.max(1, currentDuration)))}
+                  disabled={!canSeekCurrent}
                   onChange={(e) => setSeekDragValue(Number(e.target.value))}
                   onMouseUp={(e) => {
+                    if (!canSeekCurrent) return;
                     const val = Number((e.target as HTMLInputElement).value);
                     setSeekDragValue(null);
                     sendMusicControl("seek", val);
                   }}
                   onTouchEnd={(e) => {
+                    if (!canSeekCurrent) return;
                     const val = Number((e.target as HTMLInputElement).value);
                     setSeekDragValue(null);
                     sendMusicControl("seek", val);
                   }}
-                  className="w-full accent-emerald-400"
+                  className="w-full accent-emerald-400 disabled:cursor-not-allowed disabled:opacity-50"
                 />
                 <div className="mt-1 flex items-center justify-between text-[11px] text-zinc-400">
                   <span>{formatClock(effectiveSeekValue)}</span>
@@ -809,11 +836,11 @@ function ChatContent() {
                 </div>
 
                 <div className="mt-2 flex items-center gap-2 sm:hidden">
-                  <button onClick={() => sendMusicControl("toggle")} className="rounded-lg bg-zinc-800 px-3 py-1.5 text-xs text-zinc-200">
+                  <button disabled={!canControlCurrent} onClick={() => sendMusicControl("toggle")} className="rounded-lg bg-zinc-800 px-3 py-1.5 text-xs text-zinc-200 disabled:cursor-not-allowed disabled:opacity-50">
                     {musicState.isPaused ? "Devam" : "Duraklat"}
                   </button>
-                  <button onClick={() => sendMusicControl("skip")} className="rounded-lg bg-zinc-800 px-3 py-1.5 text-xs text-zinc-200">Atla</button>
-                  <button onClick={() => sendMusicControl("stop")} className="rounded-lg bg-zinc-800 px-3 py-1.5 text-xs text-zinc-200">Durdur</button>
+                  <button disabled={!canControlCurrent} onClick={() => sendMusicControl("skip")} className="rounded-lg bg-zinc-800 px-3 py-1.5 text-xs text-zinc-200 disabled:cursor-not-allowed disabled:opacity-50">Atla</button>
+                  <button disabled={!canControlCurrent} onClick={() => sendMusicControl("stop")} className="rounded-lg bg-zinc-800 px-3 py-1.5 text-xs text-zinc-200 disabled:cursor-not-allowed disabled:opacity-50">Durdur</button>
                 </div>
 
                 <div className="mt-2 flex items-center gap-3">
@@ -836,7 +863,7 @@ function ChatContent() {
                       {musicState.queue.slice(0, 8).map((item, idx) => (
                         <div key={`${item.id}-${idx}`} className="flex items-center justify-between gap-2 text-xs text-zinc-300">
                           <span className="truncate">{idx + 1}. {item.title}</span>
-                          <span className="shrink-0 text-zinc-500">{formatClock(item.durationInSec || 0)}</span>
+                          <span className="shrink-0 text-zinc-500">{formatPrefetchStatus(item.prefetchStatus)} • {formatClock(item.durationInSec || 0)}</span>
                         </div>
                       ))}
                     </div>
