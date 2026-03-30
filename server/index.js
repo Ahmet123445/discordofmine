@@ -288,8 +288,8 @@ const io = new SocketIOServer(httpServer, {
 
 const FRAME_SIZE_BYTES = 1920;
 const FRAME_DURATION_MS = 10;
-const MUSIC_PREBUFFER_FRAMES = Number(process.env.MUSIC_PREBUFFER_FRAMES || 30);
-const MUSIC_REBUFFER_FRAMES = Number(process.env.MUSIC_REBUFFER_FRAMES || 14);
+const MUSIC_PREBUFFER_FRAMES = Number(process.env.MUSIC_PREBUFFER_FRAMES || 60);
+const MUSIC_REBUFFER_FRAMES = Number(process.env.MUSIC_REBUFFER_FRAMES || 28);
 const MUSIC_PREFETCH_TRACKS = Number(process.env.MUSIC_PREFETCH_TRACKS || 2);
 const MUSIC_PREFETCH_WAIT_TIMEOUT_MS = Number(process.env.MUSIC_PREFETCH_WAIT_TIMEOUT_MS || 2500);
 const MUSIC_CURRENT_PREFETCH_WAIT_TIMEOUT_MS = Number(process.env.MUSIC_CURRENT_PREFETCH_WAIT_TIMEOUT_MS || 12000);
@@ -510,6 +510,30 @@ const getTrackCacheKey = (track) => {
     track.cacheKey = buildTrackCacheKey(track);
   }
   return track.cacheKey;
+};
+
+const buildLocalPlaybackFfmpegArgs = ({ filePath, volume = 80, seekSec = null }) => {
+  const args = [
+    "-loglevel", "error"
+  ];
+
+  if (typeof seekSec === "number" && seekSec > 0) {
+    args.push("-ss", `${seekSec}`);
+  }
+
+  args.push(
+    "-i", filePath,
+    "-vn",
+    "-sn",
+    "-dn",
+    "-filter:a", `volume=${Math.max(0, volume) / 100}`,
+    "-f", "s16le",
+    "-ar", "48000",
+    "-ac", "2",
+    "pipe:1"
+  );
+
+  return args;
 };
 
 const sendSystemMessage = (roomId, content) => {
@@ -1465,19 +1489,10 @@ const playNextInSession = async (voiceRoomId) => {
     const playbackToken = session.activePlaybackToken + 1;
     session.activePlaybackToken = playbackToken;
 
-    const ffmpegArgs = [
-      "-loglevel", "error",
-      "-fflags", "nobuffer",
-      "-probesize", "32k",
-      "-analyzeduration", "0",
-      "-i", localFilePath,
-      "-vn",
-      "-filter:a", `volume=${Math.max(0, session.volume) / 100}`,
-      "-f", "s16le",
-      "-ar", "48000",
-      "-ac", "2",
-      "pipe:1"
-    ];
+    const ffmpegArgs = buildLocalPlaybackFfmpegArgs({
+      filePath: localFilePath,
+      volume: session.volume
+    });
 
     const ffmpegBinary = process.env.FFMPEG_PATH || ffmpegPath || "ffmpeg";
     const ffmpeg = spawn(ffmpegBinary, ffmpegArgs, {
@@ -2382,20 +2397,11 @@ io.on("connection", (socket) => {
           const playbackToken = session.activePlaybackToken + 1;
           session.activePlaybackToken = playbackToken;
 
-          const ffmpegArgs = [
-            "-loglevel", "error",
-            "-fflags", "nobuffer",
-            "-probesize", "32k",
-            "-analyzeduration", "0",
-            "-ss", `${seekSec}`,
-            "-i", filePath,
-            "-vn",
-            "-filter:a", `volume=${Math.max(0, session.volume) / 100}`,
-            "-f", "s16le",
-            "-ar", "48000",
-            "-ac", "2",
-            "pipe:1"
-          ];
+          const ffmpegArgs = buildLocalPlaybackFfmpegArgs({
+            filePath,
+            volume: session.volume,
+            seekSec
+          });
 
           const ffmpegBinary = process.env.FFMPEG_PATH || ffmpegPath || "ffmpeg";
           const ffmpeg = spawn(ffmpegBinary, ffmpegArgs, {
