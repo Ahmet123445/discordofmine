@@ -2430,6 +2430,7 @@ io.on("connection", (socket) => {
           const ffmpeg = spawn(ffmpegBinary, ffmpegArgs, {
             stdio: ["ignore", "pipe", "pipe"]
           });
+          let ffmpegErrorText = "";
 
           session.sourceProcess = null;
           session.ffmpegProcess = ffmpeg;
@@ -2447,11 +2448,12 @@ io.on("connection", (socket) => {
             if (session.activePlaybackToken !== playbackToken) return;
             const msg = data.toString().trim();
             if (msg) {
+              ffmpegErrorText += `${msg}\n`;
               console.error("[MusicBot][FFmpeg][seek]", msg);
             }
           });
 
-          ffmpeg.on("close", () => {
+          ffmpeg.on("close", (code) => {
             if (session.activePlaybackToken !== playbackToken) {
               return;
             }
@@ -2461,7 +2463,21 @@ io.on("connection", (socket) => {
             session.sourceEnded = true;
             stopPlaybackTimer(session);
             resetPlaybackState(session);
-            disposeTrack(current);
+
+            if (code !== 0 && !session.isStoppingCurrent) {
+              console.error("[MusicBot] Seek playback closed with error code:", code);
+              if (ffmpegErrorText.trim()) {
+                console.error("[MusicBot] Seek close error:", ffmpegErrorText.trim());
+              }
+              session.current = current;
+              session.isPlaying = false;
+              session.isPaused = false;
+              session.currentPositionSec = seekSec;
+              emitMusicState(session, true);
+              socket.emit("music-control-error", { error: "Ilerletme sirasinda oynatma kesildi. Tekrar dene." });
+              return;
+            }
+
             session.current = null;
             session.isPlaying = false;
             session.isPaused = false;
