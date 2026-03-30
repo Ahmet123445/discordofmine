@@ -286,8 +286,8 @@ const io = new SocketIOServer(httpServer, {
   allowUpgrades: true
 });
 
-const FRAME_SIZE_BYTES = 1920;
-const FRAME_DURATION_MS = 10;
+const FRAME_SIZE_BYTES = 3840;
+const FRAME_DURATION_MS = 20;
 const MUSIC_PREBUFFER_FRAMES = Number(process.env.MUSIC_PREBUFFER_FRAMES || 36);
 const MUSIC_REBUFFER_FRAMES = Number(process.env.MUSIC_REBUFFER_FRAMES || 20);
 const MUSIC_PREFETCH_TRACKS = Number(process.env.MUSIC_PREFETCH_TRACKS || 2);
@@ -308,6 +308,7 @@ const MUSIC_CACHE_TTL_MS = Number(process.env.MUSIC_CACHE_TTL_MS || 24 * 60 * 60
 const MUSIC_CACHE_MAX_FILES = Number(process.env.MUSIC_CACHE_MAX_FILES || 120);
 const MUSIC_CACHE_MAX_BYTES = Number(process.env.MUSIC_CACHE_MAX_BYTES || 2 * 1024 * 1024 * 1024);
 const hasYtDlpCookies = () => fs.existsSync(ytDlpCookiesPath);
+const SILENCE_SAMPLES = new Int16Array(FRAME_SIZE_BYTES / 2);
 
 fs.mkdirSync(musicCacheDir, { recursive: true });
 
@@ -1379,14 +1380,12 @@ const pumpChunkToRtcSource = (session, chunk) => {
 };
 
 const pushSilenceFrame = (session) => {
-  const arrayBuffer = new ArrayBuffer(FRAME_SIZE_BYTES);
-  const samples = new Int16Array(arrayBuffer);
   session.audioSource.onData({
-    samples,
+    samples: SILENCE_SAMPLES,
     sampleRate: 48000,
     bitsPerSample: 16,
     channelCount: 2,
-    numberOfFrames: 480
+    numberOfFrames: FRAME_SIZE_BYTES / 4
   });
 };
 
@@ -1416,17 +1415,22 @@ const flushBufferedFrameToRtcSource = (session) => {
       return false;
     }
 
-    const arrayBuffer = new ArrayBuffer(FRAME_SIZE_BYTES);
-    const view = new Uint8Array(arrayBuffer);
-    view.set(frameData);
+    let samples;
+    if (frameData.byteOffset % 2 === 0) {
+      samples = new Int16Array(frameData.buffer, frameData.byteOffset, FRAME_SIZE_BYTES / 2);
+    } else {
+      const arrayBuffer = new ArrayBuffer(FRAME_SIZE_BYTES);
+      const view = new Uint8Array(arrayBuffer);
+      view.set(frameData);
+      samples = new Int16Array(arrayBuffer);
+    }
 
-    const samples = new Int16Array(arrayBuffer);
     session.audioSource.onData({
       samples,
       sampleRate: 48000,
       bitsPerSample: 16,
       channelCount: 2,
-      numberOfFrames: 480
+      numberOfFrames: FRAME_SIZE_BYTES / 4
     });
 
     session.playedFrames += 1;
