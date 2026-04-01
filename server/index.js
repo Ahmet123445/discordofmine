@@ -301,6 +301,7 @@ const MUSIC_REBUFFER_FRAMES = Number(process.env.MUSIC_REBUFFER_FRAMES || 40);
 const MUSIC_PREFETCH_TRACKS = Number(process.env.MUSIC_PREFETCH_TRACKS || 2);
 const MUSIC_PREFETCH_WAIT_TIMEOUT_MS = Number(process.env.MUSIC_PREFETCH_WAIT_TIMEOUT_MS || 2500);
 const MUSIC_CURRENT_PREFETCH_WAIT_TIMEOUT_MS = Number(process.env.MUSIC_CURRENT_PREFETCH_WAIT_TIMEOUT_MS || 45000);
+const MUSIC_MAX_CATCHUP_FRAMES = Math.max(1, Number(process.env.MUSIC_MAX_CATCHUP_FRAMES || 4));
 const MUSIC_STATE_EMIT_INTERVAL_MS = Number(process.env.MUSIC_STATE_EMIT_INTERVAL_MS || 1000);
 const MUSIC_CONTROL_COOLDOWN_MS = Number(process.env.MUSIC_CONTROL_COOLDOWN_MS || 140);
 const MUSIC_PREFERRED_AUDIO_EXT = (process.env.MUSIC_PREFERRED_AUDIO_EXT || "webm").toLowerCase();
@@ -637,8 +638,9 @@ const destroyAllMusicPeers = (session) => {
 const stopPlaybackTimer = (session) => {
   if (!session.playbackInterval) return;
 
-  clearInterval(session.playbackInterval);
+  clearTimeout(session.playbackInterval);
   session.playbackInterval = null;
+  session.nextPlaybackDueAt = 0;
 };
 
 const resetPlaybackState = (session) => {
@@ -653,6 +655,7 @@ const resetPlaybackState = (session) => {
   session.playedFrames = 0;
   session.seekOffsetSec = 0;
   session.currentPositionSec = 0;
+  session.nextPlaybackDueAt = 0;
 };
 
 const stopCurrentPlayback = (session) => {
@@ -1307,6 +1310,7 @@ const getOrCreateMusicSession = (voiceRoomId) => {
     audioChunks: [],
     bufferedBytes: 0,
     playbackInterval: null,
+    nextPlaybackDueAt: 0,
     hasPlaybackStarted: false,
     hasAnnouncedPlaybackStart: false,
     isRebuffering: false,
@@ -1448,48 +1452,81 @@ const flushBufferedFrameToRtcSource = (session) => {
 const startPlaybackTimer = (session) => {
   stopPlaybackTimer(session);
 
-  session.playbackInterval = setInterval(() => {
-    if (!session.isPlaying || session.isPaused) return;
-    if (!session.hasPlaybackStarted) return;
+  session.nextPlaybackDueAt = Date.now();
 
-    if (session.isRebuffering) {
-      const minimumBytes = FRAME_SIZE_BYTES * MUSIC_REBUFFER_FRAMES;
-      if (session.bufferedBytes < minimumBytes && !session.sourceEnded) {
-        return;
-      }
-      session.isRebuffering = false;
-    }
-
-    const flushed = flushBufferedFrameToRtcSource(session);
-    if (flushed) {
-      if (!session.hasAnnouncedPlaybackStart && session.current) {
-        const serverRoomId = getServerRoomIdFromVoiceRoomId(session.voiceRoomId);
-        sendSystemMessage(serverRoomId, `Caliniyor: ${session.current.title}`);
-        session.hasAnnouncedPlaybackStart = true;
-        emitMusicState(session, true);
-      }
-
-      session.sentSilenceFrames = 0;
-      emitMusicState(session, false);
+  const tick = () => {
+    if (!session.isPlaying) {
+      stopPlaybackTimer(session);
       return;
     }
 
-    if (!session.sourceEnded) {
-      session.sentSilenceFrames += 1;
+    if (session.isPaused || !session.hasPlaybackStarted) {
+      session.nextPlaybackDueAt = Date.now() + FRAME_DURATION_MS;
+      session.playbackInterval = setTimeout(tick, FRAME_DURATION_MS);
+      return;
+    }
 
-      if (session.sentSilenceFrames >= 2) {
+    const now = Date.now();
+    const behindBy = Math.max(0, now - session.nextPlaybackDueAt);
+    const extraCatchUpFrames = Math.floor(behindBy / FRAME_DURATION_MS);
+    const framesToProcess = Math.min(1 + extraCatchUpFrames, MUSIC_MAX_CATCHUP_FRAMES);
+
+    let shouldStop = false;
+    let didFlushAudio = false;
+
+    for (let i = 0; i < framesToProcess; i++) {
+      if (session.isRebuffering) {
+        const minimumBytes = FRAME_SIZE_BYTES * MUSIC_REBUFFER_FRAMES;
+        if (session.bufferedBytes < minimumBytes && !session.sourceEnded) {
+          break;
+        }
+        session.isRebuffering = false;
+      }
+
+      const flushed = flushBufferedFrameToRtcSource(session);
+      if (flushed) {
+        if (!session.hasAnnouncedPlaybackStart && session.current) {
+          const serverRoomId = getServerRoomIdFromVoiceRoomId(session.voiceRoomId);
+          sendSystemMessage(serverRoomId, `Caliniyor: ${session.current.title}`);
+          session.hasAnnouncedPlaybackStart = true;
+          emitMusicState(session, true);
+        }
+
+        didFlushAudio = true;
         session.sentSilenceFrames = 0;
-        session.isRebuffering = true;
-        return;
+      } else if (!session.sourceEnded) {
+        session.sentSilenceFrames += 1;
+
+        if (session.sentSilenceFrames >= 2) {
+          session.sentSilenceFrames = 0;
+          session.isRebuffering = true;
+          break;
+        }
+
+        pushSilenceFrame(session);
+      } else {
+        shouldStop = true;
+        break;
       }
 
-      pushSilenceFrame(session);
+      session.nextPlaybackDueAt += FRAME_DURATION_MS;
+    }
+
+    if (didFlushAudio) {
+      emitMusicState(session, false);
+    }
+
+    if (shouldStop) {
+      stopPlaybackTimer(session);
+      emitMusicState(session, true);
       return;
     }
 
-    stopPlaybackTimer(session);
-    emitMusicState(session, true);
-  }, FRAME_DURATION_MS);
+    const delay = Math.max(0, session.nextPlaybackDueAt - Date.now());
+    session.playbackInterval = setTimeout(tick, delay);
+  };
+
+  session.playbackInterval = setTimeout(tick, FRAME_DURATION_MS);
 };
 
 const playNextInSession = async (voiceRoomId) => {
