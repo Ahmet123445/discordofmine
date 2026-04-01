@@ -682,12 +682,12 @@ const ICE_SERVERS = parseIceServers();
   const startScreenShare = () => {
     if (!PeerClass || !localStream.current) return;
     
-    // 1080p 60fps High Performance Constraints
+    // Balanced defaults for smoother voice+music alongside screen share
     const constraints = {
       video: {
-        width: { ideal: 1920, max: 1920 },
-        height: { ideal: 1080, max: 1080 },
-        frameRate: { ideal: 60, max: 60 },
+        width: { ideal: 1280, max: 1280 },
+        height: { ideal: 720, max: 720 },
+        frameRate: { ideal: 30, max: 30 },
       },
       audio: {
         echoCancellation: true,

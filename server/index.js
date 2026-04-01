@@ -286,16 +286,25 @@ const io = new SocketIOServer(httpServer, {
   allowUpgrades: true
 });
 
-const FRAME_SIZE_BYTES = 1920;
-const FRAME_DURATION_MS = 10;
-const MUSIC_PREBUFFER_FRAMES = Number(process.env.MUSIC_PREBUFFER_FRAMES || 36);
-const MUSIC_REBUFFER_FRAMES = Number(process.env.MUSIC_REBUFFER_FRAMES || 20);
+const AUDIO_SAMPLE_RATE = 48000;
+const AUDIO_CHANNEL_COUNT = 2;
+const AUDIO_BITS_PER_SAMPLE = 16;
+const AUDIO_BYTES_PER_SAMPLE = AUDIO_BITS_PER_SAMPLE / 8;
+const parsedFrameDuration = Number(process.env.MUSIC_FRAME_DURATION_MS || 10);
+const FRAME_DURATION_MS = Number.isFinite(parsedFrameDuration) && parsedFrameDuration >= 10 && parsedFrameDuration <= 60
+  ? Math.round(parsedFrameDuration)
+  : 10;
+const FRAME_SAMPLES_PER_CHANNEL = Math.max(1, Math.round((AUDIO_SAMPLE_RATE * FRAME_DURATION_MS) / 1000));
+const FRAME_SIZE_BYTES = FRAME_SAMPLES_PER_CHANNEL * AUDIO_CHANNEL_COUNT * AUDIO_BYTES_PER_SAMPLE;
+const MUSIC_PREBUFFER_FRAMES = Number(process.env.MUSIC_PREBUFFER_FRAMES || 72);
+const MUSIC_REBUFFER_FRAMES = Number(process.env.MUSIC_REBUFFER_FRAMES || 40);
 const MUSIC_PREFETCH_TRACKS = Number(process.env.MUSIC_PREFETCH_TRACKS || 2);
 const MUSIC_PREFETCH_WAIT_TIMEOUT_MS = Number(process.env.MUSIC_PREFETCH_WAIT_TIMEOUT_MS || 2500);
-const MUSIC_CURRENT_PREFETCH_WAIT_TIMEOUT_MS = Number(process.env.MUSIC_CURRENT_PREFETCH_WAIT_TIMEOUT_MS || 25000);
+const MUSIC_CURRENT_PREFETCH_WAIT_TIMEOUT_MS = Number(process.env.MUSIC_CURRENT_PREFETCH_WAIT_TIMEOUT_MS || 45000);
 const MUSIC_STATE_EMIT_INTERVAL_MS = Number(process.env.MUSIC_STATE_EMIT_INTERVAL_MS || 1000);
 const MUSIC_CONTROL_COOLDOWN_MS = Number(process.env.MUSIC_CONTROL_COOLDOWN_MS || 140);
-const MUSIC_PREFERRED_AUDIO_EXT = (process.env.MUSIC_PREFERRED_AUDIO_EXT || "mp3").toLowerCase();
+const MUSIC_PREFERRED_AUDIO_EXT = (process.env.MUSIC_PREFERRED_AUDIO_EXT || "webm").toLowerCase();
+const ACCEPTED_PREFETCH_EXTENSIONS = new Set(["webm", "m4a", "opus", "mp3", "aac", "ogg", "wav", "flac", "mka"]);
 const MUSIC_BOT_USERNAME = "Music Bot";
 const musicSessions = new Map();
 const resolvedTrackCache = new Map();
@@ -530,8 +539,8 @@ const buildLocalPlaybackFfmpegArgs = ({ filePath, volume = 80, seekSec = null })
     "-dn",
     "-filter:a", `volume=${Math.max(0, volume) / 100}`,
     "-f", "s16le",
-    "-ar", "48000",
-    "-ac", "2",
+    "-ar", `${AUDIO_SAMPLE_RATE}`,
+    "-ac", `${AUDIO_CHANNEL_COUNT}`,
     "pipe:1"
   );
 
@@ -753,10 +762,7 @@ const isAcceptedPrefetchFile = (filePath = "") => {
   if (!filePath) return false;
   const ext = path.extname(filePath).replace(".", "").toLowerCase();
   if (!ext) return false;
-  if (MUSIC_PREFERRED_AUDIO_EXT === "mp3") {
-    return ext === "mp3";
-  }
-  return true;
+  return ACCEPTED_PREFETCH_EXTENSIONS.has(ext);
 };
 
 const findPrefetchedFilePath = (track) => {
@@ -1057,15 +1063,14 @@ const prefetchTrack = (track) => {
     "--no-playlist",
     "--no-progress",
     "--newline",
-    "--buffer-size", "64K",
+    "--buffer-size", "16M",
     "--http-chunk-size", "1M",
+    "--concurrent-fragments", "4",
     "--socket-timeout", "15",
+    "--extractor-retries", "5",
+    "--fragment-retries", "8",
     "-f",
-    "bestaudio/best",
-    "--extract-audio",
-    "--audio-format", "mp3",
-    "--audio-quality", "192K",
-    "--prefer-ffmpeg",
+    "bestaudio[acodec=opus]/bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio/best",
     "-o",
     getPrefetchOutputTemplate(track),
     "--print",
@@ -1382,10 +1387,10 @@ const pumpChunkToRtcSource = (session, chunk) => {
 const pushSilenceFrame = (session) => {
   session.audioSource.onData({
     samples: SILENCE_SAMPLES,
-    sampleRate: 48000,
-    bitsPerSample: 16,
-    channelCount: 2,
-    numberOfFrames: FRAME_SIZE_BYTES / 4
+    sampleRate: AUDIO_SAMPLE_RATE,
+    bitsPerSample: AUDIO_BITS_PER_SAMPLE,
+    channelCount: AUDIO_CHANNEL_COUNT,
+    numberOfFrames: FRAME_SAMPLES_PER_CHANNEL
   });
 };
 
@@ -1422,10 +1427,10 @@ const flushBufferedFrameToRtcSource = (session) => {
 
     session.audioSource.onData({
       samples,
-      sampleRate: 48000,
-      bitsPerSample: 16,
-      channelCount: 2,
-      numberOfFrames: FRAME_SIZE_BYTES / 4
+      sampleRate: AUDIO_SAMPLE_RATE,
+      bitsPerSample: AUDIO_BITS_PER_SAMPLE,
+      channelCount: AUDIO_CHANNEL_COUNT,
+      numberOfFrames: FRAME_SAMPLES_PER_CHANNEL
     });
 
     session.playedFrames += 1;
