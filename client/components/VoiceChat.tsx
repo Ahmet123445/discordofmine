@@ -1237,37 +1237,28 @@ const ICE_SERVERS = parseIceServers();
 }
 
 const AudioPlayer = ({ peer, volume = 1 }: { peer: any; volume?: number }) => {
+  const ref = useRef<HTMLAudioElement>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const gainNodeRef = useRef<GainNode | null>(null);
-  const sourceNodeRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const sourceNodeRef = useRef<MediaElementAudioSourceNode | null>(null);
 
-  const ensureAudioContext = useCallback(() => {
-    if (typeof window === "undefined") return null;
-    if (audioContextRef.current) return audioContextRef.current;
+  const ensureAudioGraph = useCallback(() => {
+    if (typeof window === "undefined" || !ref.current) return;
+    if (audioContextRef.current && gainNodeRef.current && sourceNodeRef.current) return;
 
     const audioContext = new AudioContext();
-    audioContextRef.current = audioContext;
-    return audioContext;
-  }, []);
-
-  const connectStream = useCallback((stream: MediaStream) => {
-    const audioContext = ensureAudioContext();
-    if (!audioContext) return;
-
-    sourceNodeRef.current?.disconnect();
-    gainNodeRef.current?.disconnect();
-
-    const sourceNode = audioContext.createMediaStreamSource(stream);
+    const sourceNode = audioContext.createMediaElementSource(ref.current);
     const gainNode = audioContext.createGain();
 
-    gainNode.gain.value = Math.max(0, Math.min(2, volume));
     sourceNode.connect(gainNode);
     gainNode.connect(audioContext.destination);
 
+    audioContextRef.current = audioContext;
     sourceNodeRef.current = sourceNode;
     gainNodeRef.current = gainNode;
-    audioContext.resume().catch(() => {});
-  }, [ensureAudioContext, volume]);
+    gainNode.gain.value = Math.max(0, Math.min(2, volume));
+    ref.current.volume = 0;
+  }, [volume]);
 
   useEffect(() => {
     const handler = (stream: MediaStream) => {
@@ -1278,7 +1269,12 @@ const AudioPlayer = ({ peer, volume = 1 }: { peer: any; volume?: number }) => {
       const audioTracks = stream.getAudioTracks();
       if (audioTracks.length > 0) {
         const audioStream = new MediaStream(audioTracks);
-        connectStream(audioStream);
+        if (ref.current) {
+          ensureAudioGraph();
+          ref.current.srcObject = audioStream;
+          audioContextRef.current?.resume().catch(() => {});
+          ref.current.play().catch(() => {});
+        }
       }
     };
     peer.on("stream", handler);
@@ -1297,16 +1293,20 @@ const AudioPlayer = ({ peer, volume = 1 }: { peer: any; volume?: number }) => {
       gainNodeRef.current = null;
       audioContextRef.current = null;
     };
-  }, [connectStream, peer]);
+  }, [ensureAudioGraph, peer]);
 
   useEffect(() => {
-    if (gainNodeRef.current) {
+    if (ref.current && gainNodeRef.current) {
       audioContextRef.current?.resume().catch(() => {});
       gainNodeRef.current.gain.value = Math.max(0, Math.min(2, volume));
     }
   }, [volume]);
 
-  return null;
+  return (
+    <div style={{ position: "absolute", top: 0, left: 0, width: 0, height: 0, overflow: "hidden", visibility: "hidden" }}>
+      <audio ref={ref} autoPlay playsInline controls={false} />
+    </div>
+  );
 };
 
 const VideoPlayer = ({ stream, name, onClose }: { stream: MediaStream; name: string; onClose: () => void }) => {
