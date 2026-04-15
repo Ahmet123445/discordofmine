@@ -1113,7 +1113,7 @@ const ICE_SERVERS = parseIceServers();
                   <input
                     type="range"
                     min="0"
-                    max="100"
+                    max="200"
                     step="1"
                     value={p.volume}
                     onChange={(e) => handleVolumeChange(p.peerID, parseInt(e.target.value))}
@@ -1132,7 +1132,7 @@ const ICE_SERVERS = parseIceServers();
         <AudioPlayer
           key={p.peerID}
           peer={p.peer}
-          volume={isDeafened ? 0 : p.volume / 100}
+          volume={isDeafened ? 0 : p.volume / 200}
         />
       ))}
 

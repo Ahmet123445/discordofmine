@@ -964,15 +964,10 @@ function ChatContent() {
                       return;
                     }
 
-                    if ((e.key === "Tab" || e.key === "Enter") && filteredCommands[activeCommandIndex]) {
-                      const trimmed = inputValue.trim();
-                      const hasArguments = trimmed.includes(" ");
-
-                      if (e.key === "Tab" || !hasArguments) {
-                        e.preventDefault();
-                        applyCommandSuggestion(activeCommandIndex);
-                        return;
-                      }
+                    if (e.key === "Tab" && filteredCommands[activeCommandIndex]) {
+                      e.preventDefault();
+                      applyCommandSuggestion(activeCommandIndex);
+                      return;
                     }
 
                     if (e.key === "Escape") {
