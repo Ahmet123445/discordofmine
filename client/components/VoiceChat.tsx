@@ -1132,7 +1132,7 @@ const ICE_SERVERS = parseIceServers();
         <AudioPlayer
           key={p.peerID}
           peer={p.peer}
-          volume={isDeafened ? 0 : p.volume / 200}
+          volume={isDeafened ? 0 : p.volume / 100}
         />
       ))}
 
@@ -1238,6 +1238,27 @@ const ICE_SERVERS = parseIceServers();
 
 const AudioPlayer = ({ peer, volume = 1 }: { peer: any; volume?: number }) => {
   const ref = useRef<HTMLAudioElement>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const gainNodeRef = useRef<GainNode | null>(null);
+  const sourceNodeRef = useRef<MediaElementAudioSourceNode | null>(null);
+
+  const ensureAudioGraph = useCallback(() => {
+    if (typeof window === "undefined" || !ref.current) return;
+    if (audioContextRef.current && gainNodeRef.current && sourceNodeRef.current) return;
+
+    const audioContext = new AudioContext();
+    const sourceNode = audioContext.createMediaElementSource(ref.current);
+    const gainNode = audioContext.createGain();
+
+    sourceNode.connect(gainNode);
+    gainNode.connect(audioContext.destination);
+
+    audioContextRef.current = audioContext;
+    sourceNodeRef.current = sourceNode;
+    gainNodeRef.current = gainNode;
+    gainNode.gain.value = Math.max(0, Math.min(2, volume));
+    ref.current.volume = 0;
+  }, [volume]);
 
   useEffect(() => {
     const handler = (stream: MediaStream) => {
@@ -1249,7 +1270,9 @@ const AudioPlayer = ({ peer, volume = 1 }: { peer: any; volume?: number }) => {
       if (audioTracks.length > 0) {
         const audioStream = new MediaStream(audioTracks);
         if (ref.current) {
+          ensureAudioGraph();
           ref.current.srcObject = audioStream;
+          audioContextRef.current?.resume().catch(() => {});
           ref.current.play().catch(() => {});
         }
       }
@@ -1263,12 +1286,19 @@ const AudioPlayer = ({ peer, volume = 1 }: { peer: any; volume?: number }) => {
     
     return () => {
       peer.off("stream", handler);
+      sourceNodeRef.current?.disconnect();
+      gainNodeRef.current?.disconnect();
+      audioContextRef.current?.close().catch(() => {});
+      sourceNodeRef.current = null;
+      gainNodeRef.current = null;
+      audioContextRef.current = null;
     };
-  }, [peer]);
+  }, [ensureAudioGraph, peer]);
 
   useEffect(() => {
-    if (ref.current) {
-      ref.current.volume = Math.max(0, Math.min(1, volume));
+    if (ref.current && gainNodeRef.current) {
+      audioContextRef.current?.resume().catch(() => {});
+      gainNodeRef.current.gain.value = Math.max(0, Math.min(2, volume));
     }
   }, [volume]);
 
