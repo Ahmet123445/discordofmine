@@ -2333,6 +2333,7 @@ io.on("connection", (socket) => {
           return;
         }
 
+        sendSystemMessage(roomId, `Bilinmeyen komut: ${trimmedContent}. Yardim icin /help yaz.`);
         return;
       }
 

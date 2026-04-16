@@ -103,6 +103,7 @@ function ChatContent() {
   const [musicState, setMusicState] = useState<MusicState | null>(null);
   const [musicControlError, setMusicControlError] = useState("");
   const [seekDragValue, setSeekDragValue] = useState<number | null>(null);
+  const [isDragActive, setIsDragActive] = useState(false);
   
   // Voice Settings State
   const [noiseThreshold, setNoiseThreshold] = useState(-42); // Default -42 dB
@@ -110,6 +111,7 @@ function ChatContent() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const copyFeedbackTimeoutRef = useRef<number | null>(null);
+  const dragDepthRef = useRef(0);
 
   const filteredCommands = useMemo(() => {
     const trimmed = inputValue.trimStart();
@@ -172,44 +174,6 @@ function ChatContent() {
     return () => window.removeEventListener("paste", handlePaste);
   }, []);
 
-  const uploadPastedImage = async () => {
-    if (!pasteFile || !socket || !user || !roomId) return;
-
-    setIsUploading(true);
-    const formData = new FormData();
-    const filename = `screenshot_${Date.now()}.png`;
-    formData.append("file", pasteFile, filename);
-
-    const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001";
-
-    try {
-      const res = await fetch(`${API_URL}/api/upload`, {
-        method: "POST",
-        body: formData,
-      });
-      const data = await res.json();
-
-      if (data.success) {
-        const fullUrl = `${API_URL}${data.url}`;
-
-        socket.emit("send-message", {
-          content: fullUrl,
-          user: user,
-          type: "file",
-          fileUrl: fullUrl,
-          fileName: data.filename,
-          roomId,
-        });
-      }
-    } catch (err) {
-      console.error("Upload failed", err);
-      alert("Upload failed");
-    } finally {
-      setIsUploading(false);
-      cancelPaste();
-    }
-  };
-
   const cancelPaste = () => {
     if (pastePreview) {
       URL.revokeObjectURL(pastePreview);
@@ -270,6 +234,78 @@ function ChatContent() {
     } catch (err) {
       console.error("Copy failed:", err);
       alert("Mesaj kopyalanamadi");
+    }
+  };
+
+  const playOutgoingMessageSound = () => {
+    if (typeof window === "undefined") return;
+
+    try {
+      const ctx = new AudioContext();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.type = "sine";
+      osc.frequency.setValueAtTime(880, ctx.currentTime);
+      osc.frequency.exponentialRampToValueAtTime(660, ctx.currentTime + 0.08);
+      gain.gain.setValueAtTime(0.08, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.12);
+      osc.start(ctx.currentTime);
+      osc.stop(ctx.currentTime + 0.12);
+      osc.onended = () => ctx.close();
+    } catch {}
+  };
+
+  const uploadAndSendFile = async (file: File, uploadName?: string) => {
+    if (!socket || !user || !roomId || isUploading) return false;
+
+    setIsUploading(true);
+    const formData = new FormData();
+    formData.append("file", file, uploadName || file.name);
+
+    const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001";
+
+    try {
+      const res = await fetch(`${API_URL}/api/upload`, {
+        method: "POST",
+        body: formData,
+      });
+      const data = await res.json();
+
+      if (data.success) {
+        const fullUrl = `${API_URL}${data.url}`;
+
+        socket.emit("send-message", {
+          content: fullUrl,
+          user,
+          type: "file",
+          fileUrl: fullUrl,
+          fileName: data.filename,
+          roomId,
+        });
+        return true;
+      }
+
+      alert(data.error || "Upload failed");
+      return false;
+    } catch (err) {
+      console.error("Upload failed", err);
+      alert("Upload failed");
+      return false;
+    } finally {
+      setIsUploading(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  };
+
+  const uploadPastedImage = async () => {
+    if (!pasteFile) return;
+
+    const filename = `screenshot_${Date.now()}.png`;
+    const success = await uploadAndSendFile(pasteFile, filename);
+    if (success) {
+      cancelPaste();
     }
   };
 
@@ -411,61 +447,83 @@ function ChatContent() {
     };
   }, [router, roomId]);
 
-  const handleSendMessage = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!inputValue.trim()) return;
+  const sendTextMessage = (content: string) => {
+    const trimmedContent = content.trim();
+    if (!trimmedContent) return false;
     
     if (!socket || !socket.connected) {
       console.error("Cannot send message: socket not connected");
       alert("Bağlantı kesildi, lütfen sayfayı yenileyin.");
-      return;
+      return false;
     }
     
     if (!user || !user.id || !user.username) {
       console.error("Cannot send message: user not set properly", user);
       alert("Kullanıcı bilgisi bulunamadı, lütfen tekrar giriş yapın.");
-      return;
+      return false;
     }
     
     if (!roomId) {
       console.error("Cannot send message: roomId not set");
-      return;
+      return false;
     }
 
-    // Ensure user.id is a number
     const messageUser = {
       id: Number(user.id),
       username: user.username
     };
 
-    console.log("Sending message:", { content: inputValue, user: messageUser, roomId });
+    console.log("Sending message:", { content: trimmedContent, user: messageUser, roomId });
     socket.emit("send-message", {
-      content: inputValue,
+      content: trimmedContent,
       user: messageUser,
       type: "text",
       roomId,
     });
 
-    // Mesaj gönderme sesi (Web Audio API)
-    if (typeof window !== "undefined") {
-      try {
-        const ctx = new AudioContext();
-        const osc = ctx.createOscillator();
-        const gain = ctx.createGain();
-        osc.connect(gain);
-        gain.connect(ctx.destination);
-        osc.type = "sine";
-        osc.frequency.setValueAtTime(880, ctx.currentTime);
-        osc.frequency.exponentialRampToValueAtTime(660, ctx.currentTime + 0.08);
-        gain.gain.setValueAtTime(0.08, ctx.currentTime);
-        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.12);
-        osc.start(ctx.currentTime);
-        osc.stop(ctx.currentTime + 0.12);
-        osc.onended = () => ctx.close();
-      } catch {}
+    playOutgoingMessageSound();
+    setInputValue("");
+    return true;
+  };
+
+  const resolveCommandSubmission = () => {
+    const trimmed = inputValue.trim();
+    if (!trimmed || !showCommandSuggestions) return trimmed;
+
+    const [commandPart] = trimmed.split(/\s+/, 1);
+    const selected = filteredCommands[activeCommandIndex];
+    if (!selected || !commandPart.startsWith("/")) return trimmed;
+
+    const hasArguments = trimmed.length > commandPart.length;
+    if (commandPart === selected.command || hasArguments) {
+      return trimmed;
     }
 
-    setInputValue("");
+    if (selected.usage.includes("<")) {
+      setInputValue(`${selected.command} `);
+      return null;
+    }
+
+    return selected.command;
+  };
+
+  const submitComposer = async () => {
+    if (isUploading) return;
+
+    if (pasteFile) {
+      await uploadPastedImage();
+      return;
+    }
+
+    const resolvedText = resolveCommandSubmission();
+    if (!resolvedText) return;
+
+    sendTextMessage(resolvedText);
+  };
+
+  const handleSendMessage = async (e: React.FormEvent) => {
+    e.preventDefault();
+    await submitComposer();
   };
 
   const applyCommandSuggestion = (index: number) => {
@@ -479,40 +537,55 @@ function ChatContent() {
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (!file || !socket || !user || !roomId) return;
+    if (!file) return;
 
-    setIsUploading(true);
-    const formData = new FormData();
-    formData.append("file", file);
+    cancelPaste();
+    await uploadAndSendFile(file);
+  };
 
-    const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001";
+  const handleComposerDragEnter = (e: React.DragEvent<HTMLFormElement>) => {
+    if (!Array.from(e.dataTransfer.types || []).includes("Files")) return;
 
-    try {
-      const res = await fetch(`${API_URL}/api/upload`, {
-        method: "POST",
-        body: formData,
-      });
-      const data = await res.json();
+    e.preventDefault();
+    dragDepthRef.current += 1;
+    setIsDragActive(true);
+  };
 
-      if (data.success) {
-        const fullUrl = `${API_URL}${data.url}`;
+  const handleComposerDragOver = (e: React.DragEvent<HTMLFormElement>) => {
+    if (!Array.from(e.dataTransfer.types || []).includes("Files")) return;
 
-        socket.emit("send-message", {
-          content: fullUrl,
-          user: user,
-          type: "file",
-          fileUrl: fullUrl,
-          fileName: data.filename,
-          roomId,
-        });
-      }
-    } catch (err) {
-      console.error("Upload failed", err);
-      alert("Upload failed");
-    } finally {
-      setIsUploading(false);
-      if (fileInputRef.current) fileInputRef.current.value = "";
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "copy";
+    if (!isDragActive) {
+      setIsDragActive(true);
     }
+  };
+
+  const handleComposerDragLeave = (e: React.DragEvent<HTMLFormElement>) => {
+    if (!Array.from(e.dataTransfer.types || []).includes("Files")) return;
+
+    e.preventDefault();
+    dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+    if (dragDepthRef.current === 0) {
+      setIsDragActive(false);
+    }
+  };
+
+  const handleComposerDrop = async (e: React.DragEvent<HTMLFormElement>) => {
+    if (!Array.from(e.dataTransfer.types || []).includes("Files")) return;
+
+    e.preventDefault();
+    dragDepthRef.current = 0;
+    setIsDragActive(false);
+
+    const file = Array.from(e.dataTransfer.files).find((item) => item.type.startsWith("image/"));
+    if (!file) {
+      alert("Surukle-birak ile simdilik sadece resim gonderebilirsin.");
+      return;
+    }
+
+    cancelPaste();
+    await uploadAndSendFile(file);
   };
 
   const updateUsername = async () => {
@@ -906,7 +979,21 @@ function ChatContent() {
               </div>
             </div>
           )}
-          <form onSubmit={handleSendMessage} className="flex items-center gap-3">
+          <form
+            onSubmit={handleSendMessage}
+            onDragEnter={handleComposerDragEnter}
+            onDragOver={handleComposerDragOver}
+            onDragLeave={handleComposerDragLeave}
+            onDrop={handleComposerDrop}
+            className={`relative flex items-center gap-3 rounded-2xl transition-all ${
+              isDragActive ? "bg-indigo-500/10 ring-2 ring-indigo-400/60 ring-offset-2 ring-offset-zinc-900" : ""
+            }`}
+          >
+            {isDragActive && (
+              <div className="pointer-events-none absolute inset-0 flex items-center justify-center rounded-2xl border border-dashed border-indigo-400/70 bg-zinc-950/90 text-xs font-semibold uppercase tracking-[0.2em] text-indigo-200">
+                Resmi birak, hemen gonderelim
+              </div>
+            )}
             <button
               type="button"
               onClick={() => fileInputRef.current?.click()}
@@ -980,7 +1067,13 @@ function ChatContent() {
 
                   if (e.key === "Enter" && !e.shiftKey && inputValue.trim()) {
                     e.preventDefault();
-                    handleSendMessage(e as unknown as React.FormEvent);
+                    void submitComposer();
+                    return;
+                  }
+
+                  if (e.key === "Enter" && pasteFile) {
+                    e.preventDefault();
+                    void submitComposer();
                   }
                 }}
                 placeholder={

@@ -1132,7 +1132,7 @@ const ICE_SERVERS = parseIceServers();
         <AudioPlayer
           key={p.peerID}
           peer={p.peer}
-          volume={isDeafened ? 0 : p.volume / 200}
+          volume={isDeafened ? 0 : p.volume / 100}
         />
       ))}
 
@@ -1237,7 +1237,13 @@ const ICE_SERVERS = parseIceServers();
 }
 
 const AudioPlayer = ({ peer, volume = 1 }: { peer: any; volume?: number }) => {
-  const ref = useRef<HTMLAudioElement>(null);
+  const [audioStream, setAudioStream] = useState<MediaStream | null>(null);
+  const audioRef = useRef<HTMLAudioElement>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const sourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const gainRef = useRef<GainNode | null>(null);
+  const playbackModeRef = useRef<"gain" | "fallback">("gain");
+  const volumeRef = useRef(volume);
 
   useEffect(() => {
     const handler = (stream: MediaStream) => {
@@ -1247,11 +1253,7 @@ const AudioPlayer = ({ peer, volume = 1 }: { peer: any; volume?: number }) => {
 
       const audioTracks = stream.getAudioTracks();
       if (audioTracks.length > 0) {
-        const audioStream = new MediaStream(audioTracks);
-        if (ref.current) {
-          ref.current.srcObject = audioStream;
-          ref.current.play().catch(() => {});
-        }
+        setAudioStream(new MediaStream(audioTracks));
       }
     };
     peer.on("stream", handler);
@@ -1267,14 +1269,97 @@ const AudioPlayer = ({ peer, volume = 1 }: { peer: any; volume?: number }) => {
   }, [peer]);
 
   useEffect(() => {
-    if (ref.current) {
-      ref.current.volume = Math.max(0, Math.min(1, volume));
+    volumeRef.current = volume;
+    const nextGain = Math.max(0, Math.min(2, volume));
+
+    if (playbackModeRef.current === "gain" && gainRef.current && audioContextRef.current) {
+      gainRef.current.gain.setTargetAtTime(nextGain, audioContextRef.current.currentTime, 0.02);
+      audioContextRef.current.resume().catch(() => {});
+      return;
+    }
+
+    if (audioRef.current) {
+      audioRef.current.volume = Math.max(0, Math.min(1, nextGain));
     }
   }, [volume]);
 
+  useEffect(() => {
+    const fallbackAudio = audioRef.current;
+
+    if (fallbackAudio) {
+      fallbackAudio.pause();
+      fallbackAudio.srcObject = null;
+    }
+
+    if (audioContextRef.current) {
+      sourceRef.current?.disconnect();
+      gainRef.current?.disconnect();
+      void audioContextRef.current.close().catch(() => {});
+      audioContextRef.current = null;
+      sourceRef.current = null;
+      gainRef.current = null;
+    }
+
+    if (!audioStream || typeof window === "undefined") {
+      return;
+    }
+
+    const AudioContextCtor = window.AudioContext || (window as any).webkitAudioContext;
+    const nextGain = Math.max(0, Math.min(2, volumeRef.current));
+
+    if (!AudioContextCtor) {
+      playbackModeRef.current = "fallback";
+      if (fallbackAudio) {
+        fallbackAudio.srcObject = audioStream;
+        fallbackAudio.volume = Math.max(0, Math.min(1, nextGain));
+        fallbackAudio.play().catch(() => {});
+      }
+      return;
+    }
+
+    try {
+      const ctx = new AudioContextCtor({ latencyHint: "interactive" });
+      const source = ctx.createMediaStreamSource(audioStream);
+      const gain = ctx.createGain();
+
+      gain.gain.setValueAtTime(nextGain, ctx.currentTime);
+      source.connect(gain).connect(ctx.destination);
+      ctx.resume().catch(() => {});
+
+      playbackModeRef.current = "gain";
+      audioContextRef.current = ctx;
+      sourceRef.current = source;
+      gainRef.current = gain;
+    } catch (error) {
+      console.error("[VoiceChat] Playback gain setup failed, using fallback volume:", error);
+      playbackModeRef.current = "fallback";
+      if (fallbackAudio) {
+        fallbackAudio.srcObject = audioStream;
+        fallbackAudio.volume = Math.max(0, Math.min(1, nextGain));
+        fallbackAudio.play().catch(() => {});
+      }
+    }
+
+    return () => {
+      if (fallbackAudio) {
+        fallbackAudio.pause();
+        fallbackAudio.srcObject = null;
+      }
+
+      if (audioContextRef.current) {
+        sourceRef.current?.disconnect();
+        gainRef.current?.disconnect();
+        void audioContextRef.current.close().catch(() => {});
+        audioContextRef.current = null;
+        sourceRef.current = null;
+        gainRef.current = null;
+      }
+    };
+  }, [audioStream]);
+
   return (
     <div style={{ position: "absolute", top: 0, left: 0, width: 0, height: 0, overflow: "hidden", visibility: "hidden" }}>
-      <audio ref={ref} autoPlay playsInline controls={false} />
+      <audio ref={audioRef} autoPlay playsInline controls={false} />
     </div>
   );
 };

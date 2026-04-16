@@ -4,7 +4,7 @@
 
 ## Current Status
 - **Phase:** Production (Live)
-- **Last Updated:** 2026-03-28
+- **Last Updated:** 2026-04-16
 - **App Name:** V A T A N A S K I (renamed from DiscordOfMine)
 
 ## Deployment URLs
@@ -37,7 +37,7 @@
 - [x] Message Deletion (own messages only)
 - [x] Custom Keybinds (mute/deafen, saved to localStorage)
 - [x] Voice Room Creation (add custom channels)
-- [x] Per-user Volume Sliders (0-100%)
+- [x] Per-user Volume Sliders (0-200% playback boost)
 - [x] Screen Share Re-watch (hide instead of stop)
 - [x] All Rooms User Display (see users in other voice rooms)
 - [x] Screen Share with Audio
@@ -63,6 +63,12 @@
 - Removed speaking detection (was causing audio crackling)
 - Fixed chat messages not appearing
 - Simplified AudioPlayer component
+
+### Working Tree (2026-04-16)
+- Chat composer now routes Enter, paste-preview send, file upload, and drag-drop image send through a unified send flow
+- Slash commands like `/skip` now resolve from the active suggestion on Enter, while argument-based commands autocomplete safely
+- Unknown slash commands now return a visible system hint instead of failing silently
+- Remote user playback volume now uses a real gain stage up to 200% without changing the microphone noise suppression / limiter chain
 
 ### Commit: 1b8f92c
 - Enter key message sending
