@@ -316,6 +316,9 @@ const ytDlpCookiesPath = process.env.YTDLP_COOKIES_PATH || path.join(process.cwd
 const ytDlpCookiesFromBrowser = (process.env.YTDLP_COOKIES_FROM_BROWSER || "chrome").trim();
 const ytDlpCookiesBrowserProfile = (process.env.YTDLP_COOKIES_BROWSER_PROFILE || "Profile 2").trim();
 const ytDlpExtractorArgs = (process.env.YTDLP_EXTRACTOR_ARGS || "youtube:player_client=default,tv_simply").trim();
+const ytDlpJsRuntimes = (process.env.YTDLP_JS_RUNTIMES || "node").trim();
+const ytDlpPluginDirs = (process.env.YTDLP_PLUGIN_DIRS || "").trim();
+const ytDlpPotProviderUrl = (process.env.YTDLP_POT_PROVIDER_URL || "").trim();
 const musicCacheDir = process.env.MUSIC_CACHE_DIR || path.join(process.cwd(), "music-cache");
 const MUSIC_CACHE_TTL_MS = Number(process.env.MUSIC_CACHE_TTL_MS || 24 * 60 * 60 * 1000);
 const MUSIC_CACHE_MAX_FILES = Number(process.env.MUSIC_CACHE_MAX_FILES || 120);
@@ -486,6 +489,12 @@ const getYtDlpCookieStrategies = () => {
 };
 
 const getYtDlpBaseArgs = (cookieArgs = []) => {
+  let extractorArgs = ytDlpExtractorArgs;
+  if (ytDlpPotProviderUrl && !/youtubepot-bgutilhttp:/i.test(extractorArgs)) {
+    const separator = extractorArgs && !extractorArgs.endsWith(";") ? ";" : "";
+    extractorArgs = `${extractorArgs}${separator}youtubepot-bgutilhttp:base_url=${ytDlpPotProviderUrl}`;
+  }
+
   const args = [
     "--no-warnings",
     "--user-agent",
@@ -497,12 +506,18 @@ const getYtDlpBaseArgs = (cookieArgs = []) => {
     "--add-header",
     "Sec-Fetch-Mode:navigate",
     "--js-runtimes",
-    "node",
+    ytDlpJsRuntimes,
     "--remote-components",
     "ejs:github",
     "--extractor-args",
-    ytDlpExtractorArgs
+    extractorArgs
   ];
+
+  if (ytDlpPluginDirs) {
+    for (const dir of ytDlpPluginDirs.split(",").map((item) => item.trim()).filter(Boolean)) {
+      args.push("--plugin-dirs", dir);
+    }
+  }
 
   return [...args, ...cookieArgs];
 };
