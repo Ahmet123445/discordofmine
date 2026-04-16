@@ -1239,20 +1239,71 @@ const ICE_SERVERS = parseIceServers();
 const AudioPlayer = ({ peer, volume = 1 }: { peer: any; volume?: number }) => {
   const [audioStream, setAudioStream] = useState<MediaStream | null>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
-  const boostContextRef = useRef<AudioContext | null>(null);
-  const boostSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
-  const boostGainRef = useRef<GainNode | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const mediaSourceRef = useRef<MediaElementAudioSourceNode | null>(null);
+  const gainRef = useRef<GainNode | null>(null);
+  const limiterRef = useRef<DynamicsCompressorNode | null>(null);
   const volumeRef = useRef(volume);
+  const webAudioDisabledRef = useRef(false);
 
-  const teardownBoost = () => {
-    boostSourceRef.current?.disconnect();
-    boostGainRef.current?.disconnect();
-    boostSourceRef.current = null;
-    boostGainRef.current = null;
+  const teardownAudioGraph = () => {
+    mediaSourceRef.current?.disconnect();
+    gainRef.current?.disconnect();
+    limiterRef.current?.disconnect();
+    mediaSourceRef.current = null;
+    gainRef.current = null;
+    limiterRef.current = null;
 
-    if (boostContextRef.current) {
-      void boostContextRef.current.close().catch(() => {});
-      boostContextRef.current = null;
+    if (audioContextRef.current) {
+      void audioContextRef.current.close().catch(() => {});
+      audioContextRef.current = null;
+    }
+  };
+
+  const ensureAudioGraph = () => {
+    if (typeof window === "undefined" || webAudioDisabledRef.current) {
+      return false;
+    }
+
+    if (audioContextRef.current && gainRef.current) {
+      return true;
+    }
+
+    const audioEl = audioRef.current;
+    if (!audioEl) {
+      return false;
+    }
+
+    const AudioContextCtor = window.AudioContext || (window as Window & typeof globalThis & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (!AudioContextCtor) {
+      webAudioDisabledRef.current = true;
+      return false;
+    }
+
+    try {
+      const ctx = new AudioContextCtor({ latencyHint: "interactive" });
+      const source = ctx.createMediaElementSource(audioEl);
+      const gain = ctx.createGain();
+      const limiter = ctx.createDynamicsCompressor();
+
+      limiter.threshold.setValueAtTime(-5, ctx.currentTime);
+      limiter.knee.setValueAtTime(6, ctx.currentTime);
+      limiter.ratio.setValueAtTime(12, ctx.currentTime);
+      limiter.attack.setValueAtTime(0.003, ctx.currentTime);
+      limiter.release.setValueAtTime(0.12, ctx.currentTime);
+
+      source.connect(gain).connect(limiter).connect(ctx.destination);
+
+      audioContextRef.current = ctx;
+      mediaSourceRef.current = source;
+      gainRef.current = gain;
+      limiterRef.current = limiter;
+      return true;
+    } catch (error) {
+      console.error("[VoiceChat] Web Audio playback chain failed, using direct audio fallback:", error);
+      webAudioDisabledRef.current = true;
+      teardownAudioGraph();
+      return false;
     }
   };
 
@@ -1281,10 +1332,24 @@ const AudioPlayer = ({ peer, volume = 1 }: { peer: any; volume?: number }) => {
 
   useEffect(() => {
     volumeRef.current = volume;
+    const nextGain = Math.max(0, Math.min(2, volume));
+
+    if (gainRef.current && audioContextRef.current) {
+      gainRef.current.gain.setTargetAtTime(nextGain, audioContextRef.current.currentTime, 0.02);
+      audioContextRef.current.resume().catch(() => {});
+      return;
+    }
+
     if (audioRef.current) {
-      audioRef.current.volume = Math.max(0, Math.min(1, volume));
+      audioRef.current.volume = Math.max(0, Math.min(1, nextGain));
     }
   }, [volume]);
+
+  useEffect(() => {
+    return () => {
+      teardownAudioGraph();
+    };
+  }, []);
 
   useEffect(() => {
     const audioEl = audioRef.current;
@@ -1296,66 +1361,27 @@ const AudioPlayer = ({ peer, volume = 1 }: { peer: any; volume?: number }) => {
     if (!audioStream) {
       audioEl.pause();
       audioEl.srcObject = null;
-      teardownBoost();
       return;
     }
 
     audioEl.srcObject = audioStream;
-    audioEl.volume = Math.max(0, Math.min(1, volumeRef.current));
+    const nextGain = Math.max(0, Math.min(2, volumeRef.current));
+
+    if (ensureAudioGraph() && gainRef.current && audioContextRef.current) {
+      audioEl.volume = 1;
+      gainRef.current.gain.setValueAtTime(nextGain, audioContextRef.current.currentTime);
+      audioContextRef.current.resume().catch(() => {});
+    } else {
+      audioEl.volume = Math.max(0, Math.min(1, nextGain));
+    }
+
     audioEl.play().catch(() => {});
 
     return () => {
       audioEl.pause();
       audioEl.srcObject = null;
-      teardownBoost();
     };
   }, [audioStream]);
-
-  useEffect(() => {
-    if (!audioStream || typeof window === "undefined") {
-      teardownBoost();
-      return;
-    }
-
-    const boostAmount = Math.max(0, Math.min(1, volume - 1));
-    if (boostAmount === 0) {
-      teardownBoost();
-      return;
-    }
-
-    const AudioContextCtor = window.AudioContext || (window as Window & typeof globalThis & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
-    if (!AudioContextCtor) {
-      teardownBoost();
-      return;
-    }
-
-    try {
-      if (!boostContextRef.current) {
-        const ctx = new AudioContextCtor({ latencyHint: "interactive" });
-        const source = ctx.createMediaStreamSource(audioStream);
-        const gain = ctx.createGain();
-        source.connect(gain).connect(ctx.destination);
-
-        boostContextRef.current = ctx;
-        boostSourceRef.current = source;
-        boostGainRef.current = gain;
-      }
-
-      if (boostContextRef.current && boostGainRef.current) {
-        boostGainRef.current.gain.setTargetAtTime(boostAmount, boostContextRef.current.currentTime, 0.02);
-        boostContextRef.current.resume().catch(() => {});
-      }
-    } catch (error) {
-      console.error("[VoiceChat] Optional playback boost failed, keeping base audio only:", error);
-      teardownBoost();
-    }
-
-    return () => {
-      if (volume <= 1) {
-        teardownBoost();
-      }
-    };
-  }, [audioStream, volume]);
 
   return (
     <div style={{ position: "absolute", top: 0, left: 0, width: 0, height: 0, overflow: "hidden", visibility: "hidden" }}>
