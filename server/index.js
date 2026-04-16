@@ -305,7 +305,7 @@ const MUSIC_MAX_CATCHUP_FRAMES = Math.max(1, Number(process.env.MUSIC_MAX_CATCHU
 const MUSIC_STATE_EMIT_INTERVAL_MS = Number(process.env.MUSIC_STATE_EMIT_INTERVAL_MS || 1000);
 const MUSIC_CONTROL_COOLDOWN_MS = Number(process.env.MUSIC_CONTROL_COOLDOWN_MS || 140);
 const MUSIC_PREFERRED_AUDIO_EXT = (process.env.MUSIC_PREFERRED_AUDIO_EXT || "webm").toLowerCase();
-const ACCEPTED_PREFETCH_EXTENSIONS = new Set(["webm", "m4a", "opus", "mp3", "aac", "ogg", "wav", "flac", "mka"]);
+const ACCEPTED_PREFETCH_EXTENSIONS = new Set(["webm", "m4a", "opus", "mp3", "aac", "ogg", "wav", "flac", "mka", "mp4"]);
 const MUSIC_BOT_USERNAME = "Music Bot";
 const musicSessions = new Map();
 const resolvedTrackCache = new Map();
@@ -313,11 +313,15 @@ const prefetchInFlightByCacheKey = new Map();
 const TRACK_CACHE_TTL_MS = 10 * 60 * 1000;
 const ytDlpBinary = process.env.YTDLP_PATH || "yt-dlp";
 const ytDlpCookiesPath = process.env.YTDLP_COOKIES_PATH || path.join(process.cwd(), "yt-cookies.txt");
+const ytDlpCookiesFromBrowser = (process.env.YTDLP_COOKIES_FROM_BROWSER || "chrome").trim();
+const ytDlpCookiesBrowserProfile = (process.env.YTDLP_COOKIES_BROWSER_PROFILE || "Profile 2").trim();
+const ytDlpExtractorArgs = (process.env.YTDLP_EXTRACTOR_ARGS || "youtube:player_client=default,tv_simply").trim();
 const musicCacheDir = process.env.MUSIC_CACHE_DIR || path.join(process.cwd(), "music-cache");
 const MUSIC_CACHE_TTL_MS = Number(process.env.MUSIC_CACHE_TTL_MS || 24 * 60 * 60 * 1000);
 const MUSIC_CACHE_MAX_FILES = Number(process.env.MUSIC_CACHE_MAX_FILES || 120);
 const MUSIC_CACHE_MAX_BYTES = Number(process.env.MUSIC_CACHE_MAX_BYTES || 2 * 1024 * 1024 * 1024);
 const hasYtDlpCookies = () => fs.existsSync(ytDlpCookiesPath);
+const hasYtDlpBrowserCookies = () => Boolean(ytDlpCookiesFromBrowser);
 const SILENCE_SAMPLES = new Int16Array(FRAME_SIZE_BYTES / 2);
 
 fs.mkdirSync(musicCacheDir, { recursive: true });
@@ -429,7 +433,59 @@ const parseIceServers = () => {
 
 const ICE_SERVERS = parseIceServers();
 
-const getYtDlpBaseArgs = () => {
+const getYtDlpBrowserCookieArg = () => {
+  if (!hasYtDlpBrowserCookies()) return "";
+  return ytDlpCookiesBrowserProfile
+    ? `${ytDlpCookiesFromBrowser}:${ytDlpCookiesBrowserProfile}`
+    : ytDlpCookiesFromBrowser;
+};
+
+const describeYtDlpCookieStrategy = (strategy) => {
+  if (!strategy) {
+    return "unknown";
+  }
+
+  if (strategy.label === "browser-cookies") {
+    return `browser-cookies (${getYtDlpBrowserCookieArg()})`;
+  }
+
+  if (strategy.label === "cookie-file") {
+    return `cookie-file (${ytDlpCookiesPath})`;
+  }
+
+  return "no-cookies";
+};
+
+const logYtDlpCookieStrategy = (scope, phase, strategy, details = "") => {
+  const suffix = details ? ` - ${details}` : "";
+  console.log(`[MusicBot][yt-dlp:${scope}] ${phase}: ${describeYtDlpCookieStrategy(strategy)}${suffix}`);
+};
+
+const getYtDlpCookieStrategies = () => {
+  const strategies = [{
+    label: "no-cookies",
+    args: []
+  }];
+
+  const browserCookieArg = getYtDlpBrowserCookieArg();
+  if (browserCookieArg) {
+    strategies.push({
+      label: "browser-cookies",
+      args: ["--cookies-from-browser", browserCookieArg]
+    });
+  }
+
+  if (hasYtDlpCookies()) {
+    strategies.push({
+      label: "cookie-file",
+      args: ["--cookies", ytDlpCookiesPath]
+    });
+  }
+
+  return strategies;
+};
+
+const getYtDlpBaseArgs = (cookieArgs = []) => {
   const args = [
     "--no-warnings",
     "--user-agent",
@@ -445,18 +501,86 @@ const getYtDlpBaseArgs = () => {
     "--remote-components",
     "ejs:github",
     "--extractor-args",
-    "youtube:player_client=android,web_safari,tv"
+    ytDlpExtractorArgs
   ];
 
-  if (fs.existsSync(ytDlpCookiesPath)) {
-    args.push("--cookies", ytDlpCookiesPath);
-  }
-
-  return args;
+  return [...args, ...cookieArgs];
 };
 
 const isYouTubeBotCheckError = (msg = "") => {
   return /sign in to confirm you're not a bot|not a bot/i.test(msg);
+};
+
+const isYtDlpFormatAvailabilityError = (msg = "") => {
+  return /requested format is not available/i.test(msg);
+};
+
+const isYtDlpCookieError = (msg = "") => {
+  return /cookies?|cookie database/i.test(msg) && /(load|parse|format|decrypt|extract|browser|copy|database|sqlite|locked)/i.test(msg);
+};
+
+const shouldRetryYtDlpWithNextStrategy = (msg = "", strategyIndex = 0, strategyCount = 1) => {
+  if (strategyIndex >= strategyCount - 1) {
+    return false;
+  }
+
+  return isYouTubeBotCheckError(msg) || isYtDlpCookieError(msg) || isYtDlpFormatAvailabilityError(msg);
+};
+
+const runYtDlpCommand = (args, { onSpawn, onStdout, onStderr } = {}) => {
+  return new Promise((resolve, reject) => {
+    const proc = spawn(ytDlpBinary, args, {
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+
+    if (typeof onSpawn === "function") {
+      onSpawn(proc);
+    }
+
+    let stdout = "";
+    let stderr = "";
+
+    proc.stdout.on("data", (chunk) => {
+      const text = chunk.toString();
+      stdout += text;
+      if (typeof onStdout === "function") {
+        onStdout(text);
+      }
+    });
+
+    proc.stderr.on("data", (chunk) => {
+      const text = chunk.toString();
+      stderr += text;
+      if (typeof onStderr === "function") {
+        onStderr(text);
+      }
+    });
+
+    proc.on("error", (err) => {
+      if (typeof onSpawn === "function") {
+        onSpawn(null);
+      }
+
+      if (err.code === "ENOENT") {
+        reject(new Error("yt-dlp bulunamadi. Sunucuda yt-dlp kurulumu gerekli."));
+        return;
+      }
+
+      reject(err);
+    });
+
+    proc.on("close", (code) => {
+      if (typeof onSpawn === "function") {
+        onSpawn(null);
+      }
+
+      resolve({
+        code,
+        stdout,
+        stderr: stderr.trim()
+      });
+    });
+  });
 };
 
 const buildMusicBotId = (voiceRoomId) => `music-bot:${voiceRoomId}`;
@@ -855,44 +979,48 @@ const disposeTrack = (track) => {
 };
 
 const runYtDlpJson = (input, extraArgs = []) => {
-  return new Promise((resolve, reject) => {
-    const args = [...getYtDlpBaseArgs(), ...extraArgs, "--skip-download", "--dump-single-json", input];
-    const proc = spawn(ytDlpBinary, args, {
-      stdio: ["ignore", "pipe", "pipe"]
-    });
+  return (async () => {
+    const strategies = getYtDlpCookieStrategies();
+    let lastError = null;
+    const scope = extraArgs.includes("--flat-playlist") ? "metadata-search" : "metadata";
 
-    let stdout = "";
-    let stderr = "";
-
-    proc.stdout.on("data", (chunk) => {
-      stdout += chunk.toString();
-    });
-
-    proc.stderr.on("data", (chunk) => {
-      stderr += chunk.toString();
-    });
-
-    proc.on("error", (err) => {
-      if (err.code === "ENOENT") {
-        reject(new Error("yt-dlp bulunamadi. Sunucuda yt-dlp kurulumu gerekli."));
-        return;
-      }
-      reject(err);
-    });
-
-    proc.on("close", (code) => {
-      if (code !== 0) {
-        reject(new Error(stderr.trim() || `yt-dlp komutu ${code} koduyla sonlandi.`));
-        return;
-      }
+    for (let i = 0; i < strategies.length; i += 1) {
+      const strategy = strategies[i];
 
       try {
-        resolve(JSON.parse(stdout));
-      } catch {
-        reject(new Error("yt-dlp JSON cikti parse edilemedi."));
+        logYtDlpCookieStrategy(scope, "trying", strategy, input);
+        const result = await runYtDlpCommand([
+          ...getYtDlpBaseArgs(strategy.args),
+          ...extraArgs,
+          "--skip-download",
+          "--dump-single-json",
+          input
+        ]);
+
+        if (result.code !== 0) {
+          throw new Error(result.stderr || `yt-dlp komutu ${result.code} koduyla sonlandi.`);
+        }
+
+        try {
+          logYtDlpCookieStrategy(scope, "success", strategy, input);
+          return JSON.parse(result.stdout);
+        } catch {
+          throw new Error("yt-dlp JSON cikti parse edilemedi.");
+        }
+      } catch (err) {
+        lastError = err;
+
+        if (shouldRetryYtDlpWithNextStrategy(err?.message || "", i, strategies.length)) {
+          console.warn(`[MusicBot][yt-dlp:${scope}] retrying after ${describeYtDlpCookieStrategy(strategy)}: ${err.message}`);
+          continue;
+        }
+
+        throw err;
       }
-    });
-  });
+    }
+
+    throw lastError || new Error("yt-dlp komutu basarisiz oldu.");
+  })();
 };
 
 const normalizeYtDlpTrack = (entry) => {
@@ -1061,8 +1189,7 @@ const prefetchTrack = (track) => {
   track.prefetchStatus = "prefetching";
   track.prefetchError = null;
 
-  const ytDlpArgs = [
-    ...getYtDlpBaseArgs(),
+  const basePrefetchArgs = [
     "--no-playlist",
     "--no-progress",
     "--newline",
@@ -1081,56 +1208,65 @@ const prefetchTrack = (track) => {
     track.url
   ];
 
-  const proc = spawn(ytDlpBinary, ytDlpArgs, {
-    stdio: ["ignore", "pipe", "pipe"]
-  });
+  const sharedPromise = (async () => {
+    const strategies = getYtDlpCookieStrategies();
+    let lastError = null;
 
-  track.prefetchProcess = proc;
+    for (let i = 0; i < strategies.length; i += 1) {
+      const strategy = strategies[i];
 
-  let stdout = "";
-  let stderr = "";
+      try {
+        logYtDlpCookieStrategy("prefetch", "trying", strategy, track.title);
+        const result = await runYtDlpCommand([
+          ...getYtDlpBaseArgs(strategy.args),
+          ...basePrefetchArgs
+        ], {
+          onSpawn: (proc) => {
+            track.prefetchProcess = proc;
+          },
+          onStderr: (text) => {
+            text
+              .split(/\r?\n/)
+              .map((line) => line.trim())
+              .filter(Boolean)
+              .forEach((msg) => {
+                console.error(`[MusicBot][prefetch:${track.title}]`, msg);
+              });
+          }
+        });
 
-  const sharedPromise = new Promise((resolve, reject) => {
-    proc.stdout.on("data", (chunk) => {
-      stdout += chunk.toString();
-    });
+        const printedPath = result.stdout
+          .split(/\r?\n/)
+          .map((line) => line.trim())
+          .filter(Boolean)
+          .pop();
 
-    proc.stderr.on("data", (chunk) => {
-      const msg = chunk.toString().trim();
-      if (!msg) return;
-      stderr += `${msg}\n`;
-      console.error(`[MusicBot][prefetch:${track.title}]`, msg);
-    });
+        const filePath = printedPath && fs.existsSync(printedPath) && isAcceptedPrefetchFile(printedPath)
+          ? printedPath
+          : findPrefetchedFilePath(track);
 
-    proc.on("error", (err) => {
-      track.prefetchProcess = null;
-      track.prefetchStatus = "failed";
-      track.prefetchError = err.message;
-      reject(err);
-    });
+        if (result.code === 0 && filePath) {
+          logYtDlpCookieStrategy("prefetch", "success", strategy, track.title);
+          return filePath;
+        }
 
-    proc.on("close", (code) => {
-      track.prefetchProcess = null;
+        cleanupTrackFile(track);
+        throw new Error(result.stderr || `yt-dlp prefetch ${result.code} koduyla sonlandi.`);
+      } catch (err) {
+        lastError = err;
+        cleanupTrackFile(track);
 
-      const printedPath = stdout
-        .split(/\r?\n/)
-        .map((line) => line.trim())
-        .filter(Boolean)
-        .pop();
+        if (shouldRetryYtDlpWithNextStrategy(err?.message || "", i, strategies.length)) {
+          console.warn(`[MusicBot][yt-dlp:prefetch] retrying after ${describeYtDlpCookieStrategy(strategy)}: ${err.message}`);
+          continue;
+        }
 
-      const filePath = printedPath && fs.existsSync(printedPath) && isAcceptedPrefetchFile(printedPath)
-        ? printedPath
-        : findPrefetchedFilePath(track);
-
-      if (code === 0 && filePath) {
-        resolve(filePath);
-        return;
+        throw err;
       }
+    }
 
-      cleanupTrackFile(track);
-      reject(new Error(stderr.trim() || `yt-dlp prefetch ${code} koduyla sonlandi.`));
-    });
-  }).finally(() => {
+    throw lastError || new Error("yt-dlp prefetch basarisiz oldu.");
+  })().finally(() => {
     if (prefetchInFlightByCacheKey.get(cacheKey) === sharedPromise) {
       prefetchInFlightByCacheKey.delete(cacheKey);
     }
@@ -1447,6 +1583,18 @@ const flushBufferedFrameToRtcSource = (session) => {
   }
 
   return false;
+};
+
+const getYtDlpCookieHint = () => {
+  if (hasYtDlpBrowserCookies()) {
+    return `Tarayici oturumu tercih ediliyor (${getYtDlpBrowserCookieArg()}). Chrome'da dogru hesap aktifse tekrar dene; statik cookie dosyasi sadece son care olarak kullaniliyor.`;
+  }
+
+  if (hasYtDlpCookies()) {
+    return `Cookie dosyasi var ama eskimis olabilir (${ytDlpCookiesPath}). YouTube'da tekrar oturum acip Netscape formatinda guncelle veya YTDLP_COOKIES_FROM_BROWSER ayarla.`;
+  }
+
+  return `Chrome Profile 2 icin tarayici cookie kullanimi acik olmali (${getYtDlpBrowserCookieArg() || "chrome:Profile 2"}); gerekirse son care olarak taze bir Netscape cookie dosyasi ekle (${ytDlpCookiesPath}).`;
 };
 
 const startPlaybackTimer = (session) => {
@@ -1813,10 +1961,7 @@ const handleMusicCommand = async ({ socket, roomId, user, commandText }) => {
       const message = err?.message || "Bilinmeyen hata";
       console.error("[MusicBot] /play error:", message);
       if (isYouTubeBotCheckError(message)) {
-        const cookieHint = hasYtDlpCookies()
-          ? "Cookie dosyasi var ama gecersiz olabilir; yenileyip tekrar dene."
-          : `Sunucuya cookie dosyasi ekle: ${ytDlpCookiesPath}`;
-        sendSystemMessage(roomId, `YouTube bu parca icin bot dogrulamasi istiyor. ${cookieHint}`);
+        sendSystemMessage(roomId, `YouTube bu parca icin bot dogrulamasi istiyor. ${getYtDlpCookieHint()}`);
       } else {
         sendSystemMessage(roomId, `Parca bulunamadi/oynatilamadi: ${query}`);
       }
@@ -2775,4 +2920,6 @@ httpServer.listen(port, () => {
   console.log(`[MusicBot] yt-dlp binary: ${ytDlpBinary}`);
   console.log(`[Voice] ICE servers: ${ICE_SERVERS.map((item) => item.urls).join(", ")}`);
   console.log(`[MusicBot] yt-dlp cookies: ${hasYtDlpCookies() ? `found (${ytDlpCookiesPath})` : `missing (${ytDlpCookiesPath})`}`);
+  console.log(`[MusicBot] yt-dlp browser cookies: ${hasYtDlpBrowserCookies() ? getYtDlpBrowserCookieArg() : "disabled"}`);
+  console.log(`[MusicBot] yt-dlp strategy order: ${getYtDlpCookieStrategies().map((strategy) => describeYtDlpCookieStrategy(strategy)).join(" -> ")}`);
 });
