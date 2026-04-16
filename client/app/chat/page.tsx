@@ -543,7 +543,7 @@ function ChatContent() {
     await uploadAndSendFile(file);
   };
 
-  const handleComposerDragEnter = (e: React.DragEvent<HTMLFormElement>) => {
+  const handleComposerDragEnter = (e: React.DragEvent<HTMLDivElement>) => {
     if (!Array.from(e.dataTransfer.types || []).includes("Files")) return;
 
     e.preventDefault();
@@ -551,7 +551,7 @@ function ChatContent() {
     setIsDragActive(true);
   };
 
-  const handleComposerDragOver = (e: React.DragEvent<HTMLFormElement>) => {
+  const handleComposerDragOver = (e: React.DragEvent<HTMLDivElement>) => {
     if (!Array.from(e.dataTransfer.types || []).includes("Files")) return;
 
     e.preventDefault();
@@ -561,7 +561,7 @@ function ChatContent() {
     }
   };
 
-  const handleComposerDragLeave = (e: React.DragEvent<HTMLFormElement>) => {
+  const handleComposerDragLeave = (e: React.DragEvent<HTMLDivElement>) => {
     if (!Array.from(e.dataTransfer.types || []).includes("Files")) return;
 
     e.preventDefault();
@@ -571,7 +571,7 @@ function ChatContent() {
     }
   };
 
-  const handleComposerDrop = async (e: React.DragEvent<HTMLFormElement>) => {
+  const handleComposerDrop = async (e: React.DragEvent<HTMLDivElement>) => {
     if (!Array.from(e.dataTransfer.types || []).includes("Files")) return;
 
     e.preventDefault();
@@ -734,7 +734,22 @@ function ChatContent() {
       </div>
 
       {/* Main Chat Area */}
-      <div className="flex-1 flex flex-col min-w-0 bg-zinc-950">
+      <div
+        onDragEnter={handleComposerDragEnter}
+        onDragOver={handleComposerDragOver}
+        onDragLeave={handleComposerDragLeave}
+        onDrop={handleComposerDrop}
+        className="relative flex-1 flex flex-col min-w-0 bg-zinc-950"
+      >
+        {isDragActive && (
+          <div className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center bg-zinc-950/78 backdrop-blur-sm">
+            <div className="rounded-3xl border border-dashed border-indigo-400/70 bg-zinc-900/95 px-8 py-10 text-center shadow-2xl shadow-indigo-950/40">
+              <div className="text-xs font-semibold uppercase tracking-[0.35em] text-indigo-300">Surukle Birak</div>
+              <div className="mt-3 text-lg font-semibold text-white">Resmi chat alanina birak, hemen gonderelim</div>
+              <div className="mt-2 text-sm text-zinc-400">Mesaj kutusunu hedeflemen gerekmiyor</div>
+            </div>
+          </div>
+        )}
         <div className="h-16 border-b border-zinc-800 flex items-center px-6 bg-zinc-900/50 backdrop-blur-sm sticky top-0 z-10">
           <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-zinc-500 mr-2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
           <span className="font-bold text-white">general</span>
@@ -979,21 +994,7 @@ function ChatContent() {
               </div>
             </div>
           )}
-          <form
-            onSubmit={handleSendMessage}
-            onDragEnter={handleComposerDragEnter}
-            onDragOver={handleComposerDragOver}
-            onDragLeave={handleComposerDragLeave}
-            onDrop={handleComposerDrop}
-            className={`relative flex items-center gap-3 rounded-2xl transition-all ${
-              isDragActive ? "bg-indigo-500/10 ring-2 ring-indigo-400/60 ring-offset-2 ring-offset-zinc-900" : ""
-            }`}
-          >
-            {isDragActive && (
-              <div className="pointer-events-none absolute inset-0 flex items-center justify-center rounded-2xl border border-dashed border-indigo-400/70 bg-zinc-950/90 text-xs font-semibold uppercase tracking-[0.2em] text-indigo-200">
-                Resmi birak, hemen gonderelim
-              </div>
-            )}
+          <form onSubmit={handleSendMessage} className="flex items-center gap-3 rounded-2xl">
             <button
               type="button"
               onClick={() => fileInputRef.current?.click()}
