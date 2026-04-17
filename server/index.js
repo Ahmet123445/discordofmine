@@ -1721,6 +1721,13 @@ const playNextInSession = async (voiceRoomId) => {
   try {
     await waitForPrefetchIfNeeded(nextTrack, MUSIC_CURRENT_PREFETCH_WAIT_TIMEOUT_MS);
 
+    // Session kapatildi / degistirildi mi? (kullanici stop'a basmis olabilir)
+    if (musicSessions.get(voiceRoomId) !== session) {
+      console.log(`[MusicBot] playNextInSession bail: session closed during prefetch for ${voiceRoomId}`);
+      disposeTrack(nextTrack);
+      return;
+    }
+
     const localFilePath = getExistingPrefetchFilePath(nextTrack);
     if (!localFilePath) {
       const serverRoomId = getServerRoomIdFromVoiceRoomId(voiceRoomId);
@@ -2539,13 +2546,18 @@ io.on("connection", (socket) => {
       return;
     }
 
+    console.log(`[MusicBot] music-control: ${action} (room=${roomId}, socket=${socket.id})`);
+
     const now = Date.now();
-    if (session.controlActionInFlight && action !== "volume") {
+    // stop her zaman onceliklidir; cooldown / in-flight kontrollerini atla.
+    const bypassGuards = action === "stop" || action === "volume";
+
+    if (!bypassGuards && session.controlActionInFlight) {
       socket.emit("music-control-error", { error: "Muzik kontrolu isleniyor, tekrar dene." });
       return;
     }
 
-    if (action !== "volume" && now - (session.lastControlActionAt || 0) < MUSIC_CONTROL_COOLDOWN_MS) {
+    if (!bypassGuards && now - (session.lastControlActionAt || 0) < MUSIC_CONTROL_COOLDOWN_MS) {
       return;
     }
 
