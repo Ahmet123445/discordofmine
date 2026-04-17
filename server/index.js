@@ -663,7 +663,7 @@ const getTrackCacheKey = (track) => {
   return track.cacheKey;
 };
 
-const buildLocalPlaybackFfmpegArgs = ({ filePath, volume = 80, seekSec = null }) => {
+const buildLocalPlaybackFfmpegArgs = ({ filePath, volume = 20, seekSec = null }) => {
   const args = [
     "-loglevel", "error"
   ];
@@ -1402,7 +1402,7 @@ const buildEmptyMusicStatePayload = (roomId) => ({
   voiceRoomId: null,
   isPlaying: false,
   isPaused: false,
-  volume: 80,
+  volume: 20,
   positionSec: 0,
   current: null,
   queue: []
@@ -1457,7 +1457,7 @@ const getOrCreateMusicSession = (voiceRoomId) => {
     isPlaying: false,
     isPaused: false,
     isStoppingCurrent: false,
-    volume: 80,
+    volume: 20,
     audioChunks: [],
     bufferedBytes: 0,
     playbackInterval: null,

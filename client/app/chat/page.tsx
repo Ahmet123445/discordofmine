@@ -931,19 +931,6 @@ function ChatContent() {
                   <button disabled={!canControlCurrent} onClick={() => sendMusicControl("stop")} className="rounded-lg bg-zinc-800 px-3 py-1.5 text-xs text-zinc-200 disabled:cursor-not-allowed disabled:opacity-50">Durdur</button>
                 </div>
 
-                <div className="mt-2 flex items-center gap-3">
-                  <span className="text-[11px] text-zinc-400">Ses</span>
-                  <input
-                    type="range"
-                    min={0}
-                    max={200}
-                    value={Math.max(0, Math.min(200, Number(musicState.volume || 80)))}
-                    onChange={(e) => sendMusicControl("volume", Number(e.target.value))}
-                    className="w-full accent-indigo-400"
-                  />
-                  <span className="w-10 text-right text-[11px] text-zinc-400">{Math.round(musicState.volume || 0)}%</span>
-                </div>
-
                 {musicState.queue.length > 0 && (
                   <div className="mt-2 rounded-lg border border-zinc-800 bg-zinc-950/70 p-2">
                     <div className="mb-1 text-[11px] uppercase tracking-wider text-zinc-500">Sıradaki</div>
