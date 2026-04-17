@@ -2557,7 +2557,9 @@ io.on("connection", (socket) => {
     try {
       if (action === "toggle") {
         if (!session.ffmpegProcess) {
-          socket.emit("music-control-error", { error: "Kontrol edilecek aktif oynatma yok." });
+          // Parça geçişi / kapatma anında ffmpeg henüz yok; sessizce yok say.
+          // Güncel state'i tekrar gönder ki UI pause/play düğmesi tutarlı kalsın.
+          emitMusicState(session, true);
           return;
         }
 

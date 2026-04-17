@@ -1337,9 +1337,12 @@ const AudioPlayer = ({ peer, volume = 1 }: { peer: any; volume?: number }) => {
     if (gainRef.current && audioContextRef.current) {
       gainRef.current.gain.setTargetAtTime(nextGain, audioContextRef.current.currentTime, 0.02);
       audioContextRef.current.resume().catch(() => {});
-      return;
     }
 
+    // Always mirror onto the audio element as well.
+    // Chrome has a known bug where <audio srcObject=MediaStream> + createMediaElementSource
+    // leaves the element's audio output bypassing the Web Audio graph, so gain alone
+    // does not affect volume. Setting audioEl.volume guarantees the slider works.
     if (audioRef.current) {
       audioRef.current.volume = Math.max(0, Math.min(1, nextGain));
     }
@@ -1368,12 +1371,12 @@ const AudioPlayer = ({ peer, volume = 1 }: { peer: any; volume?: number }) => {
     const nextGain = Math.max(0, Math.min(2, volumeRef.current));
 
     if (ensureAudioGraph() && gainRef.current && audioContextRef.current) {
-      audioEl.volume = 1;
       gainRef.current.gain.setValueAtTime(nextGain, audioContextRef.current.currentTime);
       audioContextRef.current.resume().catch(() => {});
-    } else {
-      audioEl.volume = Math.max(0, Math.min(1, nextGain));
     }
+    // Always set element volume too; Web Audio graph may be bypassed on some browsers
+    // when using srcObject + createMediaElementSource, so element volume is authoritative.
+    audioEl.volume = Math.max(0, Math.min(1, nextGain));
 
     audioEl.play().catch(() => {});
 
