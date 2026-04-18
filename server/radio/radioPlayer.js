@@ -9,6 +9,7 @@
 // server/index.js. No function from the music pipeline is imported or called.
 
 import { spawn } from "child_process";
+import fs from "fs";
 import ffmpegPath from "ffmpeg-static";
 import {
   AUDIO_SAMPLE_RATE,
@@ -30,6 +31,29 @@ import {
 import { getAdapter } from "./adapter.js";
 
 const MAX_RECONNECT_ATTEMPTS = 3;
+
+// Resolve ffmpeg binary with a failsafe preference for the OS-provided build.
+// The bundled ffmpeg-static (johnvansickle 7.0.2 static Linux) has been
+// observed to segfault with empty stderr when reading network inputs
+// (HLS/HTTPS) on modern glibc Ubuntu hosts — which is exactly what radio
+// needs. The OS package is feature-complete for streaming and far more
+// reliable there, so we prefer it when available. Music bot code is
+// unaffected (it decodes local files where ffmpeg-static is fine).
+const resolveRadioFfmpegBinary = () => {
+  if (process.env.RADIO_FFMPEG_PATH) return process.env.RADIO_FFMPEG_PATH;
+  if (process.env.FFMPEG_PATH) return process.env.FFMPEG_PATH;
+  const systemCandidates = ["/usr/bin/ffmpeg", "/usr/local/bin/ffmpeg"];
+  for (const candidate of systemCandidates) {
+    try {
+      if (fs.existsSync(candidate)) return candidate;
+    } catch {
+      /* ignore */
+    }
+  }
+  return ffmpegPath || "ffmpeg";
+};
+
+const RADIO_FFMPEG_BIN = resolveRadioFfmpegBinary();
 
 const buildRadioFfmpegArgs = ({ streamUrl, volume = 40, isMuted = false }) => {
   const effectiveVolume = isMuted ? 0 : Math.max(0, volume) / 100;
@@ -300,7 +324,7 @@ const spawnFfmpegForCurrent = (session, token) => {
   const station = session.station;
   if (!station) return;
 
-  const bin = process.env.FFMPEG_PATH || ffmpegPath || "ffmpeg";
+  const bin = RADIO_FFMPEG_BIN;
   const args = buildRadioFfmpegArgs({
     streamUrl: station.streamUrl,
     volume: session.volume,
@@ -470,5 +494,7 @@ export const setMuted = (session, muted) => {
 };
 
 export const radioPlayerExports = {
-  buildRadioFfmpegArgs
+  buildRadioFfmpegArgs,
+  ffmpegBin: RADIO_FFMPEG_BIN,
+  resolveRadioFfmpegBinary
 };

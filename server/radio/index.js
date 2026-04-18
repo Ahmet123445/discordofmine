@@ -12,7 +12,7 @@ import {
   disposeRadioSession,
   isRadioBotId
 } from "./radioSession.js";
-import { stopStation } from "./radioPlayer.js";
+import { stopStation, radioPlayerExports } from "./radioPlayer.js";
 import { logInfo } from "./logger.js";
 
 export const initRadio = ({
@@ -60,7 +60,10 @@ export const initRadio = ({
   process.once("SIGTERM", shutdown);
   process.once("SIGINT", shutdown);
 
-  logInfo("radio_enabled", { stations: radioSessions.size });
+  logInfo("radio_enabled", {
+    stations: radioSessions.size,
+    ffmpegBin: radioPlayerExports.ffmpegBin
+  });
   return { enabled: true };
 };
 

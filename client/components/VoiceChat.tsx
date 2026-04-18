@@ -319,6 +319,37 @@ const ICE_SERVERS = parseIceServers();
     setIsDeafened((prev) => !prev);
   };
 
+  // Boost the outgoing video sender for a screen-share track:
+  // - high maxBitrate (smoother motion in games)
+  // - maintain-framerate degradation (drop resolution before FPS)
+  // - explicit maxFramerate so the encoder does not cap itself to ~15fps
+  const tuneScreenVideoSender = (peer: any, track: MediaStreamTrack) => {
+    try {
+      const pc: RTCPeerConnection | undefined = peer?._pc;
+      if (!pc || typeof pc.getSenders !== "function") return;
+      const sender = pc.getSenders().find((s) => s.track === track);
+      if (!sender || typeof sender.getParameters !== "function") return;
+
+      const params = sender.getParameters();
+      if (!params.encodings || params.encodings.length === 0) {
+        params.encodings = [{}];
+      }
+      params.encodings.forEach((enc: RTCRtpEncodingParameters) => {
+        enc.maxBitrate = 6_000_000; // 6 Mbps — Discord benzeri kalite
+        (enc as any).maxFramerate = 60;
+        (enc as any).networkPriority = "high";
+        (enc as any).priority = "high";
+      });
+      (params as any).degradationPreference = "maintain-framerate";
+
+      sender.setParameters(params).catch((err) => {
+        console.warn("setParameters (screen video) failed, falling back:", err);
+      });
+    } catch (err) {
+      console.warn("tuneScreenVideoSender skipped:", err);
+    }
+  };
+
   const attachActiveScreenTracks = (peer: any) => {
     if (!screenStream.current || !peer) return;
 
@@ -328,6 +359,10 @@ const ICE_SERVERS = parseIceServers();
     activeTracks.forEach((track) => {
       try {
         peer.addTrack(track, screenStream.current as MediaStream);
+        if (track.kind === "video") {
+          // Defer so the sender is fully registered on the RTCPeerConnection
+          setTimeout(() => tuneScreenVideoSender(peer, track), 0);
+        }
       } catch (err) {
         console.error("Failed to attach active screen track:", err);
       }
@@ -682,18 +717,22 @@ const ICE_SERVERS = parseIceServers();
   const startScreenShare = () => {
     if (!PeerClass || !localStream.current) return;
     
-    // Balanced defaults for smoother voice+music alongside screen share
-    const constraints = {
+    // High quality defaults for smooth gameplay viewing.
+    // Ideal 1080p60; tarayici destegi yoksa otomatik olarak dusurur (stabilite).
+    const constraints: MediaStreamConstraints = {
       video: {
-        width: { ideal: 1280, max: 1280 },
-        height: { ideal: 720, max: 720 },
-        frameRate: { ideal: 30, max: 30 },
-      },
+        width: { ideal: 1920, max: 2560 },
+        height: { ideal: 1080, max: 1440 },
+        frameRate: { ideal: 60, max: 60 },
+      } as MediaTrackConstraints,
       audio: {
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true
-      }
+        echoCancellation: false,
+        noiseSuppression: false,
+        autoGainControl: false,
+        // @ts-ignore — chrome-specific hints for higher fidelity screen audio
+        sampleRate: 48000,
+        channelCount: 2,
+      } as MediaTrackConstraints
     };
 
     navigator.mediaDevices
@@ -704,7 +743,15 @@ const ICE_SERVERS = parseIceServers();
 
         const videoTrack = stream.getVideoTracks()[0];
         const screenAudioTrack = stream.getAudioTracks()[0];
-        
+
+        // Content hints: encoder'a hareketli icerik (oyun) ipucu ver -> daha akici FPS.
+        if (videoTrack && "contentHint" in videoTrack) {
+          try { (videoTrack as any).contentHint = "motion"; } catch {}
+        }
+        if (screenAudioTrack && "contentHint" in screenAudioTrack) {
+          try { (screenAudioTrack as any).contentHint = "music"; } catch {}
+        }
+
         // Create a combined stream with video + screen audio for VideoPlayer volume control
         // Microphone stays separate in AudioPlayer
         if (screenAudioTrack && videoTrack) {
@@ -716,6 +763,8 @@ const ICE_SERVERS = parseIceServers();
             p.peer.addTrack(videoTrack, screenShareStream);
             // Add screen audio track separately (will create new stream on receiver)
             p.peer.addTrack(screenAudioTrack, screenShareStream);
+            // Bitrate / framerate tuning for the freshly added video sender
+            setTimeout(() => tuneScreenVideoSender(p.peer, videoTrack), 0);
           });
           
           console.log("Screen share started with screen audio (separate from mic)");
@@ -723,6 +772,7 @@ const ICE_SERVERS = parseIceServers();
           // No screen audio - just add video
           peersRef.current.forEach((p) => {
             p.peer.addTrack(videoTrack, stream);
+            setTimeout(() => tuneScreenVideoSender(p.peer, videoTrack), 0);
           });
           console.log("Screen share started without screen audio");
         }
