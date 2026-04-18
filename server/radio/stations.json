@@ -1,0 +1,101 @@
+[
+  {
+    "id": "powerfm",
+    "name": "Power FM",
+    "category": "pop",
+    "city": "Istanbul",
+    "country": "TR",
+    "streamUrl": "https://listen.powerapp.com.tr/powerfm/abr/powerfm/128/playlist.m3u8",
+    "homepage": "https://www.powerapp.com.tr/radios/powerfm/",
+    "enabled": true,
+    "priority": 100
+  },
+  {
+    "id": "powerturk",
+    "name": "PowerTurk",
+    "category": "turkce-pop",
+    "city": "Istanbul",
+    "country": "TR",
+    "streamUrl": "https://listen.powerapp.com.tr/powerturk/abr/powerturk/128/playlist.m3u8",
+    "homepage": "https://www.powerapp.com.tr/powerturk/",
+    "enabled": true,
+    "priority": 95
+  },
+  {
+    "id": "joyturk",
+    "name": "JoyTurk",
+    "category": "turkce-pop",
+    "city": "Istanbul",
+    "country": "TR",
+    "streamUrl": "https://playerservices.streamtheworld.com/api/livestream-redirect/JOY_TURK.mp3",
+    "homepage": "https://karnaval.com/radyolar/joyturk",
+    "enabled": true,
+    "priority": 90
+  },
+  {
+    "id": "kafaradyo",
+    "name": "Kafa Radyo",
+    "category": "talk",
+    "city": "Istanbul",
+    "country": "TR",
+    "streamUrl": "https://moondigitalmaster.radyotvonline.net/kafaradyo/playlist.m3u8",
+    "homepage": "",
+    "enabled": true,
+    "priority": 80
+  },
+  {
+    "id": "ntvradyo",
+    "name": "NTV Radyo",
+    "category": "haber",
+    "city": "Istanbul",
+    "country": "TR",
+    "streamUrl": "https://rto.turkhosted.com/smil/smil:ntvradyo.smil/playlist.m3u8",
+    "homepage": "https://www.ntvradyo.com.tr/canli-dinle",
+    "enabled": true,
+    "priority": 85
+  },
+  {
+    "id": "kralfm",
+    "name": "Kral FM",
+    "category": "arabesk",
+    "city": "Istanbul",
+    "country": "TR",
+    "streamUrl": "http://kralwmp.radyotvonline.com/;stream.mp3",
+    "homepage": "https://www.kralmuzik.com.tr/radyo/kral-fm",
+    "enabled": true,
+    "priority": 88
+  },
+  {
+    "id": "ahaberradyo",
+    "name": "A Haber Radyo",
+    "category": "haber",
+    "city": "Istanbul",
+    "country": "TR",
+    "streamUrl": "https://trkvz-radyolar.ercdn.net/ahaberradyo/playlist.m3u8",
+    "homepage": "",
+    "enabled": true,
+    "priority": 70
+  },
+  {
+    "id": "apararadyo",
+    "name": "A Para Radyo",
+    "category": "ekonomi",
+    "city": "Istanbul",
+    "country": "TR",
+    "streamUrl": "https://trkvz-radyolar.ercdn.net/apararadyo/playlist.m3u8",
+    "homepage": "",
+    "enabled": true,
+    "priority": 72
+  },
+  {
+    "id": "kralturkfm",
+    "name": "Kral Turk FM",
+    "category": "arabesk",
+    "city": "Istanbul",
+    "country": "TR",
+    "streamUrl": "https://yayin.radyoarabesk.com.tr:8000/stream",
+    "homepage": "",
+    "enabled": true,
+    "priority": 65
+  }
+]

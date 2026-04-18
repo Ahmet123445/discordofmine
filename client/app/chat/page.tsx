@@ -14,6 +14,13 @@ const VoiceChat = dynamic(() => import("@/components/VoiceChat"), {
   ),
 });
 
+const RadioPanel = dynamic(() => import("@/components/RadioPanel"), {
+  ssr: false,
+  loading: () => null,
+});
+
+const RADIO_ENABLED = process.env.NEXT_PUBLIC_RADIO_FEATURE_ENABLED === "true";
+
 interface Message {
   id: number;
   content: string;
@@ -858,6 +865,13 @@ function ChatContent() {
         </div>
 
         <div className="p-4 bg-zinc-900 border-t border-zinc-800">
+          {RADIO_ENABLED && roomId && (
+            <RadioPanel
+              socket={socket}
+              roomId={roomId}
+              apiBase={process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001"}
+            />
+          )}
           {canRenderMusicPlayer && musicState && (
             <div className="mb-3 overflow-hidden rounded-2xl border border-zinc-700 bg-gradient-to-r from-zinc-900 via-zinc-900 to-indigo-950/50 shadow-xl">
               <div className="flex items-center gap-3 p-3">

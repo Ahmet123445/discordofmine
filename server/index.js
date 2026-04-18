@@ -13,6 +13,13 @@ import Peer from "simple-peer";
 import wrtc from "@roamhq/wrtc";
 import ffmpegPath from "ffmpeg-static";
 import fs from "fs";
+import {
+  initRadio,
+  handleRadioCommand,
+  isRadioActiveInRoom,
+  canStartMusic as canStartMusicRadioCheck,
+  isRadioBotId
+} from "./radio/index.js";
 
 // Version: 2.0.0 - Database-based session tracking for reliability
 dotenv.config();
@@ -722,7 +729,7 @@ const saveAndBroadcastMessage = ({ content, userId, username, type = "text", roo
 };
 
 const getVoiceUsers = (voiceRoomId) => usersInVoice[voiceRoomId] || [];
-const getHumanVoiceUsers = (voiceRoomId) => getVoiceUsers(voiceRoomId).filter((u) => !isMusicBotId(u.id));
+const getHumanVoiceUsers = (voiceRoomId) => getVoiceUsers(voiceRoomId).filter((u) => !isMusicBotId(u.id) && !isRadioBotId(u.id));
 
 const addMusicBotPresence = (voiceRoomId) => {
   const botId = buildMusicBotId(voiceRoomId);
@@ -1950,6 +1957,13 @@ const handleMusicCommand = async ({ socket, roomId, user, commandText }) => {
       return true;
     }
 
+    // Radyo aktifse muzik baslatma (izole edilmis conflict check)
+    const radioCheck = canStartMusicRadioCheck(voiceRoomId);
+    if (!radioCheck.ok) {
+      sendSystemMessage(roomId, radioCheck.message);
+      return true;
+    }
+
     try {
       const session = getOrCreateMusicSession(voiceRoomId);
       ensureBotConnectedToRoomUsers(voiceRoomId);
@@ -2489,6 +2503,16 @@ io.on("connection", (socket) => {
           fileName
         });
 
+        // Radyo komutlari ayri namespace (/radio ...) ve ayri modulde islenir.
+        if (trimmedContent.toLowerCase().startsWith("/radio")) {
+          const radioHandled = await handleRadioCommand({
+            roomId,
+            commandText: trimmedContent,
+            voiceRoomId: socketToRoom[socket.id]
+          });
+          if (radioHandled) return;
+        }
+
         const wasHandled = await handleMusicCommand({
           socket,
           roomId,
@@ -2823,7 +2847,7 @@ io.on("connection", (socket) => {
     }
 
     // Send existing users to the new joiner
-    const usersInThisRoom = usersInVoice[roomId].filter(u => u.id !== socket.id && !isMusicBotId(u.id));
+    const usersInThisRoom = usersInVoice[roomId].filter(u => u.id !== socket.id && !isMusicBotId(u.id) && !isRadioBotId(u.id));
     socket.emit("all-voice-users", usersInThisRoom);
 
     // If music bot is active in this room, connect it to the newly joined user.
@@ -2944,10 +2968,25 @@ io.on("connection", (socket) => {
 
 });
 
+// Initialize the radio module (feature-flag guarded, DI-based). Kept here so
+// all referenced primitives (io, app, usersInVoice, ICE_SERVERS, helpers) are
+// already defined. Does nothing if RADIO_FEATURE_ENABLED !== "true".
+initRadio({
+  io,
+  app,
+  usersInVoice,
+  ICE_SERVERS,
+  sendSystemMessage,
+  broadcastAllVoiceUsers,
+  musicSessions,
+  enabled: process.env.RADIO_FEATURE_ENABLED === "true"
+});
+
 httpServer.listen(port, () => {
   console.log(`Server running on port ${port}`);
   console.log(`[MusicBot] yt-dlp binary: ${ytDlpBinary}`);
   console.log(`[Voice] ICE servers: ${ICE_SERVERS.map((item) => item.urls).join(", ")}`);
+  console.log(`[Radio] feature enabled: ${process.env.RADIO_FEATURE_ENABLED === "true"}`);
   console.log(`[MusicBot] yt-dlp cookies: ${hasYtDlpCookies() ? `found (${ytDlpCookiesPath})` : `missing (${ytDlpCookiesPath})`}`);
   console.log(`[MusicBot] yt-dlp browser cookies: ${hasYtDlpBrowserCookies() ? getYtDlpBrowserCookieArg() : "disabled"}`);
   console.log(`[MusicBot] yt-dlp strategy order: ${getYtDlpCookieStrategies().map((strategy) => describeYtDlpCookieStrategy(strategy)).join(" -> ")}`);
