@@ -40,12 +40,18 @@ export interface RadioState {
 }
 
 export const RADIO_CATEGORIES = [
-  "pop",
   "turkce-pop",
+  "pop",
   "arabesk",
+  "rock",
+  "chill",
+  "nostalji",
   "haber",
+  "spor",
   "ekonomi",
-  "talk"
+  "talk",
+  "dini",
+  "resmi"
 ] as const;
 
 export type RadioCategory = (typeof RADIO_CATEGORIES)[number];

@@ -159,15 +159,23 @@ const stopPlaybackTimer = (session) => {
 };
 
 const startPlaybackTimer = (session) => {
-  stopPlaybackTimer(session);
+  // Idempotent: if a timer is already running, leave it in place so we do
+  // not drop a tick while transitioning between idle/playing.
+  if (session.playbackInterval) return;
   session.nextPlaybackDueAt = Date.now();
 
   const tick = () => {
-    if (session.isStopping || session.status === "idle") {
+    // Session disposed? stop entirely.
+    if (!session.audioSource) {
       stopPlaybackTimer(session);
       return;
     }
     if (!session.hasPlaybackStarted) {
+      // Pre-buffer or post-stop idle window: emit continuous 10ms silence
+      // frames so the WebRTC sender keeps the outbound track "alive". If we
+      // let the track go silent for longer than ~5s, some browsers treat
+      // the track as ended and will not resume audio when real PCM resumes.
+      pushSilenceFrame(session);
       session.nextPlaybackDueAt = Date.now() + FRAME_DURATION_MS;
       session.playbackInterval = setTimeout(tick, FRAME_DURATION_MS);
       return;
@@ -453,11 +461,14 @@ export const stopStation = (session) => {
   session.activePlaybackToken += 1;
   clearReconnectTimer(session);
   killFfmpeg(session);
-  stopPlaybackTimer(session);
   resetBuffers(session);
   session.station = null;
   session.lastError = null;
   session.reconnect.attempts = 0;
+  // Keep the playback timer running so continuous silence frames maintain
+  // the WebRTC outbound audio track; a new playStation() on this session
+  // will then produce audio ~instantly without a fresh peer negotiation.
+  startPlaybackTimer(session);
   emitRadioState(session, true);
 };
 

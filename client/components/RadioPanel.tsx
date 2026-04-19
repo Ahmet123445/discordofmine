@@ -29,12 +29,18 @@ const STATUS_LABEL: Record<string, string> = {
 };
 
 const CATEGORY_LABEL: Record<RadioCategory, string> = {
-  pop: "Pop",
   "turkce-pop": "Türkçe Pop",
+  pop: "Yabancı Pop",
   arabesk: "Arabesk",
+  rock: "Rock",
+  chill: "Chill / Lounge",
+  nostalji: "Nostalji",
   haber: "Haber",
+  spor: "Spor",
   ekonomi: "Ekonomi",
-  talk: "Talk"
+  talk: "Talk",
+  dini: "Dini",
+  resmi: "Resmi / TRT"
 };
 
 export default function RadioPanel({ socket, roomId, apiBase }: RadioPanelProps) {

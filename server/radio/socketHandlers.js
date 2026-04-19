@@ -212,8 +212,11 @@ const handleRadioControl = (socket, payload) => {
         socket.emit("radio-control-error", { error: "Aktif radyo yok." });
         return;
       }
+      // Sadece ffmpeg'i kapat ve idle state'e geç; session + bot presence +
+      // WebRTC peer'lar ayakta kalır ki bir sonraki play komutu aynı track
+      // üzerine yeni ffmpeg spawn edebilsin (~anında ses). Full dispose
+      // yalnızca voice kanalı boşaldığında veya server shutdown'da olur.
       stopStation(existing);
-      disposeRadioSession(voiceRoomId);
       logInfo("radio_socket_stop", { voiceRoomId, roomId, eventType: "socket" });
       return;
     }

@@ -335,10 +335,14 @@ const ICE_SERVERS = parseIceServers();
         params.encodings = [{}];
       }
       params.encodings.forEach((enc: RTCRtpEncodingParameters) => {
-        enc.maxBitrate = 6_000_000; // 6 Mbps — Discord benzeri kalite
-        (enc as any).maxFramerate = 60;
-        (enc as any).networkPriority = "high";
-        (enc as any).priority = "high";
+        // 2.5 Mbps @ 30fps — 1080p icin akici ve tipik Turkiye ev uplink'inin
+        // 3+ peer mesh'te doyurmayacagi degerler. Radyo audio + mikrofon icin
+        // bant genisligi pay birakir, packet drop / jitter azalir -> ses
+        // robotiklesmez, frame drop minimize olur.
+        enc.maxBitrate = 2_500_000;
+        (enc as any).maxFramerate = 30;
+        (enc as any).networkPriority = "medium";
+        (enc as any).priority = "medium";
       });
       (params as any).degradationPreference = "maintain-framerate";
 
@@ -721,9 +725,12 @@ const ICE_SERVERS = parseIceServers();
     // Ideal 1080p60; tarayici destegi yoksa otomatik olarak dusurur (stabilite).
     const constraints: MediaStreamConstraints = {
       video: {
-        width: { ideal: 1920, max: 2560 },
-        height: { ideal: 1080, max: 1440 },
-        frameRate: { ideal: 60, max: 60 },
+        // 1080p30 varsayilan — oyun akiciligi icin yeterli, Turkiye ev uplink'i
+        // ve 3+ peer mesh icin surdurulebilir. Kullanici browser'i daha
+        // dusuk destekliyorsa otomatik dusurur.
+        width: { ideal: 1920, max: 1920 },
+        height: { ideal: 1080, max: 1080 },
+        frameRate: { ideal: 30, max: 60 },
       } as MediaTrackConstraints,
       audio: {
         echoCancellation: false,

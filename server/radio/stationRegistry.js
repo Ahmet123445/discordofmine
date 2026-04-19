@@ -10,12 +10,18 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const SUPPORTED_CATEGORIES = new Set([
-  "pop",
-  "turkce-pop",
-  "arabesk",
-  "haber",
-  "ekonomi",
-  "talk"
+  "turkce-pop",  // Süper FM, PowerTürk, JoyTürk, Best FM, Radyo D, Number1 Türk
+  "pop",         // Power FM, Virgin Radio TR, Number1 FM, Joy FM
+  "arabesk",     // Kral FM, Radyo Arabesk, Damar FM, Radyo 7
+  "rock",        // Power Rock, Radyo Eksen, Rock FM
+  "chill",       // Radyo Voyage, Slow Türk, JoyTurk Akustik
+  "nostalji",    // Nostalji FM, TRT Nağme, JoyTurk 90s
+  "haber",       // NTV Radyo, TRT Radyo Haber, CNN Türk, Habertürk, A Haber, TGRT
+  "spor",        // TRT Radyo 1, Radyo Gol, Radyospor
+  "ekonomi",     // Bloomberg HT, A Para
+  "talk",        // Kafa Radyo, Alem FM, TRT FM
+  "dini",        // Lalegül FM, Moral FM, Dost FM, Semerkand
+  "resmi"        // TRT Radyo 1, TRT FM, TRT Türkü
 ]);
 
 const REQUIRED_FIELDS = ["id", "name", "category", "streamUrl"];

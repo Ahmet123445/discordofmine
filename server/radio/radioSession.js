@@ -6,6 +6,7 @@ import Peer from "simple-peer";
 import { getAdapter } from "./adapter.js";
 import { RADIO_BOT_USERNAME } from "./audioConstants.js";
 import { logInfo, logWarn } from "./logger.js";
+import { applyRadioAudioPreferences } from "./sdpHelpers.js";
 
 export const radioSessions = new Map(); // voiceRoomId -> RadioSession
 
@@ -109,7 +110,8 @@ export const connectRadioBotToUser = (session, userSocketId) => {
     trickle: true,
     stream: session.stream,
     wrtc: RTC,
-    config: { iceServers: ICE_SERVERS || [] }
+    config: { iceServers: ICE_SERVERS || [] },
+    sdpTransform: (sdp) => applyRadioAudioPreferences(sdp)
   });
 
   peer.on("signal", (signal) => {
@@ -160,6 +162,17 @@ export const disposeRadioSession = (voiceRoomId) => {
   const session = radioSessions.get(voiceRoomId);
   if (!session) return;
 
+  // Stop the silence-pump playback timer before we clear audioSource; the
+  // tick guard checks session.audioSource so this ordering is important.
+  try {
+    if (session.playbackInterval) {
+      clearTimeout(session.playbackInterval);
+      session.playbackInterval = null;
+    }
+  } catch {
+    /* noop */
+  }
+
   try {
     destroyAllRadioPeers(session);
   } catch {
@@ -176,6 +189,7 @@ export const disposeRadioSession = (voiceRoomId) => {
     if (session.audioSource && typeof session.audioSource.close === "function") {
       session.audioSource.close();
     }
+    session.audioSource = null;
   } catch {
     /* noop */
   }

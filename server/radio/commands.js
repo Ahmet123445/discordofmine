@@ -171,8 +171,11 @@ export const handleRadioCommand = async ({
       sendSys(roomId, "Aktif radyo yok.");
       return true;
     }
+    // ffmpeg kill + idle state, ama session/bot presence/peer'lar korunur.
+    // Bir sonraki /radio play komutu ayni track uzerine yeni ffmpeg spawn eder
+    // ve ses ~aninda gelir (yeniden peer kurulumu yok). Full dispose yalnizca
+    // voice kanali bosaldiginda veya server shutdown'da olur.
     stopStation(session);
-    disposeRadioSession(voiceRoomId);
     sendSys(roomId, "Radyo durduruldu.");
     logInfo("radio_command_stop", { voiceRoomId, roomId, eventType: "command" });
     return true;

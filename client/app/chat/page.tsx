@@ -76,6 +76,7 @@ const formatPrefetchStatus = (status?: string) => {
 };
 
 const SLASH_COMMANDS = [
+  // Muzik botu
   { command: "/play", usage: "/play <yt-link veya sarki adi>", description: "Sarkiyi cal veya kuyruga ekle" },
   { command: "/search", usage: "/search <sarki adi>", description: "Ilk sonuc adaylarini listele" },
   { command: "/queue", usage: "/queue", description: "Siradaki parcayi goster" },
@@ -85,7 +86,19 @@ const SLASH_COMMANDS = [
   { command: "/stop", usage: "/stop", description: "Botu durdur ve kapat" },
   { command: "/np", usage: "/np", description: "Simdi calani goster" },
   { command: "/volume", usage: "/volume <0-200>", description: "Ses seviyesini ayarla" },
-  { command: "/help", usage: "/help", description: "Tum muzik komutlarini goster" }
+  { command: "/help", usage: "/help", description: "Tum muzik komutlarini goster" },
+  // Radyo
+  { command: "/radio", usage: "/radio help", description: "Radyo komutlarini goster" },
+  { command: "/radio list", usage: "/radio list [kategori]", description: "Istasyonlari listele (ops. kategori filtresi)" },
+  { command: "/radio play", usage: "/radio play <id>", description: "Istasyonu baslat (orn. /radio play trt-fm)" },
+  { command: "/radio stop", usage: "/radio stop", description: "Radyoyu durdur (aninda tekrar acilir)" },
+  { command: "/radio next", usage: "/radio next", description: "Siradaki istasyona gec" },
+  { command: "/radio prev", usage: "/radio prev", description: "Onceki istasyona don" },
+  { command: "/radio volume", usage: "/radio volume <0-200>", description: "Radyo ses seviyesi" },
+  { command: "/radio mute", usage: "/radio mute", description: "Radyoyu sessize al" },
+  { command: "/radio unmute", usage: "/radio unmute", description: "Radyo sesini geri ac" },
+  { command: "/radio nowplaying", usage: "/radio nowplaying", description: "Simdi calan istasyon" },
+  { command: "/radio open", usage: "/radio open", description: "Radyo panelini goster" }
 ];
 
 function ChatContent() {
@@ -124,10 +137,35 @@ function ChatContent() {
     const trimmed = inputValue.trimStart();
     if (!trimmed.startsWith("/")) return [];
 
-    const [commandPart] = trimmed.split(/\s+/, 1);
-    const query = commandPart.toLowerCase();
+    // Accept multi-word queries (e.g. "/radio p") so nested subcommands like
+    // "/radio play", "/radio prev" can be narrowed down as the user types.
+    const query = trimmed.toLowerCase();
+    const firstToken = query.split(/\s+/, 1)[0];
 
-    return SLASH_COMMANDS.filter((item) => item.command.startsWith(query)).slice(0, 6);
+    const tokens = query.split(/\s+/).filter(Boolean);
+    const endsWithSpace = /\s$/.test(query);
+
+    const matches = SLASH_COMMANDS.filter((item) => {
+      const cmd = item.command.toLowerCase();
+      if (cmd.startsWith(query)) return true;
+      // If the user typed a completed token plus a partial next token,
+      // match on "command.startsWith(query)" already covers it. Also allow
+      // "command === full query so far" when trailing space (menu stays).
+      if (endsWithSpace && cmd.startsWith(tokens.join(" "))) return true;
+      // Fallback: still show parent command entry while user is narrowing
+      // (e.g. typing "/rad" -> show "/radio" and all "/radio ..." entries).
+      return cmd.startsWith(firstToken);
+    });
+
+    // Prefer the most specific matches first (longer prefix match wins).
+    matches.sort((a, b) => {
+      const am = a.command.toLowerCase().startsWith(query) ? 0 : 1;
+      const bm = b.command.toLowerCase().startsWith(query) ? 0 : 1;
+      if (am !== bm) return am - bm;
+      return a.command.length - b.command.length;
+    });
+
+    return matches.slice(0, 8);
   }, [inputValue]);
 
   const showCommandSuggestions = filteredCommands.length > 0 && inputValue.trimStart().startsWith("/");
