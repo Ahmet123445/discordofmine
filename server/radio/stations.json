@@ -29,7 +29,7 @@
     "country": "TR",
     "streamUrl": "https://moondigitalmaster.radyotvonline.net/superfm/playlist.m3u8",
     "homepage": "",
-    "enabled": true,
+    "enabled": false,
     "priority": 90
   },
   {
@@ -227,7 +227,7 @@
     "country": "TR",
     "streamUrl": "https://moondigitalmaster.radyotvonline.net/radyovoyage/playlist.m3u8",
     "homepage": "https://radyovoyage.com.tr",
-    "enabled": true,
+    "enabled": false,
     "priority": 100
   },
   {
@@ -359,7 +359,7 @@
     "country": "TR",
     "streamUrl": "https://trtcanlifm-lh.akamaihd.net/i/TRTHABER_1@182246/master.m3u8",
     "homepage": "",
-    "enabled": true,
+    "enabled": false,
     "priority": 75
   },
   {
@@ -370,7 +370,7 @@
     "country": "TR",
     "streamUrl": "https://moondigitalmaster.radyotvonline.net/radyogol/playlist.m3u8",
     "homepage": "",
-    "enabled": true,
+    "enabled": false,
     "priority": 95
   },
   {
@@ -480,7 +480,7 @@
     "country": "TR",
     "streamUrl": "http://yayin2.canliyayin.org:8886/",
     "homepage": "",
-    "enabled": true,
+    "enabled": false,
     "priority": 85
   },
   {
@@ -513,7 +513,7 @@
     "country": "TR",
     "streamUrl": "https://trtcanlifm-lh.akamaihd.net/i/TRTFM_1@181846/master.m3u8",
     "homepage": "https://www.trt.net.tr/radyo-fm",
-    "enabled": true,
+    "enabled": false,
     "priority": 100
   },
   {
@@ -524,7 +524,7 @@
     "country": "TR",
     "streamUrl": "https://trtcanlifm-lh.akamaihd.net/i/RADYO1_1@182242/master.m3u8",
     "homepage": "https://www.trt.net.tr/radyo-1",
-    "enabled": true,
+    "enabled": false,
     "priority": 95
   },
   {
@@ -535,7 +535,7 @@
     "country": "TR",
     "streamUrl": "https://trtcanlifm-lh.akamaihd.net/i/TRTNAGME_1@182046/master.m3u8",
     "homepage": "https://www.trt.net.tr/radyo-nagme",
-    "enabled": true,
+    "enabled": false,
     "priority": 90
   },
   {
@@ -546,7 +546,7 @@
     "country": "TR",
     "streamUrl": "https://trtcanlifm-lh.akamaihd.net/i/TRTTURKU_1@182246/master.m3u8",
     "homepage": "https://www.trt.net.tr/radyo-turku",
-    "enabled": true,
+    "enabled": false,
     "priority": 85
   },
   {
@@ -557,7 +557,128 @@
     "country": "TR",
     "streamUrl": "https://trtcanlifm-lh.akamaihd.net/i/RADYO3_1@181946/master.m3u8",
     "homepage": "https://www.trt.net.tr/radyo-3",
+    "enabled": false,
+    "priority": 80
+  },
+  {
+    "id": "slowturk",
+    "name": "Slow Türk",
+    "category": "chill",
+    "city": "Istanbul",
+    "country": "TR",
+    "streamUrl": "https://moondigitalmaster.radyotvonline.net/slowturk/playlist.m3u8",
+    "homepage": "",
+    "enabled": false,
+    "priority": 95
+  },
+  {
+    "id": "loungefm",
+    "name": "Lounge FM",
+    "category": "chill",
+    "city": "Izmir",
+    "country": "TR",
+    "streamUrl": "https://sc.vargonen.net:5003/",
+    "homepage": "",
+    "enabled": false,
+    "priority": 85
+  },
+  {
+    "id": "radyospor",
+    "name": "Radyospor",
+    "category": "spor",
+    "city": "Istanbul",
+    "country": "TR",
+    "streamUrl": "https://trkvz-radyolar.ercdn.net/radyospor/playlist.m3u8",
+    "homepage": "",
+    "enabled": false,
+    "priority": 90
+  },
+  {
+    "id": "meskfm",
+    "name": "Meşk FM",
+    "category": "dini",
+    "city": "Istanbul",
+    "country": "TR",
+    "streamUrl": "https://vofile.ru/turkey/mesk_fm_dinle/icecast.audio",
+    "homepage": "",
     "enabled": true,
     "priority": 80
+  },
+  {
+    "id": "diyanetradyo",
+    "name": "Diyanet Radyo",
+    "category": "resmi",
+    "city": "Ankara",
+    "country": "TR",
+    "streamUrl": "https://eustr73.mediatriple.net/videoonlylive/mtikoimxnztxlive/broadcast_5e3c1171d7d2a.smil/playlist.m3u8",
+    "homepage": "",
+    "enabled": true,
+    "priority": 95
+  },
+  {
+    "id": "trtvotworld",
+    "name": "TRT Voice of Turkey",
+    "category": "resmi",
+    "city": "Ankara",
+    "country": "TR",
+    "streamUrl": "https://radio-trtvotworld.live.trt.com.tr/master.m3u8",
+    "homepage": "",
+    "enabled": true,
+    "priority": 85
+  },
+  {
+    "id": "powersmoothjazz",
+    "name": "Power Smooth Jazz",
+    "category": "chill",
+    "city": "Istanbul",
+    "country": "TR",
+    "streamUrl": "https://listen.powerapp.com.tr/powersmoothjazz/abr/powersmoothjazz/128/playlist.m3u8",
+    "homepage": "",
+    "enabled": true,
+    "priority": 90
+  },
+  {
+    "id": "powerlove",
+    "name": "Power Love",
+    "category": "chill",
+    "city": "Istanbul",
+    "country": "TR",
+    "streamUrl": "https://listen.powerapp.com.tr/powerlove/abr/powerlove/128/playlist.m3u8",
+    "homepage": "",
+    "enabled": true,
+    "priority": 85
+  },
+  {
+    "id": "powerdance",
+    "name": "Power Dance",
+    "category": "pop",
+    "city": "Istanbul",
+    "country": "TR",
+    "streamUrl": "https://listen.powerapp.com.tr/powerdance/abr/powerdance/128/playlist.m3u8",
+    "homepage": "",
+    "enabled": true,
+    "priority": 75
+  },
+  {
+    "id": "powerturktaptaze",
+    "name": "PowerTürk Taptaze",
+    "category": "turkce-pop",
+    "city": "Istanbul",
+    "country": "TR",
+    "streamUrl": "https://listen.powerapp.com.tr/powerturktaptaze/abr/powerturktaptaze/128/playlist.m3u8",
+    "homepage": "",
+    "enabled": true,
+    "priority": 75
+  },
+  {
+    "id": "powerpop",
+    "name": "Power Pop",
+    "category": "pop",
+    "city": "Istanbul",
+    "country": "TR",
+    "streamUrl": "https://listen.powerapp.com.tr/powerpop/abr/powerpop/128/playlist.m3u8",
+    "homepage": "",
+    "enabled": true,
+    "priority": 70
   }
 ]
