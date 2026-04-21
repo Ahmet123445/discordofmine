@@ -645,6 +645,33 @@ const extractYouTubeVideoId = (value = "") => {
   return "";
 };
 
+const extractYouTubePlaylistId = (value = "") => {
+  const trimmed = String(value || "").trim();
+  if (!trimmed) return "";
+  try {
+    const parsed = new URL(trimmed);
+    const host = parsed.hostname.toLowerCase();
+    if (!host.includes("youtube.com") && !host.includes("youtu.be")) return "";
+    const listParam = parsed.searchParams.get("list");
+    if (listParam && /^[A-Za-z0-9_-]{10,}$/.test(listParam)) {
+      return listParam;
+    }
+  } catch {}
+  return "";
+};
+
+// Returns "playlist" | "video" | "both" | "none"
+const classifyYouTubeUrl = (value = "") => {
+  const videoId = extractYouTubeVideoId(value);
+  const playlistId = extractYouTubePlaylistId(value);
+  if (videoId && playlistId) return "both";
+  if (playlistId) return "playlist";
+  if (videoId) return "video";
+  return "none";
+};
+
+const buildPlaylistUrl = (playlistId) => `https://www.youtube.com/playlist?list=${playlistId}`;
+
 const buildTrackCacheKey = (track = {}) => {
   const sourceId = extractYouTubeVideoId(track.sourceId || track.url || "");
   if (sourceId) {
@@ -703,6 +730,18 @@ const sendSystemMessage = (roomId, content) => {
     type: "system",
     room_id: roomId,
     created_at: new Date().toISOString()
+  });
+};
+
+// Emits an ephemeral (not persisted) interactive prompt card to a room.
+// Client renders a temporary card with buttons that map to follow-up commands.
+const sendChatPrompt = (roomId, prompt) => {
+  io.to(roomId).emit("chat-prompt", {
+    id: `prompt-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    room_id: roomId,
+    created_at: new Date().toISOString(),
+    ttlMs: 60_000,
+    ...prompt
   });
 };
 
@@ -1102,6 +1141,17 @@ const searchTracksWithYtDlp = async (query, limit = 5) => {
   const searchQuery = `ytsearch${Math.max(limit, 1)}:${query}`;
   const result = await runYtDlpJson(searchQuery, ["--flat-playlist"]);
   return normalizeYtDlpTrackEntries(result, limit);
+};
+
+// Fetch playlist metadata via yt-dlp --flat-playlist and normalize to playable tracks.
+// Returns { title, tracks }. Capped at `max` entries to avoid flooding the queue.
+const resolvePlaylistTracks = async (playlistUrl, { max = 50 } = {}) => {
+  const result = await runYtDlpJson(playlistUrl, ["--flat-playlist"]);
+  const title = result?.title || "YouTube Playlist";
+  const entries = Array.isArray(result?.entries) ? result.entries.filter(Boolean) : [];
+  const capped = entries.slice(0, Math.max(1, max));
+  const tracks = capped.map(normalizeYtDlpTrack).filter((t) => !!t.url);
+  return { title, total: entries.length, tracks };
 };
 
 const getPlayableTracksFromSearch = async (query, limit = 5) => {
@@ -1951,7 +2001,13 @@ const handleMusicCommand = async ({ socket, roomId, user, commandText }) => {
   }
 
   if (normalized === "/play") {
-    const query = args.join(" ").trim();
+    let mode = "auto"; // auto | single | all
+    let queryArgs = args;
+    if (args.length > 0 && (args[0] === "single" || args[0] === "all")) {
+      mode = args[0];
+      queryArgs = args.slice(1);
+    }
+    const query = queryArgs.join(" ").trim();
     if (!query) {
       sendSystemMessage(roomId, "Kullanim: /play <yt-link veya sarki adi>");
       return true;
@@ -1964,12 +2020,93 @@ const handleMusicCommand = async ({ socket, roomId, user, commandText }) => {
       return true;
     }
 
+    // Auto-classify YouTube URL to decide single vs playlist vs prompt.
+    const ytKind = mode === "auto" ? classifyYouTubeUrl(query) : "none";
+
+    if (mode === "auto" && ytKind === "both") {
+      // Mixed URL (v= + list=) → ask user via chat prompt which one to play.
+      try {
+        const playlistId = extractYouTubePlaylistId(query);
+        const playlistUrl = buildPlaylistUrl(playlistId);
+        // Quick flat-playlist metadata fetch to show count & title.
+        let title = "YouTube Playlist";
+        let total = 0;
+        try {
+          const meta = await runYtDlpJson(playlistUrl, ["--flat-playlist"]);
+          title = meta?.title || title;
+          total = Array.isArray(meta?.entries) ? meta.entries.length : 0;
+        } catch {}
+        sendChatPrompt(roomId, {
+          kind: "play-choice",
+          title,
+          count: total,
+          url: query,
+          actions: [
+            { label: "Tek Sarki", command: `/play single ${query}`, style: "primary" },
+            { label: "Tum Playlist", command: `/play all ${query}`, style: "secondary" }
+          ]
+        });
+      } catch {
+        sendSystemMessage(roomId, "Playlist bilgisi alinamadi, tek sarki olarak oynatiliyor.");
+        mode = "single";
+      }
+      if (mode === "auto") return true; // prompt sent, wait for user action
+    }
+
+    const isPlaylistMode =
+      mode === "all" || (mode === "auto" && ytKind === "playlist");
+
     try {
       const session = getOrCreateMusicSession(voiceRoomId);
       ensureBotConnectedToRoomUsers(voiceRoomId);
-      sendSystemMessage(roomId, `Muzik botu hazirlaniyor, parca araniyor: ${query}`);
 
-      const track = await resolveTrack(query);
+      if (isPlaylistMode) {
+        const playlistId = extractYouTubePlaylistId(query);
+        const playlistUrl = playlistId ? buildPlaylistUrl(playlistId) : query;
+        sendSystemMessage(roomId, `Playlist araniyor: ${query}`);
+
+        const { title, total, tracks } = await resolvePlaylistTracks(playlistUrl, { max: 50 });
+        if (tracks.length === 0) {
+          sendSystemMessage(roomId, `Playlist bos veya cozumlenemedi: ${query}`);
+          return true;
+        }
+
+        const wasIdle = !session.current && !session.isPlaying;
+        const queuedTracks = tracks.map((t) => createQueuedTrack(t, user.username));
+        session.queue.push(...queuedTracks);
+
+        if (wasIdle) {
+          sendSystemMessage(roomId, `Ilk parca MP3 olarak indiriliyor: ${queuedTracks[0].title}`);
+          try {
+            await prefetchTrack(queuedTracks[0]);
+          } catch (prefetchErr) {
+            session.queue = session.queue.filter((item) => item.id !== queuedTracks[0].id);
+            emitMusicState(session, true);
+            throw prefetchErr;
+          }
+        }
+
+        void schedulePrefetchForSession(session);
+        emitMusicState(session, true);
+
+        const extraNote = total > tracks.length ? ` (ilk ${tracks.length}/${total})` : "";
+        sendSystemMessage(roomId, `Kuyruga eklendi: ${tracks.length} sarki — ${title}${extraNote}`);
+        void playNextInSession(voiceRoomId);
+        return true;
+      }
+
+      // Single-track path (mode === "single" or auto/video or non-URL free text).
+      // When user explicitly forced /play single <url>, strip list= so resolveTrack
+      // doesn't accidentally pull the first playlist entry instead of the requested video.
+      let effectiveQuery = query;
+      if (mode === "single") {
+        const videoId = extractYouTubeVideoId(query);
+        if (videoId) effectiveQuery = `https://www.youtube.com/watch?v=${videoId}`;
+      }
+
+      sendSystemMessage(roomId, `Muzik botu hazirlaniyor, parca araniyor: ${effectiveQuery}`);
+
+      const track = await resolveTrack(effectiveQuery);
 
       const queuedTrack = createQueuedTrack(track, user.username);
       const shouldPrefetchImmediately = !session.current && !session.isPlaying;

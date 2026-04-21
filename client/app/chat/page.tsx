@@ -33,6 +33,24 @@ interface Message {
   room_id?: string;
 }
 
+interface ChatPromptAction {
+  label: string;
+  command: string;
+  style?: "primary" | "secondary";
+}
+
+interface ChatPrompt {
+  id: string;
+  room_id: string;
+  kind: "play-choice" | string;
+  title?: string;
+  count?: number;
+  url?: string;
+  actions?: ChatPromptAction[];
+  ttlMs?: number;
+  created_at?: string;
+}
+
 interface MusicTrack {
   id: string;
   title: string;
@@ -110,6 +128,7 @@ function ChatContent() {
   const [socket, setSocket] = useState<Socket | null>(null);
   const [isConnected, setIsConnected] = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
+  const [chatPrompts, setChatPrompts] = useState<ChatPrompt[]>([]);
   const [inputValue, setInputValue] = useState("");
   const [isUploading, setIsUploading] = useState(false);
   const [pastePreview, setPastePreview] = useState<string | null>(null);
@@ -464,6 +483,15 @@ function ChatContent() {
     newSocket.on("message-deleted", (data: { id: number; roomId?: string }) => {
       if (data.roomId && data.roomId !== roomId) return;
       setMessages((prev) => prev.filter((m) => m.id !== data.id));
+    });
+
+    newSocket.on("chat-prompt", (prompt: ChatPrompt) => {
+      if (!prompt || !prompt.id || prompt.room_id !== roomId) return;
+      setChatPrompts((prev) => [...prev, prompt]);
+      const ttl = typeof prompt.ttlMs === "number" && prompt.ttlMs > 0 ? prompt.ttlMs : 60_000;
+      setTimeout(() => {
+        setChatPrompts((prev) => prev.filter((p) => p.id !== prompt.id));
+      }, ttl);
     });
     
     newSocket.on("message-error", (data: { error: string }) => {
@@ -899,6 +927,59 @@ function ChatContent() {
               </div>
             );
           })}
+
+          {chatPrompts.map((prompt) => (
+            <div key={prompt.id} className="flex gap-3">
+              <div className="w-10 h-10 rounded-full flex-shrink-0 flex items-center justify-center font-bold text-white bg-gradient-to-br from-amber-500 to-orange-600 shadow-md">
+                ?
+              </div>
+              <div className="flex flex-col max-w-[70%] min-w-0 flex-1">
+                <div className="flex items-baseline gap-2 mb-1">
+                  <span className="font-semibold text-sm text-amber-300">Muzik Botu</span>
+                  <span className="text-[10px] text-zinc-600">secim bekleniyor</span>
+                </div>
+                <div className="relative rounded-2xl rounded-tl-none border border-amber-500/30 bg-gradient-to-br from-zinc-900 to-amber-950/20 px-4 py-3 shadow-sm">
+                  <button
+                    onClick={() => setChatPrompts((prev) => prev.filter((p) => p.id !== prompt.id))}
+                    className="absolute top-2 right-2 p-1 text-zinc-500 hover:text-zinc-200 rounded transition-colors"
+                    title="Kapat"
+                  >
+                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                  </button>
+                  {prompt.kind === "play-choice" ? (
+                    <>
+                      <div className="text-sm font-semibold text-white pr-6">Playlist algilandi</div>
+                      <div className="mt-1 text-xs text-zinc-400 break-all">
+                        {prompt.title || "YouTube Playlist"}
+                        {typeof prompt.count === "number" && prompt.count > 0 ? ` — ${prompt.count} sarki` : ""}
+                      </div>
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        {(prompt.actions || []).map((action, idx) => (
+                          <button
+                            key={`${prompt.id}-${idx}`}
+                            onClick={() => {
+                              sendTextMessage(action.command);
+                              setChatPrompts((prev) => prev.filter((p) => p.id !== prompt.id));
+                            }}
+                            className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
+                              action.style === "primary"
+                                ? "bg-indigo-600 text-white hover:bg-indigo-500"
+                                : "bg-zinc-700 text-zinc-100 hover:bg-zinc-600"
+                            }`}
+                          >
+                            {action.label}
+                          </button>
+                        ))}
+                      </div>
+                    </>
+                  ) : (
+                    <div className="text-sm text-zinc-300 pr-6">{prompt.title || "Etkilesim bekleniyor"}</div>
+                  )}
+                </div>
+              </div>
+            </div>
+          ))}
+
           <div ref={messagesEndRef} />
         </div>
 

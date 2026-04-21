@@ -22,14 +22,7 @@ export const isMusicActiveInRoom = (voiceRoomId) => {
 };
 
 export const canStartRadio = (voiceRoomId) => {
-  if (isMusicActiveInRoom(voiceRoomId)) {
-    return {
-      ok: false,
-      reason: "music_active",
-      message:
-        "Bu odada su anda muzik oynatiliyor. Radyo baslatmak icin once muzigi durdurun (/stop)."
-    };
-  }
+  // Music/radio can now coexist in the same room; only block duplicate radio sessions.
   if (isRadioActiveInRoom(voiceRoomId)) {
     return {
       ok: false,
@@ -40,14 +33,7 @@ export const canStartRadio = (voiceRoomId) => {
   return { ok: true };
 };
 
-export const canStartMusic = (voiceRoomId) => {
-  if (isRadioActiveInRoom(voiceRoomId)) {
-    return {
-      ok: false,
-      reason: "radio_active",
-      message:
-        "Bu odada su anda radyo yayini aktif. Muzik baslatmak icin once radyoyu durdurun (/radio stop)."
-    };
-  }
+export const canStartMusic = (_voiceRoomId) => {
+  // Music/radio can now coexist; no conflict with active radio session.
   return { ok: true };
 };
