@@ -9,6 +9,7 @@ import { io, Socket } from "socket.io-client";
 interface Room {
   id: string;
   name: string;
+  created_by?: number;
   onlineCount: number;
   users: string[];
   isPrivate: boolean;
@@ -93,6 +94,28 @@ export default function RoomsPage() {
     }
   };
 
+  const getStoredUser = () => {
+    try {
+      return JSON.parse(localStorage.getItem("user") || "{}");
+    } catch {
+      return {};
+    }
+  };
+
+  const checkRoomAccess = async (roomId: string) => {
+    const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001";
+    const user = getStoredUser();
+    const res = await fetch(`${API_URL}/api/rooms/${encodeURIComponent(roomId)}/access?userId=${encodeURIComponent(user.id || "")}`);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const message = data.error || "Bu odaya giremezsin.";
+      setJoinError(message);
+      alert(message);
+      return false;
+    }
+    return true;
+  };
+
   const createRoom = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newRoomName.trim()) return;
@@ -100,7 +123,7 @@ export default function RoomsPage() {
     setIsCreating(true);
     try {
       const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001";
-      const user = JSON.parse(localStorage.getItem("user") || "{}");
+      const user = getStoredUser();
       
       const res = await fetch(`${API_URL}/api/rooms`, {
         method: "POST",
@@ -127,7 +150,13 @@ export default function RoomsPage() {
     }
   };
 
-  const handleRoomClick = (room: Room) => {
+  const handleRoomClick = async (room: Room) => {
+    setJoinError("");
+    const canAccess = await checkRoomAccess(room.id);
+    if (!canAccess) {
+      return;
+    }
+
     if (room.isPrivate) {
       setSelectedRoomId(room.id);
       setRoomPassword("");
@@ -147,10 +176,11 @@ export default function RoomsPage() {
 
     try {
        const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001";
+       const user = getStoredUser();
        const res = await fetch(`${API_URL}/api/rooms/verify`, {
          method: "POST",
          headers: { "Content-Type": "application/json" },
-         body: JSON.stringify({ roomId: selectedRoomId, password: roomPassword }),
+         body: JSON.stringify({ roomId: selectedRoomId, password: roomPassword, userId: user.id }),
        });
 
        const data = await res.json();

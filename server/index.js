@@ -63,6 +63,7 @@ app.put("/api/users/:id/username", (req, res) => {
     
     // Also update username in existing messages
     db.prepare("UPDATE messages SET username = ? WHERE user_id = ?").run(username.trim(), id);
+    db.prepare("UPDATE room_sessions SET username = ? WHERE user_id = ?").run(username.trim(), id);
     
     res.json({ success: true, username: username.trim() });
   } catch (err) {
@@ -142,13 +143,38 @@ app.get("/api/rooms", (req, res) => {
   }
 });
 
+// Check if a user can enter a room before navigating there
+app.get("/api/rooms/:roomId/access", (req, res) => {
+  try {
+    const { roomId } = req.params;
+    const userId = normalizeUserId(req.query.userId);
+    const room = db.prepare("SELECT id FROM rooms WHERE id = ?").get(roomId);
+
+    if (!room) return res.status(404).json({ error: "Room not found" });
+    if (!userId) return res.status(400).json({ error: "User required" });
+    if (isUserKickedFromRoom(roomId, userId)) {
+      return res.status(403).json({ error: "Bu odadan atildin ve tekrar giremezsin." });
+    }
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Access check failed" });
+  }
+});
+
 // Verify Room Password
 app.post("/api/rooms/verify", (req, res) => {
   try {
     const { roomId, password } = req.body;
+    const userId = normalizeUserId(req.body.userId);
     const room = db.prepare("SELECT password FROM rooms WHERE id = ?").get(roomId);
     
     if (!room) return res.status(404).json({ error: "Room not found" });
+    if (!userId) return res.status(400).json({ error: "User required" });
+    if (isUserKickedFromRoom(roomId, userId)) {
+      return res.status(403).json({ error: "Bu odadan atildin ve tekrar giremezsin." });
+    }
     
     // Simple direct comparison
     if (room.password === password) {
@@ -2277,7 +2303,7 @@ app.get("/health", (req, res) => {
   res.json({ status: "ok", uptime: process.uptime(), connections: io.engine.clientsCount });
 });
 
-const usersInVoice = {}; // { roomId: [{ id, username }] } - kept for real-time WebRTC signaling
+const usersInVoice = {}; // { roomId: [{ id, username, userId }] } - kept for real-time WebRTC signaling
 const usersInRoom = {}; // { roomId: { socketId: username } } - kept for compatibility
 const socketToRoom = {}; // { socketId: roomId } for voice
 const socketToTextRoom = {}; // { socketId: roomId } for text
@@ -2286,6 +2312,30 @@ const roomEmptyTimestamps = {}; // { roomId: timestamp } - when room became empt
 // --- Persistence Protection ---
 const SERVER_START_TIME = Date.now();
 const GRACE_PERIOD_MS = 1 * 60 * 1000; // 1 minute grace period on startup (reduced from 5)
+
+const normalizeUserId = (value) => {
+  const id = Number(value);
+  return Number.isInteger(id) && id > 0 ? id : null;
+};
+
+const isUserKickedFromRoom = (roomId, userId) => {
+  const normalizedUserId = normalizeUserId(userId);
+  if (!roomId || !normalizedUserId) return false;
+
+  const kick = db.prepare("SELECT id FROM room_kicks WHERE room_id = ? AND user_id = ?").get(roomId, normalizedUserId);
+  return !!kick;
+};
+
+const getRoomCreatorId = (roomId) => {
+  const room = db.prepare("SELECT created_by FROM rooms WHERE id = ?").get(roomId);
+  return room ? normalizeUserId(room.created_by) : null;
+};
+
+const isRoomLeader = (roomId, userId) => {
+  const creatorId = getRoomCreatorId(roomId);
+  const normalizedUserId = normalizeUserId(userId);
+  return !!creatorId && !!normalizedUserId && creatorId === normalizedUserId;
+};
 
 // ============================================================================
 // DATABASE SESSION MANAGEMENT - The Single Source of Truth
@@ -2315,13 +2365,13 @@ setTimeout(() => {
 /**
  * Add a session to the database
  */
-const addSession = (roomId, socketId, username, sessionType = 'text') => {
+const addSession = (roomId, socketId, username, sessionType = 'text', userId = null) => {
   try {
     const now = new Date().toISOString();
     db.prepare(`
-      INSERT OR REPLACE INTO room_sessions (room_id, socket_id, username, session_type, joined_at, last_heartbeat)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `).run(roomId, socketId, username, sessionType, now, now);
+      INSERT OR REPLACE INTO room_sessions (room_id, socket_id, user_id, username, session_type, joined_at, last_heartbeat)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(roomId, socketId, normalizeUserId(userId), username, sessionType, now, now);
     console.log(`[Session] Added ${sessionType} session: ${username} in ${roomId}`);
   } catch (err) {
     console.error("[Session] Error adding session:", err);
@@ -2485,6 +2535,115 @@ const getRoomStats = () => {
   return stats;
 };
 
+const findUserForKick = (roomId, targetName) => {
+  const username = String(targetName || "").trim();
+  if (!roomId || !username) return null;
+
+  const activeUser = db.prepare(`
+    SELECT user_id, username FROM room_sessions
+    WHERE (room_id = ? OR room_id LIKE ?)
+      AND user_id IS NOT NULL
+      AND lower(username) = lower(?)
+    ORDER BY last_heartbeat DESC
+    LIMIT 1
+  `).get(roomId, `${roomId}-%`, username);
+
+  if (activeUser) {
+    return { id: Number(activeUser.user_id), username: activeUser.username };
+  }
+
+  const user = db.prepare("SELECT id, username FROM users WHERE lower(username) = lower(?)").get(username);
+  return user ? { id: Number(user.id), username: user.username } : null;
+};
+
+const removeKickedUserFromActiveRoom = (roomId, targetUserId, reason) => {
+  const socketRows = db.prepare(`
+    SELECT DISTINCT socket_id FROM room_sessions
+    WHERE (room_id = ? OR room_id LIKE ?) AND user_id = ?
+  `).all(roomId, `${roomId}-%`, targetUserId);
+
+  for (const row of socketRows) {
+    const socketId = row.socket_id;
+    const targetSocket = io.sockets.sockets.get(socketId);
+
+    const textRoomId = socketToTextRoom[socketId];
+    if (textRoomId === roomId) {
+      if (usersInRoom[textRoomId]) {
+        delete usersInRoom[textRoomId][socketId];
+        if (Object.keys(usersInRoom[textRoomId]).length === 0) {
+          markRoomAsEmpty(textRoomId);
+        }
+      }
+      delete socketToTextRoom[socketId];
+      targetSocket?.leave(textRoomId);
+    }
+
+    const voiceRoomId = socketToRoom[socketId];
+    if (voiceRoomId && getServerRoomIdFromVoiceRoomId(voiceRoomId) === roomId) {
+      let room = usersInVoice[voiceRoomId];
+      if (room) {
+        room = room.filter((u) => normalizeUserId(u.userId) !== targetUserId && u.id !== socketId);
+        usersInVoice[voiceRoomId] = room;
+        targetSocket?.broadcast.to(voiceRoomId).emit("user-left-voice", socketId);
+        if (room.length === 0) {
+          delete usersInVoice[voiceRoomId];
+        }
+      }
+
+      const session = musicSessions.get(voiceRoomId);
+      if (session) {
+        destroyMusicPeer(session, socketId);
+      }
+
+      maybeAutoStopMusicForRoom(voiceRoomId);
+      targetSocket?.leave(voiceRoomId);
+      delete socketToRoom[socketId];
+    }
+
+    db.prepare("DELETE FROM room_sessions WHERE socket_id = ? AND (room_id = ? OR room_id LIKE ?)")
+      .run(socketId, roomId, `${roomId}-%`);
+    targetSocket?.emit("kicked-from-room", { roomId, reason });
+  }
+
+  broadcastAllVoiceUsers();
+};
+
+const kickUserFromRoom = ({ roomId, requesterUserId, targetUserId, targetUsername }) => {
+  const normalizedRequesterId = normalizeUserId(requesterUserId);
+  const normalizedTargetId = normalizeUserId(targetUserId);
+
+  if (!roomId || !normalizedRequesterId || !normalizedTargetId) {
+    return { ok: false, error: "Kick icin kullanici bilgisi eksik." };
+  }
+
+  if (!isRoomLeader(roomId, normalizedRequesterId)) {
+    return { ok: false, error: "Sadece oda lideri kullanici atabilir." };
+  }
+
+  if (normalizedRequesterId === normalizedTargetId) {
+    return { ok: false, error: "Kendini odadan atamazsin." };
+  }
+
+  const target = targetUsername
+    ? { id: normalizedTargetId, username: String(targetUsername).trim() }
+    : db.prepare("SELECT id, username FROM users WHERE id = ?").get(normalizedTargetId);
+
+  if (!target || !target.username) {
+    return { ok: false, error: "Kullanici bulunamadi." };
+  }
+
+  db.prepare(`
+    INSERT OR REPLACE INTO room_kicks (room_id, user_id, kicked_by, created_at)
+    VALUES (?, ?, ?, ?)
+  `).run(roomId, normalizedTargetId, normalizedRequesterId, new Date().toISOString());
+
+  const reason = `${target.username} odadan atildi.`;
+  removeKickedUserFromActiveRoom(roomId, normalizedTargetId, reason);
+  sendSystemMessage(roomId, reason);
+
+  return { ok: true, username: target.username };
+};
+
 // ============================================================================
 // Room Cleanup System - CRITICAL LOGIC
 // Runs every 5 seconds for high responsiveness
@@ -2558,6 +2717,17 @@ io.on("connection", (socket) => {
   socket.on("join-room", (data) => {
     const roomId = typeof data === 'object' ? data.roomId : data;
     const username = typeof data === 'object' ? data.username : "Anonymous";
+    const userId = normalizeUserId(typeof data === 'object' ? data.userId : null);
+
+    if (!roomId || !userId) {
+      socket.emit("room-join-denied", { roomId, error: "Kullanici bilgisi eksik." });
+      return;
+    }
+
+    if (isUserKickedFromRoom(roomId, userId)) {
+      socket.emit("room-join-denied", { roomId, error: "Bu odadan atildin ve tekrar giremezsin." });
+      return;
+    }
 
     // Leave previous text room if any
     const previousRoom = socketToTextRoom[socket.id];
@@ -2585,7 +2755,7 @@ io.on("connection", (socket) => {
     usersInRoom[roomId][socket.id] = username;
     
     // CRITICAL: Add to database for persistence
-    addSession(roomId, socket.id, username, 'text');
+    addSession(roomId, socket.id, username, 'text', userId);
     
     // CRITICAL: Mark room as occupied - cancels any pending deletion
     markRoomAsOccupied(roomId);
@@ -2624,6 +2794,11 @@ io.on("connection", (socket) => {
       socket.emit("message-error", { error: "Invalid user ID" });
       return;
     }
+
+    if (isUserKickedFromRoom(roomId, userId)) {
+      socket.emit("kicked-from-room", { roomId, reason: "Bu odadan atildin ve tekrar giremezsin." });
+      return;
+    }
     
     try {
       const trimmedContent = typeof content === "string" ? content.trim() : "";
@@ -2639,6 +2814,34 @@ io.on("connection", (socket) => {
           fileUrl,
           fileName
         });
+
+        const lowerCommandText = trimmedContent.toLowerCase();
+        if (lowerCommandText === "/kick" || lowerCommandText.startsWith("/kick ")) {
+          const [, ...kickArgs] = trimmedContent.split(/\s+/);
+          const targetName = kickArgs.join(" ").trim();
+          if (!targetName) {
+            sendSystemMessage(roomId, "Kullanim: /kick <kullanici_adi>");
+            return;
+          }
+
+          const target = findUserForKick(roomId, targetName);
+          if (!target) {
+            sendSystemMessage(roomId, `Kullanici bulunamadi: ${targetName}`);
+            return;
+          }
+
+          const result = kickUserFromRoom({
+            roomId,
+            requesterUserId: userId,
+            targetUserId: target.id,
+            targetUsername: target.username
+          });
+
+          if (!result.ok) {
+            sendSystemMessage(roomId, result.error);
+          }
+          return;
+        }
 
         // Radyo komutlari ayri namespace (/radio ...) ve ayri modulde islenir.
         if (trimmedContent.toLowerCase().startsWith("/radio")) {
@@ -2678,6 +2881,29 @@ io.on("connection", (socket) => {
     } catch (err) {
       console.error("[Message] Error saving message:", err);
       socket.emit("message-error", { error: "Failed to save message" });
+    }
+  });
+
+  socket.on("kick-user", (payload = {}) => {
+    try {
+      const roomId = String(payload.roomId || "").trim();
+      const requesterUserId = normalizeUserId(payload.requesterUserId);
+      const targetUserId = normalizeUserId(payload.targetUserId);
+      const targetUsername = String(payload.targetUsername || "").trim();
+
+      const result = kickUserFromRoom({
+        roomId,
+        requesterUserId,
+        targetUserId,
+        targetUsername
+      });
+
+      if (!result.ok) {
+        socket.emit("kick-error", { error: result.error });
+      }
+    } catch (err) {
+      console.error("[Kick] Error:", err);
+      socket.emit("kick-error", { error: "Kick islemi basarisiz." });
     }
   });
 
@@ -2951,6 +3177,18 @@ io.on("connection", (socket) => {
   socket.on("join-voice", (data) => {
     const roomId = typeof data === 'object' ? data.roomId : data;
     const userData = typeof data === 'object' ? data.user : { username: "Unknown" };
+    const userId = normalizeUserId(userData?.id);
+    const serverRoomId = getServerRoomIdFromVoiceRoomId(roomId);
+
+    if (!roomId || !serverRoomId || !userId) {
+      socket.emit("room-join-denied", { roomId: serverRoomId, error: "Kullanici bilgisi eksik." });
+      return;
+    }
+
+    if (isUserKickedFromRoom(serverRoomId, userId)) {
+      socket.emit("kicked-from-room", { roomId: serverRoomId, reason: "Bu odadan atildin ve tekrar giremezsin." });
+      return;
+    }
 
     console.log(`User ${socket.id} (${userData.username}) joining voice in ${roomId}`);
     
@@ -2962,9 +3200,9 @@ io.on("connection", (socket) => {
     // Check if user is already in (prevent duplicates)
     const existingIndex = usersInVoice[roomId].findIndex(u => u.id === socket.id);
     if (existingIndex !== -1) {
-      usersInVoice[roomId][existingIndex] = { id: socket.id, username: userData.username };
+      usersInVoice[roomId][existingIndex] = { id: socket.id, username: userData.username, userId };
     } else {
-      usersInVoice[roomId].push({ id: socket.id, username: userData.username });
+      usersInVoice[roomId].push({ id: socket.id, username: userData.username, userId });
     }
     
     socketToRoom[socket.id] = roomId;
@@ -2973,15 +3211,11 @@ io.on("connection", (socket) => {
     socket.join(roomId);
     
     // CRITICAL: Add voice session to database
-    addSession(roomId, socket.id, userData.username, 'voice');
+    addSession(roomId, socket.id, userData.username, 'voice', userId);
     
     // CRITICAL: Mark the server as occupied
     // Voice room format: "serverid-channelname"
-    const lastDash = roomId.lastIndexOf('-');
-    if (lastDash > 0) {
-      const serverId = roomId.substring(0, lastDash);
-      markRoomAsOccupied(serverId);
-    }
+    markRoomAsOccupied(serverRoomId);
 
     // Send existing users to the new joiner
     const usersInThisRoom = usersInVoice[roomId].filter(u => u.id !== socket.id && !isMusicBotId(u.id) && !isRadioBotId(u.id));
@@ -3043,7 +3277,8 @@ io.on("connection", (socket) => {
     io.to(payload.userToSignal).emit("user-joined-voice", {
       signal: payload.signal,
       callerID: payload.callerID,
-      username: payload.username
+      username: payload.username,
+      userId: normalizeUserId(payload.userId)
     });
   });
 

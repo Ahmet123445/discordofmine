@@ -59,6 +59,7 @@ db.exec(`
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     room_id TEXT NOT NULL,
     socket_id TEXT NOT NULL,
+    user_id INTEGER,
     username TEXT NOT NULL,
     session_type TEXT DEFAULT 'text',
     joined_at TEXT DEFAULT CURRENT_TIMESTAMP,
@@ -69,9 +70,27 @@ db.exec(`
 
 // Create index for faster queries
 try {
+  db.exec("ALTER TABLE room_sessions ADD COLUMN user_id INTEGER");
+} catch (err) {
+  // Column likely exists
+}
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS room_kicks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    room_id TEXT NOT NULL,
+    user_id INTEGER NOT NULL,
+    kicked_by INTEGER NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(room_id, user_id)
+  )
+`);
+
+try {
   db.exec("CREATE INDEX IF NOT EXISTS idx_room_sessions_room_id ON room_sessions(room_id)");
   db.exec("CREATE INDEX IF NOT EXISTS idx_room_sessions_socket_id ON room_sessions(socket_id)");
   db.exec("CREATE INDEX IF NOT EXISTS idx_room_sessions_heartbeat ON room_sessions(last_heartbeat)");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_room_kicks_room_user ON room_kicks(room_id, user_id)");
 } catch (err) {
   // Indexes may already exist
 }

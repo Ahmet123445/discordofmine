@@ -9,12 +9,27 @@ interface VoiceChatProps {
   socket: Socket | null;
   roomId: string; // This is the Server ID (e.g. "gaming-1234")
   user: { id: number; username: string };
+  roomCreatorId?: number | null;
+  onKickUser?: (target: { id: number; username: string }) => void;
+}
+
+interface VoiceUser {
+  id: string;
+  username: string;
+  userId?: number | null;
 }
 
 interface VoiceRoom {
   id: string; // Internal ID (e.g. "general")
   name: string;
 }
+
+const CrownIcon = ({ className = "" }: { className?: string }) => (
+  <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
+    <path d="m2 5 5 5 5-8 5 8 5-5-2 14H4L2 5z"/>
+    <path d="M4 19h16"/>
+  </svg>
+);
 
 // Sound effects
 const playJoinSound = () => {
@@ -98,12 +113,12 @@ const ICE_SERVERS = parseIceServers();
   // SIMD Check Helper
   // const isSimdSupported = async () => { ... } // No longer needed for DeepFilterNet (WASM handles it)
   
-  export default function VoiceChat({ socket, roomId: serverId, user }: VoiceChatProps) {
+  export default function VoiceChat({ socket, roomId: serverId, user, roomCreatorId, onKickUser }: VoiceChatProps) {
   const [inVoice, setInVoice] = useState(false);
   const [currentInternalRoomId, setCurrentInternalRoomId] = useState<string | null>(null);
   const [PeerClass, setPeerClass] = useState<any>(null);
   const [isSharingScreen, setIsSharingScreen] = useState(false);
-  const [peers, setPeers] = useState<{ peerID: string; peer: any; volume: number; username: string }[]>([]);
+  const [peers, setPeers] = useState<{ peerID: string; peer: any; volume: number; username: string; userId?: number | null }[]>([]);
   const [incomingStreams, setIncomingStreams] = useState<{ id: string; stream: MediaStream }[]>([]);
   const [hiddenStreams, setHiddenStreams] = useState<Set<string>>(new Set());
   const [isMuted, setIsMuted] = useState(false);
@@ -126,7 +141,7 @@ const ICE_SERVERS = parseIceServers();
   ]);
   
   // Map of FULL room IDs (server-internal) to users
-  const [allRoomsUsers, setAllRoomsUsers] = useState<{ [roomId: string]: { id: string; username: string }[] }>({});
+  const [allRoomsUsers, setAllRoomsUsers] = useState<{ [roomId: string]: VoiceUser[] }>({});
 
   const peersRef = useRef<{ peerID: string; peer: any }[]>([]);
   const localStream = useRef<MediaStream | null>(null);
@@ -177,7 +192,7 @@ const ICE_SERVERS = parseIceServers();
   useEffect(() => {
     if (!socket) return;
     
-    const handleAllRoomsUsers = (data: { [roomId: string]: { id: string; username: string }[] }) => {
+    const handleAllRoomsUsers = (data: { [roomId: string]: VoiceUser[] }) => {
       setAllRoomsUsers(data);
     };
     
@@ -556,19 +571,19 @@ const ICE_SERVERS = parseIceServers();
       // Join the namespaced room
       socket.emit("join-voice", { roomId: namespacedRoomId, user });
 
-      socket.on("all-voice-users", (users: { id: string; username: string }[]) => {
-        const peersArr: { peerID: string; peer: any; volume: number; username: string }[] = [];
+      socket.on("all-voice-users", (users: VoiceUser[]) => {
+        const peersArr: { peerID: string; peer: any; volume: number; username: string; userId?: number | null }[] = [];
         users.forEach((u) => {
           if (socket.id) {
-            const peer = createPeer(u.id, socket.id, streamToUse, user.username);
+            const peer = createPeer(u.id, socket.id, streamToUse, user.username, user.id);
             peersRef.current.push({ peerID: u.id, peer });
-            peersArr.push({ peerID: u.id, peer, volume: 100, username: u.username });
+            peersArr.push({ peerID: u.id, peer, volume: 100, username: u.username, userId: u.userId });
           }
         });
         setPeers(peersArr);
       });
 
-      socket.on("user-joined-voice", (payload: { signal: any; callerID: string; username: string }) => {
+      socket.on("user-joined-voice", (payload: { signal: any; callerID: string; username: string; userId?: number | null }) => {
         const existing = peersRef.current.find((p) => p.peerID === payload.callerID);
         if (existing) {
           existing.peer.signal(payload.signal);
@@ -577,7 +592,7 @@ const ICE_SERVERS = parseIceServers();
         playJoinSound();
         const peer = addPeer(payload.signal, payload.callerID, streamToUse);
         peersRef.current.push({ peerID: payload.callerID, peer });
-        setPeers((prev) => [...prev, { peerID: payload.callerID, peer, volume: 100, username: payload.username }]);
+        setPeers((prev) => [...prev, { peerID: payload.callerID, peer, volume: 100, username: payload.username, userId: payload.userId }]);
       });
 
       socket.on("receiving-returned-signal", (payload: { signal: any; id: string }) => {
@@ -634,7 +649,7 @@ const ICE_SERVERS = parseIceServers();
     socket?.off("user-left-voice");
   };
 
-  const createPeer = (userToSignal: string, callerID: string, stream: MediaStream, myUsername: string) => {
+  const createPeer = (userToSignal: string, callerID: string, stream: MediaStream, myUsername: string, myUserId: number) => {
     const peer = new PeerClass({
       initiator: true,
       trickle: true,
@@ -645,7 +660,7 @@ const ICE_SERVERS = parseIceServers();
     });
 
     peer.on("signal", (signal: any) => {
-      socket?.emit("sending-signal", { userToSignal, callerID, signal, username: myUsername });
+      socket?.emit("sending-signal", { userToSignal, callerID, signal, username: myUsername, userId: myUserId });
     });
 
     peer.on("stream", (remoteStream: MediaStream) => {
@@ -966,7 +981,10 @@ const ICE_SERVERS = parseIceServers();
                     <div className="w-5 h-5 rounded-full bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center text-[10px] font-bold text-white">
                       {user.username[0].toUpperCase()}
                     </div>
-                    <span className="flex-1 truncate">{user.username}</span>
+                    <span className="flex flex-1 items-center gap-1.5 truncate">
+                      <span className="truncate">{user.username}</span>
+                      {roomCreatorId === user.id && <CrownIcon className="text-amber-300" />}
+                    </span>
                     <div className="flex items-center gap-1.5">
                       {/* Microphone status */}
                       {isMuted ? (
@@ -1005,13 +1023,24 @@ const ICE_SERVERS = parseIceServers();
                     const streamItem = incomingStreams.find((s) => s.id === p.peerID);
                     const streamKey = streamItem ? `${streamItem.id}-${streamItem.stream.id}` : "";
                     const isHidden = hiddenStreams.has(streamKey);
+                    const peerUserId = typeof p.userId === "number" ? p.userId : null;
+                    const canKickPeer = roomCreatorId === user.id && !!peerUserId && peerUserId !== user.id;
                     
                     return (
                       <div key={p.peerID} className="flex items-center gap-2 text-xs py-0.5 px-1 rounded text-zinc-400">
                         <div className="w-5 h-5 rounded-full bg-gradient-to-br from-emerald-500 to-teal-600 flex items-center justify-center text-[10px] font-bold text-white">
                           {(p.username || "?")[0].toUpperCase()}
                         </div>
-                        <span className="flex-1 truncate">{p.username || `User ${p.peerID.substring(0, 4)}`}</span>
+                        <button
+                          type="button"
+                          disabled={!canKickPeer}
+                          onClick={() => canKickPeer && onKickUser?.({ id: peerUserId ?? 0, username: p.username || `User ${p.peerID.substring(0, 4)}` })}
+                          className={`flex flex-1 items-center gap-1.5 truncate text-left ${canKickPeer ? "hover:text-red-300" : "cursor-default"}`}
+                          title={canKickPeer ? "Kullaniciyi odadan at" : undefined}
+                        >
+                          <span className="truncate">{p.username || `User ${p.peerID.substring(0, 4)}`}</span>
+                          {peerUserId === roomCreatorId && <CrownIcon className="text-amber-300" />}
+                        </button>
                         <div className="flex items-center gap-1.5">
                           {/* Connected indicator */}
                           <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-green-500">
@@ -1053,7 +1082,16 @@ const ICE_SERVERS = parseIceServers();
                       <div className="w-5 h-5 rounded-full bg-gradient-to-br from-zinc-600 to-zinc-700 flex items-center justify-center text-[10px] font-bold text-zinc-400">
                         {u.username[0].toUpperCase()}
                       </div>
-                      <span className="flex-1 truncate">{u.username}</span>
+                      <button
+                        type="button"
+                        disabled={!(roomCreatorId === user.id && typeof u.userId === "number" && u.userId !== user.id)}
+                        onClick={() => typeof u.userId === "number" && onKickUser?.({ id: u.userId, username: u.username })}
+                        className={`flex flex-1 items-center gap-1.5 truncate text-left ${roomCreatorId === user.id && typeof u.userId === "number" && u.userId !== user.id ? "hover:text-red-300" : "cursor-default"}`}
+                        title={roomCreatorId === user.id && typeof u.userId === "number" && u.userId !== user.id ? "Kullaniciyi odadan at" : undefined}
+                      >
+                        <span className="truncate">{u.username}</span>
+                        {u.userId === roomCreatorId && <CrownIcon className="text-amber-300" />}
+                      </button>
                       <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-zinc-600">
                         <path d="M3 18v-6a9 9 0 0 1 18 0v6"/><path d="M21 19a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3zM3 19a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H3z"/>
                       </svg>

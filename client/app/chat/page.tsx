@@ -21,6 +21,13 @@ const RadioPanel = dynamic(() => import("@/components/RadioPanel"), {
 
 const RADIO_ENABLED = process.env.NEXT_PUBLIC_RADIO_FEATURE_ENABLED === "true";
 
+const CrownIcon = ({ className = "" }: { className?: string }) => (
+  <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
+    <path d="m2 5 5 5 5-8 5 8 5-5-2 14H4L2 5z"/>
+    <path d="M4 19h16"/>
+  </svg>
+);
+
 interface Message {
   id: number;
   content: string;
@@ -104,6 +111,7 @@ const SLASH_COMMANDS = [
   { command: "/stop", usage: "/stop", description: "Botu durdur ve kapat" },
   { command: "/np", usage: "/np", description: "Simdi calani goster" },
   { command: "/volume", usage: "/volume <0-200>", description: "Ses seviyesini ayarla" },
+  { command: "/kick", usage: "/kick <kullanici_adi>", description: "Odadaki kullaniciyi at (lider)" },
   { command: "/help", usage: "/help", description: "Tum muzik komutlarini goster" },
   // Radyo
   { command: "/radio", usage: "/radio help", description: "Radyo komutlarini goster" },
@@ -141,6 +149,7 @@ function ChatContent() {
   const [activeCommandIndex, setActiveCommandIndex] = useState(0);
   const [musicState, setMusicState] = useState<MusicState | null>(null);
   const [musicControlError, setMusicControlError] = useState("");
+  const [roomCreatorId, setRoomCreatorId] = useState<number | null>(null);
   const [seekDragValue, setSeekDragValue] = useState<number | null>(null);
   const [isDragActive, setIsDragActive] = useState(false);
   
@@ -413,6 +422,15 @@ function ChatContent() {
         setMessages([]);
       });
 
+    fetch(`${API_URL}/api/rooms`)
+      .then((res) => res.json())
+      .then((data) => {
+        if (!Array.isArray(data)) return;
+        const room = data.find((item: { id: string; created_by?: number }) => item.id === roomId);
+        setRoomCreatorId(room?.created_by ? Number(room.created_by) : null);
+      })
+      .catch((err) => console.error("Failed to load room metadata", err));
+
     const newSocket = io(API_URL);
     setSocket(newSocket);
 
@@ -420,7 +438,7 @@ function ChatContent() {
       console.log("Connected to socket server");
       setIsConnected(true);
       // Join specific text room with username for tracking
-      newSocket.emit("join-room", { roomId, username: parsedUser.username });
+      newSocket.emit("join-room", { roomId, username: parsedUser.username, userId: parsedUser.id });
       // CRITICAL: Send immediate heartbeat to establish session in database
       newSocket.emit("heartbeat", { roomId });
     });
@@ -429,7 +447,7 @@ function ChatContent() {
     newSocket.on("reconnect", () => {
       console.log("Reconnected to socket server");
       setIsConnected(true);
-      newSocket.emit("join-room", { roomId, username: parsedUser.username });
+      newSocket.emit("join-room", { roomId, username: parsedUser.username, userId: parsedUser.id });
       // CRITICAL: Send immediate heartbeat on reconnect
       newSocket.emit("heartbeat", { roomId });
     });
@@ -499,6 +517,18 @@ function ChatContent() {
       alert(`Mesaj gönderilemedi: ${data.error}`);
     });
 
+    const handleKicked = (data: { roomId?: string; reason?: string; error?: string }) => {
+      if (data?.roomId && data.roomId !== roomId) return;
+      alert(data.reason || data.error || "Bu odadan atildin.");
+      router.push("/rooms");
+    };
+
+    newSocket.on("kicked-from-room", handleKicked);
+    newSocket.on("room-join-denied", handleKicked);
+    newSocket.on("kick-error", (data: { error: string }) => {
+      alert(data.error || "Kick islemi basarisiz.");
+    });
+
     newSocket.on("music-state", (state: MusicState) => {
       if (!state || state.roomId !== roomId) return;
       setMusicState(state);
@@ -519,6 +549,21 @@ function ChatContent() {
       newSocket.disconnect();
     };
   }, [router, roomId]);
+
+  const requestKickUser = (target: { id: number; username: string }) => {
+    if (!socket || !roomId || !user || user.id !== roomCreatorId) return;
+    if (!target.id || target.id === user.id) return;
+
+    const confirmed = window.confirm(`${target.username} odadan atilsin mi? Bu kullanici tekrar giremeyecek.`);
+    if (!confirmed) return;
+
+    socket.emit("kick-user", {
+      roomId,
+      requesterUserId: user.id,
+      targetUserId: target.id,
+      targetUsername: target.username
+    });
+  };
 
   const sendTextMessage = (content: string) => {
     const trimmedContent = content.trim();
@@ -721,6 +766,7 @@ function ChatContent() {
   const currentPrefetchStatus = formatPrefetchStatus(musicState?.current?.prefetchStatus);
   const canControlCurrent = !!musicState?.current;
   const canSeekCurrent = canControlCurrent && currentDuration > 0;
+  const isLeader = roomCreatorId === user?.id;
 
   if (!user || !roomId) return null;
 
@@ -769,7 +815,7 @@ function ChatContent() {
         {/* Voice Channels Area */}
         <div className="flex-1 flex flex-col p-3 pt-0 overflow-hidden">
            {/* VoiceChat now handles connection to this specific roomId */}
-          <VoiceChat socket={socket} roomId={roomId} user={user} />
+          <VoiceChat socket={socket} roomId={roomId} user={user} roomCreatorId={roomCreatorId} onKickUser={requestKickUser} />
         </div>
 
         {/* User Panel */}
@@ -783,7 +829,10 @@ function ChatContent() {
                 <div className={`absolute -bottom-0.5 -right-0.5 w-3.5 h-3.5 rounded-full border-2 border-zinc-900 ${isConnected ? "bg-green-500" : "bg-yellow-500 animate-pulse"}`}></div>
               </div>
               <div>
-                <div className="text-sm font-medium text-white">{user.username}</div>
+                <div className="flex items-center gap-1.5 text-sm font-medium text-white">
+                  <span>{user.username}</span>
+                  {roomCreatorId === user.id && <CrownIcon className="text-amber-300" />}
+                </div>
                 <div className={`text-xs ${isConnected ? "text-green-400" : "text-yellow-400"}`}>
                   {isConnected ? "Online" : "Baglaniyor..."}
                 </div>
@@ -844,6 +893,8 @@ function ChatContent() {
           {messages.map((msg, index) => {
             const isMe = msg.user_id === user.id;
             const isCommand = msg.type === "command";
+            const isRoomCreator = msg.user_id === roomCreatorId;
+            const canKickMessageUser = isLeader && msg.user_id > 0 && msg.user_id !== user.id;
             const showHeader = index === 0 || messages[index - 1].user_id !== msg.user_id;
 
             return (
@@ -857,7 +908,16 @@ function ChatContent() {
                 <div className={`flex flex-col ${isMe ? "items-end" : "items-start"} max-w-[70%]`}>
                   {showHeader && (
                     <div className="flex items-baseline gap-2 mb-1">
-                      <span className="font-semibold text-sm text-zinc-300">{msg.username}</span>
+                      <button
+                        type="button"
+                        onClick={() => canKickMessageUser && requestKickUser({ id: msg.user_id, username: msg.username })}
+                        disabled={!canKickMessageUser}
+                        className={`flex items-center gap-1.5 font-semibold text-sm text-zinc-300 ${canKickMessageUser ? "hover:text-red-300 cursor-pointer" : "cursor-default"}`}
+                        title={canKickMessageUser ? "Kullaniciyi odadan at" : undefined}
+                      >
+                        <span>{msg.username}</span>
+                        {isRoomCreator && <CrownIcon className="text-amber-300" />}
+                      </button>
                       <span className="text-[10px] text-zinc-600">
                         {new Date(msg.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
                       </span>
