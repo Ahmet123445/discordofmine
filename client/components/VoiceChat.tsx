@@ -24,6 +24,21 @@ interface VoiceRoom {
   name: string;
 }
 
+type ScreenShareQuality = "720p30" | "1080p60" | "1440p60" | "4k60";
+type MediaTrackWithContentHint = MediaStreamTrack & { contentHint?: string };
+type ScreenAudioConstraints = MediaTrackConstraints & { suppressLocalAudioPlayback?: boolean };
+
+const SCREEN_SHARE_QUALITY_PRESETS: Record<ScreenShareQuality, { label: string; width: number; height: number; frameRate: number; maxBitrate: number }> = {
+  "720p30": { label: "720p 30 FPS", width: 1280, height: 720, frameRate: 30, maxBitrate: 3_000_000 },
+  "1080p60": { label: "1080p 60 FPS", width: 1920, height: 1080, frameRate: 60, maxBitrate: 6_000_000 },
+  "1440p60": { label: "1440p 60 FPS", width: 2560, height: 1440, frameRate: 60, maxBitrate: 10_000_000 },
+  "4k60": { label: "4K 60 FPS / Max", width: 3840, height: 2160, frameRate: 60, maxBitrate: 16_000_000 },
+};
+
+const isScreenShareQuality = (value: string): value is ScreenShareQuality => {
+  return value in SCREEN_SHARE_QUALITY_PRESETS;
+};
+
 const CrownIcon = ({ className = "" }: { className?: string }) => (
   <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
     <path d="m2 5 5 5 5-8 5 8 5-5-2 14H4L2 5z"/>
@@ -146,6 +161,8 @@ const ICE_SERVERS = parseIceServers();
   const peersRef = useRef<{ peerID: string; peer: any }[]>([]);
   const localStream = useRef<MediaStream | null>(null);
   const screenStream = useRef<MediaStream | null>(null);
+  const screenShareStream = useRef<MediaStream | null>(null);
+  const screenShareTrackIds = useRef<Set<string>>(new Set());
   
   // Audio Processing Refs
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -157,6 +174,8 @@ const ICE_SERVERS = parseIceServers();
 
   const [noiseSuppressionEnabled, setNoiseSuppressionEnabled] = useState(true); // Default ON
   const [noiseSuppressionLoading, setNoiseSuppressionLoading] = useState(false);
+  const [screenShareQuality, setScreenShareQuality] = useState<ScreenShareQuality>("1080p60");
+  const [shareScreenAudio, setShareScreenAudio] = useState(false);
 
   // Load Peer dynamically on mount
   useEffect(() => {
@@ -176,6 +195,16 @@ const ICE_SERVERS = parseIceServers();
     const savedNoiseSuppression = localStorage.getItem("noiseSuppressionEnabled");
     if (savedNoiseSuppression !== null) {
       setNoiseSuppressionEnabled(savedNoiseSuppression === "true");
+    }
+
+    const savedScreenShareQuality = localStorage.getItem("screenShareQuality");
+    if (savedScreenShareQuality && isScreenShareQuality(savedScreenShareQuality)) {
+      setScreenShareQuality(savedScreenShareQuality);
+    }
+
+    const savedShareScreenAudio = localStorage.getItem("shareScreenAudio");
+    if (savedShareScreenAudio !== null) {
+      setShareScreenAudio(savedShareScreenAudio === "true");
     }
     
     import("simple-peer")
@@ -340,6 +369,7 @@ const ICE_SERVERS = parseIceServers();
   // - explicit maxFramerate so the encoder does not cap itself to ~15fps
   const tuneScreenVideoSender = (peer: any, track: MediaStreamTrack) => {
     try {
+      const preset = SCREEN_SHARE_QUALITY_PRESETS[screenShareQuality];
       const pc: RTCPeerConnection | undefined = peer?._pc;
       if (!pc || typeof pc.getSenders !== "function") return;
       const sender = pc.getSenders().find((s) => s.track === track);
@@ -350,14 +380,10 @@ const ICE_SERVERS = parseIceServers();
         params.encodings = [{}];
       }
       params.encodings.forEach((enc: RTCRtpEncodingParameters) => {
-        // 2.5 Mbps @ 30fps — 1080p icin akici ve tipik Turkiye ev uplink'inin
-        // 3+ peer mesh'te doyurmayacagi degerler. Radyo audio + mikrofon icin
-        // bant genisligi pay birakir, packet drop / jitter azalir -> ses
-        // robotiklesmez, frame drop minimize olur.
-        enc.maxBitrate = 2_500_000;
-        (enc as any).maxFramerate = 30;
-        (enc as any).networkPriority = "medium";
-        (enc as any).priority = "medium";
+        enc.maxBitrate = preset.maxBitrate;
+        (enc as any).maxFramerate = preset.frameRate;
+        (enc as any).networkPriority = "high";
+        (enc as any).priority = "high";
       });
       (params as any).degradationPreference = "maintain-framerate";
 
@@ -370,14 +396,15 @@ const ICE_SERVERS = parseIceServers();
   };
 
   const attachActiveScreenTracks = (peer: any) => {
-    if (!screenStream.current || !peer) return;
+    const outgoingStream = screenShareStream.current || screenStream.current;
+    if (!outgoingStream || !peer) return;
 
-    const activeTracks = screenStream.current.getTracks().filter((track) => track.readyState === "live");
+    const activeTracks = outgoingStream.getTracks().filter((track) => track.readyState === "live");
     if (activeTracks.length === 0) return;
 
     activeTracks.forEach((track) => {
       try {
-        peer.addTrack(track, screenStream.current as MediaStream);
+        peer.addTrack(track, outgoingStream);
         if (track.kind === "video") {
           // Defer so the sender is fully registered on the RTCPeerConnection
           setTimeout(() => tuneScreenVideoSender(peer, track), 0);
@@ -721,6 +748,22 @@ const ICE_SERVERS = parseIceServers();
     const videoTracks = stream.getVideoTracks();
     if (videoTracks.length > 0) {
       const streamKey = `${id}-${stream.id}`;
+      const removeIncomingStream = () => {
+        announcedScreenStreamsRef.current.delete(streamKey);
+        setHiddenStreams((prev) => {
+          if (!prev.has(streamKey)) return prev;
+          const next = new Set(prev);
+          next.delete(streamKey);
+          return next;
+        });
+        setIncomingStreams((prev) => prev.filter((s) => !(s.id === id && s.stream.id === stream.id)));
+      };
+
+      videoTracks.forEach((track) => {
+        track.addEventListener("ended", removeIncomingStream, { once: true });
+      });
+      stream.addEventListener("inactive", removeIncomingStream, { once: true });
+
       if (!announcedScreenStreamsRef.current.has(streamKey)) {
         announcedScreenStreamsRef.current.add(streamKey);
         playScreenStartSound();
@@ -736,25 +779,23 @@ const ICE_SERVERS = parseIceServers();
   const startScreenShare = () => {
     if (!PeerClass || !localStream.current) return;
     
-    // High quality defaults for smooth gameplay viewing.
-    // Ideal 1080p60; tarayici destegi yoksa otomatik olarak dusurur (stabilite).
-    const constraints: MediaStreamConstraints = {
+    const preset = SCREEN_SHARE_QUALITY_PRESETS[screenShareQuality];
+    const constraints: DisplayMediaStreamOptions = {
       video: {
-        // 1080p30 varsayilan — oyun akiciligi icin yeterli, Turkiye ev uplink'i
-        // ve 3+ peer mesh icin surdurulebilir. Kullanici browser'i daha
-        // dusuk destekliyorsa otomatik dusurur.
-        width: { ideal: 1920, max: 1920 },
-        height: { ideal: 1080, max: 1080 },
-        frameRate: { ideal: 30, max: 60 },
+        width: { ideal: preset.width, max: preset.width },
+        height: { ideal: preset.height, max: preset.height },
+        frameRate: { ideal: preset.frameRate, max: preset.frameRate },
       } as MediaTrackConstraints,
-      audio: {
-        echoCancellation: false,
-        noiseSuppression: false,
-        autoGainControl: false,
-        // @ts-ignore — chrome-specific hints for higher fidelity screen audio
-        sampleRate: 48000,
-        channelCount: 2,
-      } as MediaTrackConstraints
+      audio: shareScreenAudio
+        ? ({
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: false,
+            suppressLocalAudioPlayback: true,
+            sampleRate: 48000,
+            channelCount: 2,
+          } as ScreenAudioConstraints)
+        : false,
     };
 
     navigator.mediaDevices
@@ -768,35 +809,24 @@ const ICE_SERVERS = parseIceServers();
 
         // Content hints: encoder'a hareketli icerik (oyun) ipucu ver -> daha akici FPS.
         if (videoTrack && "contentHint" in videoTrack) {
-          try { (videoTrack as any).contentHint = "motion"; } catch {}
+          try { (videoTrack as MediaTrackWithContentHint).contentHint = "motion"; } catch {}
         }
         if (screenAudioTrack && "contentHint" in screenAudioTrack) {
-          try { (screenAudioTrack as any).contentHint = "music"; } catch {}
+          try { (screenAudioTrack as MediaTrackWithContentHint).contentHint = "music"; } catch {}
         }
 
-        // Create a combined stream with video + screen audio for VideoPlayer volume control
-        // Microphone stays separate in AudioPlayer
-        if (screenAudioTrack && videoTrack) {
-          // Create a new stream with both video and screen audio
-          const screenShareStream = new MediaStream([videoTrack, screenAudioTrack]);
-          
+        if (videoTrack) {
+          const outgoingTracks = screenAudioTrack ? [videoTrack, screenAudioTrack] : [videoTrack];
+          const outgoingStream = new MediaStream(outgoingTracks);
+          screenShareStream.current = outgoingStream;
+          screenShareTrackIds.current = new Set(outgoingTracks.map((track) => track.id));
+
           peersRef.current.forEach((p) => {
-            // Add video track
-            p.peer.addTrack(videoTrack, screenShareStream);
-            // Add screen audio track separately (will create new stream on receiver)
-            p.peer.addTrack(screenAudioTrack, screenShareStream);
-            // Bitrate / framerate tuning for the freshly added video sender
+            outgoingTracks.forEach((track) => p.peer.addTrack(track, outgoingStream));
             setTimeout(() => tuneScreenVideoSender(p.peer, videoTrack), 0);
           });
-          
-          console.log("Screen share started with screen audio (separate from mic)");
-        } else if (videoTrack) {
-          // No screen audio - just add video
-          peersRef.current.forEach((p) => {
-            p.peer.addTrack(videoTrack, stream);
-            setTimeout(() => tuneScreenVideoSender(p.peer, videoTrack), 0);
-          });
-          console.log("Screen share started without screen audio");
+
+          console.log(screenAudioTrack ? "Screen share started with screen audio" : "Screen share started without screen audio");
         }
 
         if (videoTrack) {
@@ -805,33 +835,35 @@ const ICE_SERVERS = parseIceServers();
           };
         }
       })
-      .catch((err: any) => {
+      .catch((err: unknown) => {
         console.error("Failed to share screen", err);
       });
   };
 
   const stopScreenShare = () => {
     if (!screenStream.current) return;
-    
+    const outgoingStream = screenShareStream.current || screenStream.current;
+    const outgoingTrackIds = new Set([
+      ...Array.from(screenShareTrackIds.current),
+      ...outgoingStream.getTracks().map((track) => track.id),
+    ]);
+     
     // Stop all screen stream tracks
     screenStream.current.getTracks().forEach((track) => {
       track.stop();
       track.enabled = false;
     });
+    outgoingStream.getTracks().forEach((track) => {
+      if (track.readyState === "live") track.stop();
+      track.enabled = false;
+    });
 
-    // Remove video and screen audio tracks from peers
+    // Remove only tracks that belong to this user's outgoing screen share.
     peersRef.current.forEach((p) => {
       try {
         const senders = p.peer._pc?.getSenders?.() || [];
         senders.forEach((sender: RTCRtpSender) => {
-          // Remove video tracks
-          if (sender.track?.kind === 'video') {
-            p.peer._pc?.removeTrack?.(sender);
-          }
-          // Remove screen audio tracks (not microphone)
-          // Screen audio tracks have a different id than localStream audio
-          if (sender.track?.kind === 'audio' && 
-              sender.track.id !== localStream.current?.getAudioTracks()[0]?.id) {
+          if (sender.track && outgoingTrackIds.has(sender.track.id)) {
             p.peer._pc?.removeTrack?.(sender);
           }
         });
@@ -840,18 +872,9 @@ const ICE_SERVERS = parseIceServers();
       }
     });
 
-    // Clear incoming streams (for the sharer's own view)
-    setIncomingStreams((prev) => {
-      prev.forEach((s) => {
-        s.stream.getTracks().forEach((track) => {
-          track.stop();
-          track.enabled = false;
-        });
-      });
-      return [];
-    });
-
     screenStream.current = null;
+    screenShareStream.current = null;
+    screenShareTrackIds.current.clear();
     setIsSharingScreen(false);
     console.log("Screen share stopped");
   };
@@ -1122,6 +1145,42 @@ const ICE_SERVERS = parseIceServers();
             >
               <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 1v6m0 6v6m8.66-9h-6m-6 0H2.34m15.32-6.36l-4.24 4.24m-4.24 0L5.34 5.34m13.32 13.32l-4.24-4.24m-4.24 0l-4.24 4.24"/></svg>
             </button>
+          </div>
+
+          <div className="mb-3 grid grid-cols-[1fr_auto] items-center gap-2 rounded-lg border border-zinc-700 bg-zinc-950/60 px-2 py-2">
+            <label className="flex items-center gap-2 text-[10px] uppercase tracking-wide text-zinc-500">
+              <span className="font-bold">Yayin Kalitesi</span>
+              <select
+                value={screenShareQuality}
+                onChange={(e) => {
+                  const next = e.target.value;
+                  if (!isScreenShareQuality(next)) return;
+                  setScreenShareQuality(next);
+                  localStorage.setItem("screenShareQuality", next);
+                }}
+                disabled={isSharingScreen}
+                className="rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1 text-xs normal-case tracking-normal text-zinc-200 outline-none transition-colors hover:border-zinc-600 disabled:cursor-not-allowed disabled:opacity-60"
+                title={isSharingScreen ? "Kaliteyi degistirmek icin yayini yeniden baslat" : "Yayin kalitesi"}
+              >
+                {Object.entries(SCREEN_SHARE_QUALITY_PRESETS).map(([value, preset]) => (
+                  <option key={value} value={value}>{preset.label}</option>
+                ))}
+              </select>
+            </label>
+            <label className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wide text-zinc-500" title="Sistem/tarayici sesini paylasmak yankiya sebep olabilir">
+              <input
+                type="checkbox"
+                checked={shareScreenAudio}
+                onChange={(e) => {
+                  const next = e.target.checked;
+                  setShareScreenAudio(next);
+                  localStorage.setItem("shareScreenAudio", String(next));
+                }}
+                disabled={isSharingScreen}
+                className="h-3.5 w-3.5 accent-indigo-500 disabled:cursor-not-allowed"
+              />
+              Ekran Sesi
+            </label>
           </div>
 
           <div className="flex items-center justify-center gap-2">
@@ -1497,30 +1556,31 @@ const VideoPlayer = ({ stream, name, onClose }: { stream: MediaStream; name: str
   const [size, setSize] = useState({ width: 400, height: 225 });
   const [isDragging, setIsDragging] = useState(false);
   const [isResizing, setIsResizing] = useState(false);
-  const [hasAudio, setHasAudio] = useState(false);
   const [volume, setVolume] = useState(100);
   const dragRef = useRef({ startX: 0, startY: 0, initialX: 0, initialY: 0 });
   const resizeRef = useRef({ startX: 0, startY: 0, initialW: 0, initialH: 0 });
+  const hasAudio = stream.getAudioTracks().length > 0;
 
   useEffect(() => {
-    if (ref.current) ref.current.srcObject = stream;
+    const videoEl = ref.current;
+    const audioEl = audioRef.current;
+    if (videoEl) videoEl.srcObject = stream;
     
     // Check for audio tracks and play them
     const audioTracks = stream.getAudioTracks();
-    if (audioTracks.length > 0 && audioRef.current) {
+    if (audioTracks.length > 0 && audioEl) {
       const audioStream = new MediaStream(audioTracks);
-      audioRef.current.srcObject = audioStream;
-      audioRef.current.play().catch(() => {});
-      setHasAudio(true);
+      audioEl.srcObject = audioStream;
+      audioEl.play().catch(() => {});
     }
     
     // Cleanup when component unmounts or stream changes
     return () => {
-      if (ref.current) {
-        ref.current.srcObject = null;
+      if (videoEl) {
+        videoEl.srcObject = null;
       }
-      if (audioRef.current) {
-        audioRef.current.srcObject = null;
+      if (audioEl) {
+        audioEl.srcObject = null;
       }
     };
   }, [stream]);
