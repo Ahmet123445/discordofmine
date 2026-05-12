@@ -24,12 +24,18 @@ interface VoiceRoom {
   name: string;
 }
 
-type ScreenShareQuality = "720p30" | "1080p60" | "1440p60" | "4k60";
+type ScreenShareQuality = "720p30" | "1080p30" | "1080p60" | "1440p60" | "4k60";
 type MediaTrackWithContentHint = MediaStreamTrack & { contentHint?: string };
-type ScreenAudioConstraints = MediaTrackConstraints & { suppressLocalAudioPlayback?: boolean };
+type DisplayCaptureOptions = DisplayMediaStreamOptions & {
+  selfBrowserSurface?: "include" | "exclude";
+  systemAudio?: "include" | "exclude";
+  surfaceSwitching?: "include" | "exclude";
+  preferCurrentTab?: boolean;
+};
 
 const SCREEN_SHARE_QUALITY_PRESETS: Record<ScreenShareQuality, { label: string; width: number; height: number; frameRate: number; maxBitrate: number }> = {
   "720p30": { label: "720p 30 FPS", width: 1280, height: 720, frameRate: 30, maxBitrate: 3_000_000 },
+  "1080p30": { label: "1080p 30 FPS / Balanced", width: 1920, height: 1080, frameRate: 30, maxBitrate: 4_000_000 },
   "1080p60": { label: "1080p 60 FPS", width: 1920, height: 1080, frameRate: 60, maxBitrate: 6_000_000 },
   "1440p60": { label: "1440p 60 FPS", width: 2560, height: 1440, frameRate: 60, maxBitrate: 10_000_000 },
   "4k60": { label: "4K 60 FPS / Max", width: 3840, height: 2160, frameRate: 60, maxBitrate: 16_000_000 },
@@ -174,7 +180,7 @@ const ICE_SERVERS = parseIceServers();
 
   const [noiseSuppressionEnabled, setNoiseSuppressionEnabled] = useState(true); // Default ON
   const [noiseSuppressionLoading, setNoiseSuppressionLoading] = useState(false);
-  const [screenShareQuality, setScreenShareQuality] = useState<ScreenShareQuality>("1080p60");
+  const [screenShareQuality, setScreenShareQuality] = useState<ScreenShareQuality>("1080p30");
   const [shareScreenAudio, setShareScreenAudio] = useState(false);
 
   // Load Peer dynamically on mount
@@ -382,8 +388,8 @@ const ICE_SERVERS = parseIceServers();
       params.encodings.forEach((enc: RTCRtpEncodingParameters) => {
         enc.maxBitrate = preset.maxBitrate;
         (enc as any).maxFramerate = preset.frameRate;
-        (enc as any).networkPriority = "high";
-        (enc as any).priority = "high";
+        (enc as any).networkPriority = screenShareQuality === "4k60" ? "high" : "medium";
+        (enc as any).priority = screenShareQuality === "4k60" ? "high" : "medium";
       });
       (params as any).degradationPreference = "maintain-framerate";
 
@@ -780,7 +786,7 @@ const ICE_SERVERS = parseIceServers();
     if (!PeerClass || !localStream.current) return;
     
     const preset = SCREEN_SHARE_QUALITY_PRESETS[screenShareQuality];
-    const constraints: DisplayMediaStreamOptions = {
+    const constraints: DisplayCaptureOptions = {
       video: {
         width: { ideal: preset.width, max: preset.width },
         height: { ideal: preset.height, max: preset.height },
@@ -791,11 +797,14 @@ const ICE_SERVERS = parseIceServers();
             echoCancellation: true,
             noiseSuppression: true,
             autoGainControl: false,
-            suppressLocalAudioPlayback: true,
             sampleRate: 48000,
             channelCount: 2,
-          } as ScreenAudioConstraints)
+          } as MediaTrackConstraints)
         : false,
+      selfBrowserSurface: "exclude",
+      preferCurrentTab: false,
+      surfaceSwitching: "include",
+      systemAudio: shareScreenAudio ? "include" : "exclude",
     };
 
     navigator.mediaDevices
