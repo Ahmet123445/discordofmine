@@ -177,6 +177,8 @@ const ICE_SERVERS = parseIceServers();
   const destinationNodeRef = useRef<MediaStreamAudioDestinationNode | null>(null);
   const gateIntervalRef = useRef<number | null>(null);
   const announcedScreenStreamsRef = useRef<Set<string>>(new Set());
+  const resettingRemotePeersRef = useRef(false);
+  const rejoinTimerRef = useRef<number | null>(null);
 
   const [noiseSuppressionEnabled, setNoiseSuppressionEnabled] = useState(true); // Default ON
   const [noiseSuppressionLoading, setNoiseSuppressionLoading] = useState(false);
@@ -238,28 +240,89 @@ const ICE_SERVERS = parseIceServers();
     };
   }, [socket]);
 
-  // Handle socket reconnection - re-join voice if was connected
+  const isPeerUsable = (peer: any) => {
+    if (!peer || peer.destroyed) return false;
+    const pc: RTCPeerConnection | undefined = peer?._pc;
+    if (!pc) return true;
+
+    return !["closed", "failed", "disconnected"].includes(pc.connectionState) &&
+      !["closed", "failed", "disconnected"].includes(pc.iceConnectionState);
+  };
+
+  const removeRemotePeer = useCallback((peerID: string, destroyPeer = true) => {
+    const existing = peersRef.current.find((p) => p.peerID === peerID);
+    if (destroyPeer && existing) {
+      try {
+        resettingRemotePeersRef.current = true;
+        existing.peer.destroy();
+      } catch {
+        // Ignore peer teardown errors during recovery.
+      } finally {
+        resettingRemotePeersRef.current = false;
+      }
+    }
+
+    peersRef.current = peersRef.current.filter((p) => p.peerID !== peerID);
+    setPeers((prev) => prev.filter((p) => p.peerID !== peerID));
+    setIncomingStreams((prev) => prev.filter((s) => s.id !== peerID));
+    announcedScreenStreamsRef.current.forEach((key) => {
+      if (key.startsWith(`${peerID}-`)) {
+        announcedScreenStreamsRef.current.delete(key);
+      }
+    });
+  }, []);
+
+  const resetRemotePeers = useCallback(() => {
+    resettingRemotePeersRef.current = true;
+    peersRef.current.forEach((p) => {
+      try {
+        p.peer.destroy();
+      } catch {
+        // Ignore peer teardown errors during recovery.
+      }
+    });
+    resettingRemotePeersRef.current = false;
+
+    peersRef.current = [];
+    setPeers([]);
+    setIncomingStreams([]);
+    setHiddenStreams(new Set());
+    announcedScreenStreamsRef.current.clear();
+  }, []);
+
+  const rejoinCurrentVoice = useCallback((reason: string) => {
+    if (!socket || !inVoice || !currentInternalRoomId || !localStream.current) return;
+    if (rejoinTimerRef.current) return;
+
+    rejoinTimerRef.current = window.setTimeout(() => {
+      rejoinTimerRef.current = null;
+      if (!socket.connected || !localStream.current) return;
+
+      console.log(`VoiceChat: Re-joining voice after ${reason}:`, currentInternalRoomId);
+      resetRemotePeers();
+      socket.emit("join-voice", { roomId: `${serverId}-${currentInternalRoomId}`, user });
+      socket.emit("heartbeat", { roomId: `${serverId}-${currentInternalRoomId}` });
+    }, 250);
+  }, [socket, inVoice, currentInternalRoomId, resetRemotePeers, serverId, user]);
+
+  // Handle socket reconnection - rebuild remote peers instead of reusing stale WebRTC state.
   useEffect(() => {
     if (!socket || !PeerClass) return;
     
     const handleReconnect = () => {
-      console.log("VoiceChat: Socket reconnected");
-      // If user was in a voice channel, re-join it
-      if (inVoice && currentInternalRoomId) {
-        console.log("VoiceChat: Re-joining voice channel after reconnect:", currentInternalRoomId);
-        const namespacedRoomId = `${serverId}-${currentInternalRoomId}`;
-        
-        // Re-emit join-voice to restore server-side tracking
-        socket.emit("join-voice", { roomId: namespacedRoomId, user });
-      }
+      rejoinCurrentVoice("socket reconnect");
     };
     
+    socket.on("connect", handleReconnect);
     socket.on("reconnect", handleReconnect);
+    socket.io?.on("reconnect", handleReconnect);
     
     return () => {
+      socket.off("connect", handleReconnect);
       socket.off("reconnect", handleReconnect);
+      socket.io?.off("reconnect", handleReconnect);
     };
-  }, [socket, PeerClass, inVoice, currentInternalRoomId, serverId, user]);
+  }, [socket, PeerClass, rejoinCurrentVoice]);
 
   // CRITICAL: Heartbeat to keep session alive in database
   // Sends every 30 seconds to prevent stale session cleanup
@@ -309,6 +372,10 @@ const ICE_SERVERS = parseIceServers();
 
   useEffect(() => {
     return () => {
+      if (rejoinTimerRef.current) {
+        window.clearTimeout(rejoinTimerRef.current);
+        rejoinTimerRef.current = null;
+      }
       cleanupAudioContext();
       if (localStream.current) {
         localStream.current.getTracks().forEach((t) => t.stop());
@@ -605,6 +672,7 @@ const ICE_SERVERS = parseIceServers();
       socket.emit("join-voice", { roomId: namespacedRoomId, user });
 
       socket.on("all-voice-users", (users: VoiceUser[]) => {
+        resetRemotePeers();
         const peersArr: { peerID: string; peer: any; volume: number; username: string; userId?: number | null }[] = [];
         users.forEach((u) => {
           if (socket.id) {
@@ -618,9 +686,12 @@ const ICE_SERVERS = parseIceServers();
 
       socket.on("user-joined-voice", (payload: { signal: any; callerID: string; username: string; userId?: number | null }) => {
         const existing = peersRef.current.find((p) => p.peerID === payload.callerID);
-        if (existing) {
+        if (existing && isPeerUsable(existing.peer)) {
           existing.peer.signal(payload.signal);
           return;
+        }
+        if (existing) {
+          removeRemotePeer(payload.callerID);
         }
         playJoinSound();
         const peer = addPeer(payload.signal, payload.callerID, streamToUse);
@@ -637,16 +708,7 @@ const ICE_SERVERS = parseIceServers();
 
       socket.on("user-left-voice", (id: string) => {
         playLeaveSound();
-        const peerObj = peersRef.current.find((p) => p.peerID === id);
-        if (peerObj) peerObj.peer.destroy();
-        peersRef.current = peersRef.current.filter((p) => p.peerID !== id);
-        setPeers((prev) => prev.filter((p) => p.peerID !== id));
-        setIncomingStreams((prev) => prev.filter((s) => s.id !== id));
-        announcedScreenStreamsRef.current.forEach((key) => {
-          if (key.startsWith(`${id}-`)) {
-            announcedScreenStreamsRef.current.delete(key);
-          }
-        });
+        removeRemotePeer(id);
       });
     } catch (err) {
       console.error("Failed to get local stream", err);
@@ -682,6 +744,40 @@ const ICE_SERVERS = parseIceServers();
     socket?.off("user-left-voice");
   };
 
+  const attachPeerLifecycle = (peerID: string, peer: any) => {
+    const recover = (reason: string) => {
+      if (resettingRemotePeersRef.current) return;
+      removeRemotePeer(peerID);
+      rejoinCurrentVoice(reason);
+    };
+
+    peer.on("close", () => {
+      if (resettingRemotePeersRef.current) return;
+      removeRemotePeer(peerID, false);
+    });
+    peer.on("error", (err: any) => {
+      console.error("Peer error:", err);
+      recover("peer error");
+    });
+
+    const pc: RTCPeerConnection | undefined = peer?._pc;
+    if (!pc) return;
+
+    const handleConnectionState = () => {
+      if (["failed", "closed", "disconnected"].includes(pc.connectionState)) {
+        recover(`peer connection ${pc.connectionState}`);
+      }
+    };
+    const handleIceState = () => {
+      if (["failed", "closed", "disconnected"].includes(pc.iceConnectionState)) {
+        recover(`peer ice ${pc.iceConnectionState}`);
+      }
+    };
+
+    pc.addEventListener("connectionstatechange", handleConnectionState);
+    pc.addEventListener("iceconnectionstatechange", handleIceState);
+  };
+
   const createPeer = (userToSignal: string, callerID: string, stream: MediaStream, myUsername: string, myUserId: number) => {
     const peer = new PeerClass({
       initiator: true,
@@ -700,10 +796,7 @@ const ICE_SERVERS = parseIceServers();
       handleIncomingStream(userToSignal, remoteStream);
     });
 
-    peer.on("error", (err: any) => {
-      console.error("Peer error:", err);
-    });
-
+    attachPeerLifecycle(userToSignal, peer);
     attachActiveScreenTracks(peer);
 
     return peer;
@@ -727,10 +820,7 @@ const ICE_SERVERS = parseIceServers();
       handleIncomingStream(callerID, remoteStream);
     });
 
-    peer.on("error", (err: any) => {
-      console.error("Peer error:", err);
-    });
-
+    attachPeerLifecycle(callerID, peer);
     attachActiveScreenTracks(peer);
 
     peer.signal(incomingSignal);
@@ -1541,9 +1631,45 @@ const AudioPlayer = ({ peer, volume = 1 }: { peer: any; volume?: number }) => {
     // when using srcObject + createMediaElementSource, so element volume is authoritative.
     audioEl.volume = Math.max(0, Math.min(1, nextGain));
 
-    audioEl.play().catch(() => {});
+    const resumePlayback = () => {
+      if (audioContextRef.current?.state === "suspended") {
+        audioContextRef.current.resume().catch(() => {});
+      }
+      audioEl.play().catch(() => {});
+    };
+
+    const resumeWhenVisible = () => {
+      if (document.visibilityState !== "hidden") {
+        resumePlayback();
+      }
+    };
+
+    const audioTracks = audioStream.getAudioTracks();
+    audioTracks.forEach((track) => {
+      track.addEventListener("unmute", resumePlayback);
+      track.addEventListener("ended", resumePlayback);
+    });
+
+    audioEl.addEventListener("pause", resumePlayback);
+    audioEl.addEventListener("stalled", resumePlayback);
+    audioEl.addEventListener("suspend", resumeWhenVisible);
+    window.addEventListener("focus", resumePlayback);
+    window.addEventListener("pageshow", resumePlayback);
+    document.addEventListener("visibilitychange", resumeWhenVisible);
+
+    resumePlayback();
 
     return () => {
+      audioTracks.forEach((track) => {
+        track.removeEventListener("unmute", resumePlayback);
+        track.removeEventListener("ended", resumePlayback);
+      });
+      audioEl.removeEventListener("pause", resumePlayback);
+      audioEl.removeEventListener("stalled", resumePlayback);
+      audioEl.removeEventListener("suspend", resumeWhenVisible);
+      window.removeEventListener("focus", resumePlayback);
+      window.removeEventListener("pageshow", resumePlayback);
+      document.removeEventListener("visibilitychange", resumeWhenVisible);
       audioEl.pause();
       audioEl.srcObject = null;
     };

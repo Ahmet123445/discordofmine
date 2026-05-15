@@ -846,6 +846,15 @@ const destroyAllMusicPeers = (session) => {
   }
 };
 
+const isMusicPeerUsable = (peer) => {
+  if (!peer || peer.destroyed) return false;
+  const pc = peer._pc;
+  if (!pc) return true;
+
+  return !["closed", "failed", "disconnected"].includes(pc.connectionState) &&
+    !["closed", "failed", "disconnected"].includes(pc.iceConnectionState);
+};
+
 const stopPlaybackTimer = (session) => {
   if (!session.playbackInterval) return;
 
@@ -1569,7 +1578,11 @@ const connectBotToUser = (voiceRoomId, userSocketId) => {
   const session = musicSessions.get(voiceRoomId);
   if (!session) return;
   if (!io.sockets.sockets.get(userSocketId)) return;
-  if (session.peers.has(userSocketId)) return;
+  if (session.peers.has(userSocketId)) {
+    const existingPeer = session.peers.get(userSocketId);
+    if (isMusicPeerUsable(existingPeer)) return;
+    destroyMusicPeer(session, userSocketId);
+  }
 
   const RTC = wrtc.default || wrtc;
   const peer = new Peer({

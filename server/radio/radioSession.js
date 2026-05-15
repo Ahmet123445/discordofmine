@@ -102,7 +102,11 @@ export const connectRadioBotToUser = (session, userSocketId) => {
   const { io, ICE_SERVERS } = getAdapter();
   if (!io || !session) return;
   if (!io.sockets.sockets.get(userSocketId)) return;
-  if (session.peers.has(userSocketId)) return;
+  if (session.peers.has(userSocketId)) {
+    const existingPeer = session.peers.get(userSocketId);
+    if (isRadioPeerUsable(existingPeer)) return;
+    destroyRadioPeer(session, userSocketId);
+  }
 
   const RTC = wrtc.default || wrtc;
   const peer = new Peer({
@@ -134,6 +138,15 @@ export const connectRadioBotToUser = (session, userSocketId) => {
   peer.on("close", () => destroyRadioPeer(session, userSocketId));
 
   session.peers.set(userSocketId, peer);
+};
+
+const isRadioPeerUsable = (peer) => {
+  if (!peer || peer.destroyed) return false;
+  const pc = peer._pc;
+  if (!pc) return true;
+
+  return !["closed", "failed", "disconnected"].includes(pc.connectionState) &&
+    !["closed", "failed", "disconnected"].includes(pc.iceConnectionState);
 };
 
 export const ensureRadioBotConnectedToRoomUsers = (session) => {
