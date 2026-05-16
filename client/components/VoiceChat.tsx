@@ -684,9 +684,14 @@ const ICE_SERVERS = parseIceServers();
         setPeers(peersArr);
       });
 
-      socket.on("user-joined-voice", (payload: { signal: any; callerID: string; username: string; userId?: number | null }) => {
+      socket.on("user-joined-voice", (payload: { signal: any; callerID: string; username: string; userId?: number | null; replacePeer?: boolean }) => {
         const existing = peersRef.current.find((p) => p.peerID === payload.callerID);
-        if (existing && isPeerUsable(existing.peer)) {
+        const isBotPeer = payload.callerID.startsWith("music-bot:") || payload.callerID.startsWith("radio-bot:");
+        const shouldReplacePeer = Boolean(
+          existing && (payload.replacePeer || (isBotPeer && payload.signal?.type === "offer"))
+        );
+
+        if (existing && !shouldReplacePeer && isPeerUsable(existing.peer)) {
           existing.peer.signal(payload.signal);
           return;
         }

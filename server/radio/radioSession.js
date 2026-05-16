@@ -9,6 +9,7 @@ import { logInfo, logWarn } from "./logger.js";
 import { applyRadioAudioPreferences } from "./sdpHelpers.js";
 
 export const radioSessions = new Map(); // voiceRoomId -> RadioSession
+const RADIO_PEER_RECONNECT_DELAYS_MS = [500, 1500, 3000, 5000];
 
 export const buildRadioBotId = (voiceRoomId) => `radio-bot:${voiceRoomId}`;
 export const isRadioBotId = (id) =>
@@ -90,7 +91,9 @@ export const createRadioSession = (voiceRoomId) => {
     status: "idle", // idle | connecting | playing | reconnecting | error | stopping
     lastError: null,
     createdAt: Date.now(),
-    lastStateEmitAt: 0
+    lastStateEmitAt: 0,
+    peerReconnectTimers: new Map(),
+    peerReconnectAttempts: new Map()
   };
 
   radioSessions.set(voiceRoomId, session);
@@ -98,7 +101,7 @@ export const createRadioSession = (voiceRoomId) => {
   return session;
 };
 
-export const connectRadioBotToUser = (session, userSocketId) => {
+export const connectRadioBotToUser = (session, userSocketId, { replacePeer = false } = {}) => {
   const { io, ICE_SERVERS } = getAdapter();
   if (!io || !session) return;
   if (!io.sockets.sockets.get(userSocketId)) return;
@@ -106,6 +109,7 @@ export const connectRadioBotToUser = (session, userSocketId) => {
     const existingPeer = session.peers.get(userSocketId);
     if (isRadioPeerUsable(existingPeer)) return;
     destroyRadioPeer(session, userSocketId);
+    replacePeer = true;
   }
 
   const RTC = wrtc.default || wrtc;
@@ -118,12 +122,24 @@ export const connectRadioBotToUser = (session, userSocketId) => {
     sdpTransform: (sdp) => applyRadioAudioPreferences(sdp)
   });
 
+  let shouldReplaceOnOffer = replacePeer;
   peer.on("signal", (signal) => {
+    const replaceThisSignal = shouldReplaceOnOffer && signal?.type === "offer";
+    if (replaceThisSignal) {
+      shouldReplaceOnOffer = false;
+    }
+
     io.to(userSocketId).emit("user-joined-voice", {
       signal,
       callerID: session.botId,
-      username: RADIO_BOT_USERNAME
+      username: RADIO_BOT_USERNAME,
+      replacePeer: replaceThisSignal
     });
+  });
+
+  peer.on("connect", () => {
+    clearRadioPeerReconnect(session, userSocketId);
+    logInfo("radio_peer_connected", { voiceRoomId: session.voiceRoomId, userSocketId });
   });
 
   peer.on("error", (err) => {
@@ -132,10 +148,13 @@ export const connectRadioBotToUser = (session, userSocketId) => {
       userSocketId,
       error: err?.message
     });
-    destroyRadioPeer(session, userSocketId);
+    handleRadioPeerLoss(session, userSocketId, err?.message || "peer error");
   });
 
-  peer.on("close", () => destroyRadioPeer(session, userSocketId));
+  peer.on("close", () => {
+    if (peer.__intentionalDestroy) return;
+    handleRadioPeerLoss(session, userSocketId, "peer close");
+  });
 
   session.peers.set(userSocketId, peer);
 };
@@ -149,14 +168,74 @@ const isRadioPeerUsable = (peer) => {
     !["closed", "failed", "disconnected"].includes(pc.iceConnectionState);
 };
 
+const clearRadioPeerReconnect = (session, userSocketId) => {
+  if (!session) return;
+  const timer = session.peerReconnectTimers?.get(userSocketId);
+  if (timer) clearTimeout(timer);
+  session.peerReconnectTimers?.delete(userSocketId);
+  session.peerReconnectAttempts?.delete(userSocketId);
+};
+
+const isRadioPeerReconnectEligible = (session, userSocketId) => {
+  const { io } = getAdapter();
+  if (!session || radioSessions.get(session.voiceRoomId) !== session) return false;
+  if (!io?.sockets?.sockets?.get(userSocketId)) return false;
+  return getHumanVoiceUsers(session.voiceRoomId).some((u) => u.id === userSocketId);
+};
+
+const scheduleRadioPeerReconnect = (session, userSocketId, reason) => {
+  if (!isRadioPeerReconnectEligible(session, userSocketId)) {
+    logInfo("radio_peer_reconnect_skipped", { voiceRoomId: session?.voiceRoomId, userSocketId, reason });
+    clearRadioPeerReconnect(session, userSocketId);
+    return;
+  }
+
+  if (session.peerReconnectTimers.has(userSocketId)) return;
+
+  const attempt = (session.peerReconnectAttempts.get(userSocketId) || 0) + 1;
+  if (attempt > RADIO_PEER_RECONNECT_DELAYS_MS.length) {
+    logWarn("radio_peer_reconnect_exhausted", { voiceRoomId: session.voiceRoomId, userSocketId, reason });
+    session.peerReconnectAttempts.delete(userSocketId);
+    return;
+  }
+
+  const delayMs = RADIO_PEER_RECONNECT_DELAYS_MS[attempt - 1];
+  session.peerReconnectAttempts.set(userSocketId, attempt);
+  logWarn("radio_peer_reconnect_scheduled", { voiceRoomId: session.voiceRoomId, userSocketId, attempt, delayMs, reason });
+
+  const timer = setTimeout(() => {
+    session.peerReconnectTimers.delete(userSocketId);
+    if (!isRadioPeerReconnectEligible(session, userSocketId)) {
+      logInfo("radio_peer_reconnect_skipped", { voiceRoomId: session.voiceRoomId, userSocketId, reason: "no_longer_in_voice" });
+      clearRadioPeerReconnect(session, userSocketId);
+      return;
+    }
+
+    logInfo("radio_peer_reconnect_attempt", { voiceRoomId: session.voiceRoomId, userSocketId, attempt });
+    connectRadioBotToUser(session, userSocketId, { replacePeer: true });
+  }, delayMs);
+
+  session.peerReconnectTimers.set(userSocketId, timer);
+};
+
+const handleRadioPeerLoss = (session, userSocketId, reason) => {
+  destroyRadioPeer(session, userSocketId, { allowReconnect: true });
+  scheduleRadioPeerReconnect(session, userSocketId, reason);
+};
+
 export const ensureRadioBotConnectedToRoomUsers = (session) => {
   const users = getHumanVoiceUsers(session.voiceRoomId);
   users.forEach((u) => connectRadioBotToUser(session, u.id));
 };
 
-export const destroyRadioPeer = (session, userSocketId) => {
+export const destroyRadioPeer = (session, userSocketId, { allowReconnect = false } = {}) => {
   const peer = session.peers.get(userSocketId);
+  if (!allowReconnect) {
+    clearRadioPeerReconnect(session, userSocketId);
+  }
   if (!peer) return;
+
+  peer.__intentionalDestroy = !allowReconnect;
   try {
     peer.destroy();
   } catch {
@@ -188,6 +267,14 @@ export const disposeRadioSession = (voiceRoomId) => {
 
   try {
     destroyAllRadioPeers(session);
+  } catch {
+    /* noop */
+  }
+
+  try {
+    session.peerReconnectTimers?.forEach((timer) => clearTimeout(timer));
+    session.peerReconnectTimers?.clear();
+    session.peerReconnectAttempts?.clear();
   } catch {
     /* noop */
   }
