@@ -105,6 +105,7 @@ export const connectRadioBotToUser = (session, userSocketId, { replacePeer = fal
   const { io, ICE_SERVERS } = getAdapter();
   if (!io || !session) return;
   if (!io.sockets.sockets.get(userSocketId)) return;
+  addRadioBotPresence(session.voiceRoomId);
   if (session.peers.has(userSocketId)) {
     const existingPeer = session.peers.get(userSocketId);
     if (isRadioPeerUsable(existingPeer)) return;

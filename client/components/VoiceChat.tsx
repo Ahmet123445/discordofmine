@@ -695,6 +695,27 @@ const ICE_SERVERS = parseIceServers();
           existing.peer.signal(payload.signal);
           return;
         }
+        if (existing && shouldReplacePeer) {
+          try {
+            resettingRemotePeersRef.current = true;
+            existing.peer.destroy();
+          } catch {
+            // Ignore stale bot peer teardown during seamless replacement.
+          } finally {
+            resettingRemotePeersRef.current = false;
+          }
+
+          const peer = addPeer(payload.signal, payload.callerID, streamToUse);
+          peersRef.current = peersRef.current.map((p) => (
+            p.peerID === payload.callerID ? { peerID: payload.callerID, peer } : p
+          ));
+          setPeers((prev) => prev.map((p) => (
+            p.peerID === payload.callerID
+              ? { ...p, peer, username: payload.username || p.username, userId: payload.userId ?? p.userId }
+              : p
+          )));
+          return;
+        }
         if (existing) {
           removeRemotePeer(payload.callerID);
         }

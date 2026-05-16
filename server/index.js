@@ -1643,6 +1643,7 @@ const connectBotToUser = (voiceRoomId, userSocketId, { replacePeer = false } = {
   const session = musicSessions.get(voiceRoomId);
   if (!session) return;
   if (!io.sockets.sockets.get(userSocketId)) return;
+  addMusicBotPresence(voiceRoomId);
   if (session.peers.has(userSocketId)) {
     const existingPeer = session.peers.get(userSocketId);
     if (isMusicPeerUsable(existingPeer)) return;
