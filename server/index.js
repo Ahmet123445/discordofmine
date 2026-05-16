@@ -20,6 +20,7 @@ import {
   canStartMusic as canStartMusicRadioCheck,
   isRadioBotId
 } from "./radio/index.js";
+import { applyRadioAudioPreferences as applyBotAudioPreferences } from "./radio/sdpHelpers.js";
 
 // Version: 2.0.0 - Database-based session tracking for reliability
 dotenv.config();
@@ -338,6 +339,7 @@ const MUSIC_MAX_CATCHUP_FRAMES = Math.max(1, Number(process.env.MUSIC_MAX_CATCHU
 const MUSIC_STATE_EMIT_INTERVAL_MS = Number(process.env.MUSIC_STATE_EMIT_INTERVAL_MS || 1000);
 const MUSIC_CONTROL_COOLDOWN_MS = Number(process.env.MUSIC_CONTROL_COOLDOWN_MS || 140);
 const MUSIC_PEER_RECONNECT_DELAYS_MS = [500, 1500, 3000, 5000];
+const MUSIC_PEER_HEALTH_INTERVAL_MS = Number(process.env.MUSIC_PEER_HEALTH_INTERVAL_MS || 5000);
 const MUSIC_PREFERRED_AUDIO_EXT = (process.env.MUSIC_PREFERRED_AUDIO_EXT || "webm").toLowerCase();
 const ACCEPTED_PREFETCH_EXTENSIONS = new Set(["webm", "m4a", "opus", "mp3", "aac", "ogg", "wav", "flac", "mka", "mp4"]);
 const MUSIC_BOT_USERNAME = "Music Bot";
@@ -869,6 +871,29 @@ const isMusicPeerUsable = (peer) => {
     !["closed", "failed", "disconnected"].includes(pc.iceConnectionState);
 };
 
+const stopMusicPeerHealthMonitor = (session) => {
+  if (!session?.peerHealthInterval) return;
+  clearInterval(session.peerHealthInterval);
+  session.peerHealthInterval = null;
+};
+
+const startMusicPeerHealthMonitor = (session) => {
+  if (!session || session.peerHealthInterval) return;
+
+  session.peerHealthInterval = setInterval(() => {
+    if (musicSessions.get(session.voiceRoomId) !== session) {
+      stopMusicPeerHealthMonitor(session);
+      return;
+    }
+
+    for (const [userSocketId, peer] of Array.from(session.peers.entries())) {
+      if (isMusicPeerUsable(peer)) continue;
+      console.warn(`[MusicBot] Peer health failed (${session.voiceRoomId}/${userSocketId})`);
+      handleMusicPeerLoss(session, userSocketId, "peer health failed");
+    }
+  }, MUSIC_PEER_HEALTH_INTERVAL_MS);
+};
+
 const isMusicPeerReconnectEligible = (session, userSocketId) => {
   if (!session || musicSessions.get(session.voiceRoomId) !== session) return false;
   if (!io.sockets.sockets.get(userSocketId)) return false;
@@ -885,13 +910,7 @@ const scheduleMusicPeerReconnect = (session, userSocketId, reason) => {
   if (session.peerReconnectTimers.has(userSocketId)) return;
 
   const attempt = (session.peerReconnectAttempts.get(userSocketId) || 0) + 1;
-  if (attempt > MUSIC_PEER_RECONNECT_DELAYS_MS.length) {
-    console.warn(`[MusicBot] Peer reconnect exhausted (${session.voiceRoomId}/${userSocketId}): ${reason}`);
-    session.peerReconnectAttempts.delete(userSocketId);
-    return;
-  }
-
-  const delayMs = MUSIC_PEER_RECONNECT_DELAYS_MS[attempt - 1];
+  const delayMs = MUSIC_PEER_RECONNECT_DELAYS_MS[Math.min(attempt - 1, MUSIC_PEER_RECONNECT_DELAYS_MS.length - 1)];
   session.peerReconnectAttempts.set(userSocketId, attempt);
   console.warn(`[MusicBot] Peer reconnect scheduled (${session.voiceRoomId}/${userSocketId}) attempt=${attempt} delay=${delayMs}ms reason=${reason}`);
 
@@ -985,6 +1004,7 @@ const closeMusicSession = (voiceRoomId, reason = null) => {
   const activeTrack = session.current;
   stopCurrentPlayback(session);
   destroyAllMusicPeers(session);
+  stopMusicPeerHealthMonitor(session);
   session.peerReconnectTimers?.forEach((timer) => clearTimeout(timer));
   session.peerReconnectTimers?.clear();
   session.peerReconnectAttempts?.clear();
@@ -1632,10 +1652,12 @@ const getOrCreateMusicSession = (voiceRoomId) => {
     controlActionInFlight: false,
     lastControlActionAt: 0,
     peerReconnectTimers: new Map(),
-    peerReconnectAttempts: new Map()
+    peerReconnectAttempts: new Map(),
+    peerHealthInterval: null
   };
 
   musicSessions.set(voiceRoomId, session);
+  startMusicPeerHealthMonitor(session);
   return session;
 };
 
@@ -1646,7 +1668,7 @@ const connectBotToUser = (voiceRoomId, userSocketId, { replacePeer = false } = {
   addMusicBotPresence(voiceRoomId);
   if (session.peers.has(userSocketId)) {
     const existingPeer = session.peers.get(userSocketId);
-    if (isMusicPeerUsable(existingPeer)) return;
+    if (!replacePeer && isMusicPeerUsable(existingPeer)) return;
     destroyMusicPeer(session, userSocketId);
     replacePeer = true;
   }
@@ -1659,7 +1681,8 @@ const connectBotToUser = (voiceRoomId, userSocketId, { replacePeer = false } = {
     wrtc: RTC,
     config: {
       iceServers: ICE_SERVERS
-    }
+    },
+    sdpTransform: (sdp) => applyBotAudioPreferences(sdp)
   });
 
   let shouldReplaceOnOffer = replacePeer;
@@ -1716,13 +1739,17 @@ const pumpChunkToRtcSource = (session, chunk) => {
 };
 
 const pushSilenceFrame = (session) => {
-  session.audioSource.onData({
-    samples: SILENCE_SAMPLES,
-    sampleRate: AUDIO_SAMPLE_RATE,
-    bitsPerSample: AUDIO_BITS_PER_SAMPLE,
-    channelCount: AUDIO_CHANNEL_COUNT,
-    numberOfFrames: FRAME_SAMPLES_PER_CHANNEL
-  });
+  try {
+    session.audioSource.onData({
+      samples: SILENCE_SAMPLES,
+      sampleRate: AUDIO_SAMPLE_RATE,
+      bitsPerSample: AUDIO_BITS_PER_SAMPLE,
+      channelCount: AUDIO_CHANNEL_COUNT,
+      numberOfFrames: FRAME_SAMPLES_PER_CHANNEL
+    });
+  } catch (err) {
+    console.error("[MusicBot] Failed to push RTC silence frame:", err?.message || err);
+  }
 };
 
 const flushBufferedFrameToRtcSource = (session) => {
@@ -1756,13 +1783,18 @@ const flushBufferedFrameToRtcSource = (session) => {
     view.set(frameData);
     const samples = new Int16Array(arrayBuffer);
 
-    session.audioSource.onData({
-      samples,
-      sampleRate: AUDIO_SAMPLE_RATE,
-      bitsPerSample: AUDIO_BITS_PER_SAMPLE,
-      channelCount: AUDIO_CHANNEL_COUNT,
-      numberOfFrames: FRAME_SAMPLES_PER_CHANNEL
-    });
+    try {
+      session.audioSource.onData({
+        samples,
+        sampleRate: AUDIO_SAMPLE_RATE,
+        bitsPerSample: AUDIO_BITS_PER_SAMPLE,
+        channelCount: AUDIO_CHANNEL_COUNT,
+        numberOfFrames: FRAME_SAMPLES_PER_CHANNEL
+      });
+    } catch (err) {
+      console.error("[MusicBot] Failed to push RTC audio frame:", err?.message || err);
+      return false;
+    }
 
     session.playedFrames += 1;
     session.currentPositionSec = session.seekOffsetSec + (session.playedFrames * FRAME_DURATION_MS) / 1000;
@@ -1800,6 +1832,7 @@ const startPlaybackTimer = (session) => {
     }
 
     if (session.isPaused || !session.hasPlaybackStarted) {
+      pushSilenceFrame(session);
       session.nextPlaybackDueAt = Date.now() + FRAME_DURATION_MS;
       session.playbackInterval = setTimeout(tick, FRAME_DURATION_MS);
       return;
@@ -3270,6 +3303,7 @@ io.on("connection", (socket) => {
   socket.on("join-voice", (data) => {
     const roomId = typeof data === 'object' ? data.roomId : data;
     const userData = typeof data === 'object' ? data.user : { username: "Unknown" };
+    const forcePeerRefresh = typeof data === 'object' && data?.forcePeerRefresh === true;
     const userId = normalizeUserId(userData?.id);
     const serverRoomId = getServerRoomIdFromVoiceRoomId(roomId);
 
@@ -3317,7 +3351,7 @@ io.on("connection", (socket) => {
     // If music bot is active in this room, connect it to the newly joined user.
     if (musicSessions.has(roomId)) {
       const session = musicSessions.get(roomId);
-      connectBotToUser(roomId, socket.id);
+      connectBotToUser(roomId, socket.id, { replacePeer: forcePeerRefresh });
       emitMusicState(session, true);
     }
     
@@ -3344,7 +3378,8 @@ io.on("connection", (socket) => {
           wrtc: RTC,
           config: {
             iceServers: ICE_SERVERS
-          }
+          },
+          sdpTransform: (sdp) => applyBotAudioPreferences(sdp)
         });
 
         peer.on("signal", (signal) => {
@@ -3353,11 +3388,12 @@ io.on("connection", (socket) => {
 
         peer.on("error", (err) => {
           console.error("[MusicBot] Fallback peer error:", err.message);
-          destroyMusicPeer(session, socket.id);
+          handleMusicPeerLoss(session, socket.id, err?.message || "fallback peer error");
         });
 
         peer.on("close", () => {
-          destroyMusicPeer(session, socket.id);
+          if (peer.__intentionalDestroy) return;
+          handleMusicPeerLoss(session, socket.id, "fallback peer close");
         });
 
         session.peers.set(socket.id, peer);
@@ -3371,7 +3407,8 @@ io.on("connection", (socket) => {
       signal: payload.signal,
       callerID: payload.callerID,
       username: payload.username,
-      userId: normalizeUserId(payload.userId)
+      userId: normalizeUserId(payload.userId),
+      replacePeer: payload.replacePeer === true
     });
   });
 

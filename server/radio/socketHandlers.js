@@ -66,12 +66,13 @@ export const attachRadioSockets = () => {
 
     socket.on("join-voice", (data) => {
       const roomId = typeof data === "object" ? data?.roomId : data;
+      const forcePeerRefresh = typeof data === "object" && data?.forcePeerRefresh === true;
       if (!roomId) return;
       socketToVoiceRoom.set(socket.id, roomId);
       // If a radio session exists for this voiceRoomId, connect the new user.
       const session = radioSessions.get(roomId);
       if (session) {
-        connectRadioBotToUser(session, socket.id);
+        connectRadioBotToUser(session, socket.id, { replacePeer: forcePeerRefresh });
         emitRadioState(session, true);
       }
     });

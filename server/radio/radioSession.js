@@ -108,7 +108,7 @@ export const connectRadioBotToUser = (session, userSocketId, { replacePeer = fal
   addRadioBotPresence(session.voiceRoomId);
   if (session.peers.has(userSocketId)) {
     const existingPeer = session.peers.get(userSocketId);
-    if (isRadioPeerUsable(existingPeer)) return;
+    if (!replacePeer && isRadioPeerUsable(existingPeer)) return;
     destroyRadioPeer(session, userSocketId);
     replacePeer = true;
   }
@@ -194,13 +194,7 @@ const scheduleRadioPeerReconnect = (session, userSocketId, reason) => {
   if (session.peerReconnectTimers.has(userSocketId)) return;
 
   const attempt = (session.peerReconnectAttempts.get(userSocketId) || 0) + 1;
-  if (attempt > RADIO_PEER_RECONNECT_DELAYS_MS.length) {
-    logWarn("radio_peer_reconnect_exhausted", { voiceRoomId: session.voiceRoomId, userSocketId, reason });
-    session.peerReconnectAttempts.delete(userSocketId);
-    return;
-  }
-
-  const delayMs = RADIO_PEER_RECONNECT_DELAYS_MS[attempt - 1];
+  const delayMs = RADIO_PEER_RECONNECT_DELAYS_MS[Math.min(attempt - 1, RADIO_PEER_RECONNECT_DELAYS_MS.length - 1)];
   session.peerReconnectAttempts.set(userSocketId, attempt);
   logWarn("radio_peer_reconnect_scheduled", { voiceRoomId: session.voiceRoomId, userSocketId, attempt, delayMs, reason });
 

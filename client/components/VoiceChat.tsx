@@ -24,27 +24,6 @@ interface VoiceRoom {
   name: string;
 }
 
-type ScreenShareQuality = "720p30" | "1080p30" | "1080p60" | "1440p60" | "4k60";
-type MediaTrackWithContentHint = MediaStreamTrack & { contentHint?: string };
-type DisplayCaptureOptions = DisplayMediaStreamOptions & {
-  selfBrowserSurface?: "include" | "exclude";
-  systemAudio?: "include" | "exclude";
-  surfaceSwitching?: "include" | "exclude";
-  preferCurrentTab?: boolean;
-};
-
-const SCREEN_SHARE_QUALITY_PRESETS: Record<ScreenShareQuality, { label: string; width: number; height: number; frameRate: number; maxBitrate: number }> = {
-  "720p30": { label: "720p 30 FPS", width: 1280, height: 720, frameRate: 30, maxBitrate: 3_000_000 },
-  "1080p30": { label: "1080p 30 FPS / Balanced", width: 1920, height: 1080, frameRate: 30, maxBitrate: 4_000_000 },
-  "1080p60": { label: "1080p 60 FPS", width: 1920, height: 1080, frameRate: 60, maxBitrate: 6_000_000 },
-  "1440p60": { label: "1440p 60 FPS", width: 2560, height: 1440, frameRate: 60, maxBitrate: 10_000_000 },
-  "4k60": { label: "4K 60 FPS / Max", width: 3840, height: 2160, frameRate: 60, maxBitrate: 16_000_000 },
-};
-
-const isScreenShareQuality = (value: string): value is ScreenShareQuality => {
-  return value in SCREEN_SHARE_QUALITY_PRESETS;
-};
-
 const CrownIcon = ({ className = "" }: { className?: string }) => (
   <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
     <path d="m2 5 5 5 5-8 5 8 5-5-2 14H4L2 5z"/>
@@ -130,6 +109,10 @@ const parseIceServers = () => {
 };
 
 const ICE_SERVERS = parseIceServers();
+const PEER_DISCONNECTED_GRACE_MS = 5000;
+const PEER_LIVENESS_INTERVAL_MS = 5000;
+const PEER_AUDIO_STALL_MS = 15000;
+const AUDIO_PLAYBACK_RESUME_INTERVAL_MS = 5000;
 
   // SIMD Check Helper
   // const isSimdSupported = async () => { ... } // No longer needed for DeepFilterNet (WASM handles it)
@@ -167,8 +150,6 @@ const ICE_SERVERS = parseIceServers();
   const peersRef = useRef<{ peerID: string; peer: any }[]>([]);
   const localStream = useRef<MediaStream | null>(null);
   const screenStream = useRef<MediaStream | null>(null);
-  const screenShareStream = useRef<MediaStream | null>(null);
-  const screenShareTrackIds = useRef<Set<string>>(new Set());
   
   // Audio Processing Refs
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -179,11 +160,13 @@ const ICE_SERVERS = parseIceServers();
   const announcedScreenStreamsRef = useRef<Set<string>>(new Set());
   const resettingRemotePeersRef = useRef(false);
   const rejoinTimerRef = useRef<number | null>(null);
+  const replacePeersOnNextJoinRef = useRef(false);
+  const peerDisconnectTimersRef = useRef<Map<string, number>>(new Map());
+  const peerHealthTimersRef = useRef<Map<string, number>>(new Map());
+  const peerAudioStatsRef = useRef<Map<string, { bytes: number; packets: number; stalledSince: number | null }>>(new Map());
 
   const [noiseSuppressionEnabled, setNoiseSuppressionEnabled] = useState(true); // Default ON
   const [noiseSuppressionLoading, setNoiseSuppressionLoading] = useState(false);
-  const [screenShareQuality, setScreenShareQuality] = useState<ScreenShareQuality>("1080p30");
-  const [shareScreenAudio, setShareScreenAudio] = useState(false);
 
   // Load Peer dynamically on mount
   useEffect(() => {
@@ -203,16 +186,6 @@ const ICE_SERVERS = parseIceServers();
     const savedNoiseSuppression = localStorage.getItem("noiseSuppressionEnabled");
     if (savedNoiseSuppression !== null) {
       setNoiseSuppressionEnabled(savedNoiseSuppression === "true");
-    }
-
-    const savedScreenShareQuality = localStorage.getItem("screenShareQuality");
-    if (savedScreenShareQuality && isScreenShareQuality(savedScreenShareQuality)) {
-      setScreenShareQuality(savedScreenShareQuality);
-    }
-
-    const savedShareScreenAudio = localStorage.getItem("shareScreenAudio");
-    if (savedShareScreenAudio !== null) {
-      setShareScreenAudio(savedShareScreenAudio === "true");
     }
     
     import("simple-peer")
@@ -245,15 +218,40 @@ const ICE_SERVERS = parseIceServers();
     const pc: RTCPeerConnection | undefined = peer?._pc;
     if (!pc) return true;
 
-    return !["closed", "failed", "disconnected"].includes(pc.connectionState) &&
-      !["closed", "failed", "disconnected"].includes(pc.iceConnectionState);
+    return !["closed", "failed"].includes(pc.connectionState) &&
+      !["closed", "failed"].includes(pc.iceConnectionState);
   };
+
+  const clearPeerRecoveryTimers = useCallback((peerID: string) => {
+    const disconnectTimer = peerDisconnectTimersRef.current.get(peerID);
+    if (disconnectTimer) {
+      window.clearTimeout(disconnectTimer);
+      peerDisconnectTimersRef.current.delete(peerID);
+    }
+
+    const healthTimer = peerHealthTimersRef.current.get(peerID);
+    if (healthTimer) {
+      window.clearInterval(healthTimer);
+      peerHealthTimersRef.current.delete(peerID);
+    }
+
+    peerAudioStatsRef.current.delete(peerID);
+  }, []);
+
+  const clearAllPeerRecoveryTimers = useCallback(() => {
+    peerDisconnectTimersRef.current.forEach((timer) => window.clearTimeout(timer));
+    peerHealthTimersRef.current.forEach((timer) => window.clearInterval(timer));
+    peerDisconnectTimersRef.current.clear();
+    peerHealthTimersRef.current.clear();
+    peerAudioStatsRef.current.clear();
+  }, []);
 
   const removeRemotePeer = useCallback((peerID: string, destroyPeer = true) => {
     const existing = peersRef.current.find((p) => p.peerID === peerID);
     if (destroyPeer && existing) {
       try {
         resettingRemotePeersRef.current = true;
+        existing.peer.__intentionalDestroy = true;
         existing.peer.destroy();
       } catch {
         // Ignore peer teardown errors during recovery.
@@ -262,6 +260,7 @@ const ICE_SERVERS = parseIceServers();
       }
     }
 
+    clearPeerRecoveryTimers(peerID);
     peersRef.current = peersRef.current.filter((p) => p.peerID !== peerID);
     setPeers((prev) => prev.filter((p) => p.peerID !== peerID));
     setIncomingStreams((prev) => prev.filter((s) => s.id !== peerID));
@@ -270,12 +269,13 @@ const ICE_SERVERS = parseIceServers();
         announcedScreenStreamsRef.current.delete(key);
       }
     });
-  }, []);
+  }, [clearPeerRecoveryTimers]);
 
   const resetRemotePeers = useCallback(() => {
     resettingRemotePeersRef.current = true;
     peersRef.current.forEach((p) => {
       try {
+        p.peer.__intentionalDestroy = true;
         p.peer.destroy();
       } catch {
         // Ignore peer teardown errors during recovery.
@@ -283,12 +283,13 @@ const ICE_SERVERS = parseIceServers();
     });
     resettingRemotePeersRef.current = false;
 
+    clearAllPeerRecoveryTimers();
     peersRef.current = [];
     setPeers([]);
     setIncomingStreams([]);
     setHiddenStreams(new Set());
     announcedScreenStreamsRef.current.clear();
-  }, []);
+  }, [clearAllPeerRecoveryTimers]);
 
   const rejoinCurrentVoice = useCallback((reason: string) => {
     if (!socket || !inVoice || !currentInternalRoomId || !localStream.current) return;
@@ -299,8 +300,9 @@ const ICE_SERVERS = parseIceServers();
       if (!socket.connected || !localStream.current) return;
 
       console.log(`VoiceChat: Re-joining voice after ${reason}:`, currentInternalRoomId);
+      replacePeersOnNextJoinRef.current = true;
       resetRemotePeers();
-      socket.emit("join-voice", { roomId: `${serverId}-${currentInternalRoomId}`, user });
+      socket.emit("join-voice", { roomId: `${serverId}-${currentInternalRoomId}`, user, forcePeerRefresh: true });
       socket.emit("heartbeat", { roomId: `${serverId}-${currentInternalRoomId}` });
     }, 250);
   }, [socket, inVoice, currentInternalRoomId, resetRemotePeers, serverId, user]);
@@ -376,12 +378,13 @@ const ICE_SERVERS = parseIceServers();
         window.clearTimeout(rejoinTimerRef.current);
         rejoinTimerRef.current = null;
       }
+      clearAllPeerRecoveryTimers();
       cleanupAudioContext();
       if (localStream.current) {
         localStream.current.getTracks().forEach((t) => t.stop());
       }
     };
-  }, []);
+  }, [clearAllPeerRecoveryTimers]);
 
   useEffect(() => {
     if (!inVoice) return;
@@ -442,7 +445,6 @@ const ICE_SERVERS = parseIceServers();
   // - explicit maxFramerate so the encoder does not cap itself to ~15fps
   const tuneScreenVideoSender = (peer: any, track: MediaStreamTrack) => {
     try {
-      const preset = SCREEN_SHARE_QUALITY_PRESETS[screenShareQuality];
       const pc: RTCPeerConnection | undefined = peer?._pc;
       if (!pc || typeof pc.getSenders !== "function") return;
       const sender = pc.getSenders().find((s) => s.track === track);
@@ -453,10 +455,14 @@ const ICE_SERVERS = parseIceServers();
         params.encodings = [{}];
       }
       params.encodings.forEach((enc: RTCRtpEncodingParameters) => {
-        enc.maxBitrate = preset.maxBitrate;
-        (enc as any).maxFramerate = preset.frameRate;
-        (enc as any).networkPriority = screenShareQuality === "4k60" ? "high" : "medium";
-        (enc as any).priority = screenShareQuality === "4k60" ? "high" : "medium";
+        // 2.5 Mbps @ 30fps — 1080p icin akici ve tipik Turkiye ev uplink'inin
+        // 3+ peer mesh'te doyurmayacagi degerler. Radyo audio + mikrofon icin
+        // bant genisligi pay birakir, packet drop / jitter azalir -> ses
+        // robotiklesmez, frame drop minimize olur.
+        enc.maxBitrate = 2_500_000;
+        (enc as any).maxFramerate = 30;
+        (enc as any).networkPriority = "medium";
+        (enc as any).priority = "medium";
       });
       (params as any).degradationPreference = "maintain-framerate";
 
@@ -469,15 +475,14 @@ const ICE_SERVERS = parseIceServers();
   };
 
   const attachActiveScreenTracks = (peer: any) => {
-    const outgoingStream = screenShareStream.current || screenStream.current;
-    if (!outgoingStream || !peer) return;
+    if (!screenStream.current || !peer) return;
 
-    const activeTracks = outgoingStream.getTracks().filter((track) => track.readyState === "live");
+    const activeTracks = screenStream.current.getTracks().filter((track) => track.readyState === "live");
     if (activeTracks.length === 0) return;
 
     activeTracks.forEach((track) => {
       try {
-        peer.addTrack(track, outgoingStream);
+        peer.addTrack(track, screenStream.current as MediaStream);
         if (track.kind === "video") {
           // Defer so the sender is fully registered on the RTCPeerConnection
           setTimeout(() => tuneScreenVideoSender(peer, track), 0);
@@ -673,10 +678,12 @@ const ICE_SERVERS = parseIceServers();
 
       socket.on("all-voice-users", (users: VoiceUser[]) => {
         resetRemotePeers();
+        const replacePeer = replacePeersOnNextJoinRef.current;
+        replacePeersOnNextJoinRef.current = false;
         const peersArr: { peerID: string; peer: any; volume: number; username: string; userId?: number | null }[] = [];
         users.forEach((u) => {
           if (socket.id) {
-            const peer = createPeer(u.id, socket.id, streamToUse, user.username, user.id);
+            const peer = createPeer(u.id, socket.id, streamToUse, user.username, user.id, replacePeer);
             peersRef.current.push({ peerID: u.id, peer });
             peersArr.push({ peerID: u.id, peer, volume: 100, username: u.username, userId: u.userId });
           }
@@ -698,6 +705,7 @@ const ICE_SERVERS = parseIceServers();
         if (existing && shouldReplacePeer) {
           try {
             resettingRemotePeersRef.current = true;
+            existing.peer.__intentionalDestroy = true;
             existing.peer.destroy();
           } catch {
             // Ignore stale bot peer teardown during seamless replacement.
@@ -705,6 +713,7 @@ const ICE_SERVERS = parseIceServers();
             resettingRemotePeersRef.current = false;
           }
 
+          clearPeerRecoveryTimers(payload.callerID);
           const peer = addPeer(payload.signal, payload.callerID, streamToUse);
           peersRef.current = peersRef.current.map((p) => (
             p.peerID === payload.callerID ? { peerID: payload.callerID, peer } : p
@@ -757,7 +766,15 @@ const ICE_SERVERS = parseIceServers();
     // Clean up Audio Context
     cleanupAudioContext();
 
-    peersRef.current.forEach((p) => p.peer.destroy());
+    peersRef.current.forEach((p) => {
+      try {
+        p.peer.__intentionalDestroy = true;
+        p.peer.destroy();
+      } catch {
+        // Ignore peer teardown errors during explicit leave.
+      }
+    });
+    clearAllPeerRecoveryTimers();
     peersRef.current = [];
     setPeers([]);
     setIncomingStreams([]);
@@ -771,15 +788,44 @@ const ICE_SERVERS = parseIceServers();
   };
 
   const attachPeerLifecycle = (peerID: string, peer: any) => {
+    clearPeerRecoveryTimers(peerID);
+    let recovered = false;
+
     const recover = (reason: string) => {
+      if (recovered || resettingRemotePeersRef.current || peer.__intentionalDestroy) return;
+      recovered = true;
       if (resettingRemotePeersRef.current) return;
       removeRemotePeer(peerID);
       rejoinCurrentVoice(reason);
     };
 
+    const clearDisconnectGrace = () => {
+      const timer = peerDisconnectTimersRef.current.get(peerID);
+      if (timer) {
+        window.clearTimeout(timer);
+        peerDisconnectTimersRef.current.delete(peerID);
+      }
+    };
+
+    const scheduleDisconnectRecovery = (reason: string) => {
+      if (peerDisconnectTimersRef.current.has(peerID)) return;
+
+      const timer = window.setTimeout(() => {
+        peerDisconnectTimersRef.current.delete(peerID);
+        const pc: RTCPeerConnection | undefined = peer?._pc;
+        if (!pc) return;
+        if (["connected", "completed"].includes(pc.iceConnectionState) || pc.connectionState === "connected") {
+          return;
+        }
+        recover(reason);
+      }, PEER_DISCONNECTED_GRACE_MS);
+
+      peerDisconnectTimersRef.current.set(peerID, timer);
+    };
+
     peer.on("close", () => {
-      if (resettingRemotePeersRef.current) return;
-      removeRemotePeer(peerID, false);
+      if (resettingRemotePeersRef.current || peer.__intentionalDestroy) return;
+      recover("peer close");
     });
     peer.on("error", (err: any) => {
       console.error("Peer error:", err);
@@ -790,21 +836,77 @@ const ICE_SERVERS = parseIceServers();
     if (!pc) return;
 
     const handleConnectionState = () => {
-      if (["failed", "closed", "disconnected"].includes(pc.connectionState)) {
+      if (["connected"].includes(pc.connectionState)) {
+        clearDisconnectGrace();
+      } else if (["failed", "closed"].includes(pc.connectionState)) {
         recover(`peer connection ${pc.connectionState}`);
+      } else if (pc.connectionState === "disconnected") {
+        scheduleDisconnectRecovery(`peer connection ${pc.connectionState}`);
       }
     };
     const handleIceState = () => {
-      if (["failed", "closed", "disconnected"].includes(pc.iceConnectionState)) {
+      if (["connected", "completed"].includes(pc.iceConnectionState)) {
+        clearDisconnectGrace();
+      } else if (["failed", "closed"].includes(pc.iceConnectionState)) {
         recover(`peer ice ${pc.iceConnectionState}`);
+      } else if (pc.iceConnectionState === "disconnected") {
+        scheduleDisconnectRecovery(`peer ice ${pc.iceConnectionState}`);
       }
     };
 
     pc.addEventListener("connectionstatechange", handleConnectionState);
     pc.addEventListener("iceconnectionstatechange", handleIceState);
+
+    if (typeof pc.getStats === "function") {
+      const healthTimer = window.setInterval(async () => {
+        if (recovered || resettingRemotePeersRef.current || peer.__intentionalDestroy || peer.destroyed) return;
+
+        try {
+          const currentConnectionState = pc.connectionState;
+          const currentIceState = pc.iceConnectionState;
+          if (["failed", "closed"].includes(currentConnectionState) || ["failed", "closed"].includes(currentIceState)) {
+            recover(`peer health ${currentConnectionState}/${currentIceState}`);
+            return;
+          }
+
+          const stats = await pc.getStats();
+          let bytes = 0;
+          let packets = 0;
+          let hasInboundAudio = false;
+
+          stats.forEach((report: any) => {
+            if (report.type !== "inbound-rtp") return;
+            const mediaKind = report.kind || report.mediaType;
+            if (mediaKind !== "audio") return;
+            hasInboundAudio = true;
+            bytes += Number(report.bytesReceived || 0);
+            packets += Number(report.packetsReceived || 0);
+          });
+
+          if (!hasInboundAudio) return;
+
+          const now = Date.now();
+          const previous = peerAudioStatsRef.current.get(peerID);
+          if (!previous || bytes > previous.bytes || packets > previous.packets) {
+            peerAudioStatsRef.current.set(peerID, { bytes, packets, stalledSince: null });
+            return;
+          }
+
+          const stalledSince = previous.stalledSince || now;
+          peerAudioStatsRef.current.set(peerID, { bytes, packets, stalledSince });
+          if (now - stalledSince >= PEER_AUDIO_STALL_MS) {
+            recover("peer audio stats stalled");
+          }
+        } catch (err) {
+          console.warn("Peer health check failed:", err);
+        }
+      }, PEER_LIVENESS_INTERVAL_MS);
+
+      peerHealthTimersRef.current.set(peerID, healthTimer);
+    }
   };
 
-  const createPeer = (userToSignal: string, callerID: string, stream: MediaStream, myUsername: string, myUserId: number) => {
+  const createPeer = (userToSignal: string, callerID: string, stream: MediaStream, myUsername: string, myUserId: number, replacePeer = false) => {
     const peer = new PeerClass({
       initiator: true,
       trickle: true,
@@ -815,7 +917,7 @@ const ICE_SERVERS = parseIceServers();
     });
 
     peer.on("signal", (signal: any) => {
-      socket?.emit("sending-signal", { userToSignal, callerID, signal, username: myUsername, userId: myUserId });
+      socket?.emit("sending-signal", { userToSignal, callerID, signal, username: myUsername, userId: myUserId, replacePeer });
     });
 
     peer.on("stream", (remoteStream: MediaStream) => {
@@ -870,22 +972,6 @@ const ICE_SERVERS = parseIceServers();
     const videoTracks = stream.getVideoTracks();
     if (videoTracks.length > 0) {
       const streamKey = `${id}-${stream.id}`;
-      const removeIncomingStream = () => {
-        announcedScreenStreamsRef.current.delete(streamKey);
-        setHiddenStreams((prev) => {
-          if (!prev.has(streamKey)) return prev;
-          const next = new Set(prev);
-          next.delete(streamKey);
-          return next;
-        });
-        setIncomingStreams((prev) => prev.filter((s) => !(s.id === id && s.stream.id === stream.id)));
-      };
-
-      videoTracks.forEach((track) => {
-        track.addEventListener("ended", removeIncomingStream, { once: true });
-      });
-      stream.addEventListener("inactive", removeIncomingStream, { once: true });
-
       if (!announcedScreenStreamsRef.current.has(streamKey)) {
         announcedScreenStreamsRef.current.add(streamKey);
         playScreenStartSound();
@@ -901,26 +987,25 @@ const ICE_SERVERS = parseIceServers();
   const startScreenShare = () => {
     if (!PeerClass || !localStream.current) return;
     
-    const preset = SCREEN_SHARE_QUALITY_PRESETS[screenShareQuality];
-    const constraints: DisplayCaptureOptions = {
+    // High quality defaults for smooth gameplay viewing.
+    // Ideal 1080p60; tarayici destegi yoksa otomatik olarak dusurur (stabilite).
+    const constraints: MediaStreamConstraints = {
       video: {
-        width: { ideal: preset.width, max: preset.width },
-        height: { ideal: preset.height, max: preset.height },
-        frameRate: { ideal: preset.frameRate, max: preset.frameRate },
+        // 1080p30 varsayilan — oyun akiciligi icin yeterli, Turkiye ev uplink'i
+        // ve 3+ peer mesh icin surdurulebilir. Kullanici browser'i daha
+        // dusuk destekliyorsa otomatik dusurur.
+        width: { ideal: 1920, max: 1920 },
+        height: { ideal: 1080, max: 1080 },
+        frameRate: { ideal: 30, max: 60 },
       } as MediaTrackConstraints,
-      audio: shareScreenAudio
-        ? ({
-            echoCancellation: true,
-            noiseSuppression: true,
-            autoGainControl: false,
-            sampleRate: 48000,
-            channelCount: 2,
-          } as MediaTrackConstraints)
-        : false,
-      selfBrowserSurface: "exclude",
-      preferCurrentTab: false,
-      surfaceSwitching: "include",
-      systemAudio: shareScreenAudio ? "include" : "exclude",
+      audio: {
+        echoCancellation: false,
+        noiseSuppression: false,
+        autoGainControl: false,
+        // @ts-ignore — chrome-specific hints for higher fidelity screen audio
+        sampleRate: 48000,
+        channelCount: 2,
+      } as MediaTrackConstraints
     };
 
     navigator.mediaDevices
@@ -934,24 +1019,35 @@ const ICE_SERVERS = parseIceServers();
 
         // Content hints: encoder'a hareketli icerik (oyun) ipucu ver -> daha akici FPS.
         if (videoTrack && "contentHint" in videoTrack) {
-          try { (videoTrack as MediaTrackWithContentHint).contentHint = "motion"; } catch {}
+          try { (videoTrack as any).contentHint = "motion"; } catch {}
         }
         if (screenAudioTrack && "contentHint" in screenAudioTrack) {
-          try { (screenAudioTrack as MediaTrackWithContentHint).contentHint = "music"; } catch {}
+          try { (screenAudioTrack as any).contentHint = "music"; } catch {}
         }
 
-        if (videoTrack) {
-          const outgoingTracks = screenAudioTrack ? [videoTrack, screenAudioTrack] : [videoTrack];
-          const outgoingStream = new MediaStream(outgoingTracks);
-          screenShareStream.current = outgoingStream;
-          screenShareTrackIds.current = new Set(outgoingTracks.map((track) => track.id));
+        // Create a combined stream with video + screen audio for VideoPlayer volume control
+        // Microphone stays separate in AudioPlayer
+        if (screenAudioTrack && videoTrack) {
+          // Create a new stream with both video and screen audio
+          const screenShareStream = new MediaStream([videoTrack, screenAudioTrack]);
 
           peersRef.current.forEach((p) => {
-            outgoingTracks.forEach((track) => p.peer.addTrack(track, outgoingStream));
+            // Add video track
+            p.peer.addTrack(videoTrack, screenShareStream);
+            // Add screen audio track separately (will create new stream on receiver)
+            p.peer.addTrack(screenAudioTrack, screenShareStream);
+            // Bitrate / framerate tuning for the freshly added video sender
             setTimeout(() => tuneScreenVideoSender(p.peer, videoTrack), 0);
           });
 
-          console.log(screenAudioTrack ? "Screen share started with screen audio" : "Screen share started without screen audio");
+          console.log("Screen share started with screen audio (separate from mic)");
+        } else if (videoTrack) {
+          // No screen audio - just add video
+          peersRef.current.forEach((p) => {
+            p.peer.addTrack(videoTrack, stream);
+            setTimeout(() => tuneScreenVideoSender(p.peer, videoTrack), 0);
+          });
+          console.log("Screen share started without screen audio");
         }
 
         if (videoTrack) {
@@ -960,35 +1056,33 @@ const ICE_SERVERS = parseIceServers();
           };
         }
       })
-      .catch((err: unknown) => {
+      .catch((err: any) => {
         console.error("Failed to share screen", err);
       });
   };
 
   const stopScreenShare = () => {
     if (!screenStream.current) return;
-    const outgoingStream = screenShareStream.current || screenStream.current;
-    const outgoingTrackIds = new Set([
-      ...Array.from(screenShareTrackIds.current),
-      ...outgoingStream.getTracks().map((track) => track.id),
-    ]);
-     
+
     // Stop all screen stream tracks
     screenStream.current.getTracks().forEach((track) => {
       track.stop();
       track.enabled = false;
     });
-    outgoingStream.getTracks().forEach((track) => {
-      if (track.readyState === "live") track.stop();
-      track.enabled = false;
-    });
 
-    // Remove only tracks that belong to this user's outgoing screen share.
+    // Remove video and screen audio tracks from peers
     peersRef.current.forEach((p) => {
       try {
         const senders = p.peer._pc?.getSenders?.() || [];
         senders.forEach((sender: RTCRtpSender) => {
-          if (sender.track && outgoingTrackIds.has(sender.track.id)) {
+          // Remove video tracks
+          if (sender.track?.kind === 'video') {
+            p.peer._pc?.removeTrack?.(sender);
+          }
+          // Remove screen audio tracks (not microphone)
+          // Screen audio tracks have a different id than localStream audio
+          if (sender.track?.kind === 'audio' &&
+              sender.track.id !== localStream.current?.getAudioTracks()[0]?.id) {
             p.peer._pc?.removeTrack?.(sender);
           }
         });
@@ -997,9 +1091,18 @@ const ICE_SERVERS = parseIceServers();
       }
     });
 
+    // Clear incoming streams (for the sharer's own view)
+    setIncomingStreams((prev) => {
+      prev.forEach((s) => {
+        s.stream.getTracks().forEach((track) => {
+          track.stop();
+          track.enabled = false;
+        });
+      });
+      return [];
+    });
+
     screenStream.current = null;
-    screenShareStream.current = null;
-    screenShareTrackIds.current.clear();
     setIsSharingScreen(false);
     console.log("Screen share stopped");
   };
@@ -1272,42 +1375,6 @@ const ICE_SERVERS = parseIceServers();
             </button>
           </div>
 
-          <div className="mb-3 grid grid-cols-[1fr_auto] items-center gap-2 rounded-lg border border-zinc-700 bg-zinc-950/60 px-2 py-2">
-            <label className="flex items-center gap-2 text-[10px] uppercase tracking-wide text-zinc-500">
-              <span className="font-bold">Yayin Kalitesi</span>
-              <select
-                value={screenShareQuality}
-                onChange={(e) => {
-                  const next = e.target.value;
-                  if (!isScreenShareQuality(next)) return;
-                  setScreenShareQuality(next);
-                  localStorage.setItem("screenShareQuality", next);
-                }}
-                disabled={isSharingScreen}
-                className="rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1 text-xs normal-case tracking-normal text-zinc-200 outline-none transition-colors hover:border-zinc-600 disabled:cursor-not-allowed disabled:opacity-60"
-                title={isSharingScreen ? "Kaliteyi degistirmek icin yayini yeniden baslat" : "Yayin kalitesi"}
-              >
-                {Object.entries(SCREEN_SHARE_QUALITY_PRESETS).map(([value, preset]) => (
-                  <option key={value} value={value}>{preset.label}</option>
-                ))}
-              </select>
-            </label>
-            <label className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wide text-zinc-500" title="Sistem/tarayici sesini paylasmak yankiya sebep olabilir">
-              <input
-                type="checkbox"
-                checked={shareScreenAudio}
-                onChange={(e) => {
-                  const next = e.target.checked;
-                  setShareScreenAudio(next);
-                  localStorage.setItem("shareScreenAudio", String(next));
-                }}
-                disabled={isSharingScreen}
-                className="h-3.5 w-3.5 accent-indigo-500 disabled:cursor-not-allowed"
-              />
-              Ekran Sesi
-            </label>
-          </div>
-
           <div className="flex items-center justify-center gap-2">
             <button
               onClick={toggleMute}
@@ -1412,6 +1479,10 @@ const ICE_SERVERS = parseIceServers();
           key={p.peerID}
           peer={p.peer}
           volume={isDeafened ? 0 : p.volume / 100}
+          onStalled={(reason) => {
+            removeRemotePeer(p.peerID);
+            rejoinCurrentVoice(reason);
+          }}
         />
       ))}
 
@@ -1515,7 +1586,7 @@ const ICE_SERVERS = parseIceServers();
   );
 }
 
-const AudioPlayer = ({ peer, volume = 1 }: { peer: any; volume?: number }) => {
+const AudioPlayer = ({ peer, volume = 1, onStalled }: { peer: any; volume?: number; onStalled?: (reason: string) => void }) => {
   const [audioStream, setAudioStream] = useState<MediaStream | null>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -1523,7 +1594,12 @@ const AudioPlayer = ({ peer, volume = 1 }: { peer: any; volume?: number }) => {
   const gainRef = useRef<GainNode | null>(null);
   const limiterRef = useRef<DynamicsCompressorNode | null>(null);
   const volumeRef = useRef(volume);
+  const onStalledRef = useRef(onStalled);
   const webAudioDisabledRef = useRef(false);
+
+  useEffect(() => {
+    onStalledRef.current = onStalled;
+  }, [onStalled]);
 
   const teardownAudioGraph = () => {
     mediaSourceRef.current?.disconnect();
@@ -1647,6 +1723,7 @@ const AudioPlayer = ({ peer, volume = 1 }: { peer: any; volume?: number }) => {
     }
 
     audioEl.srcObject = audioStream;
+    audioEl.muted = false;
     const nextGain = Math.max(0, Math.min(2, volumeRef.current));
 
     if (ensureAudioGraph() && gainRef.current && audioContextRef.current) {
@@ -1670,29 +1747,45 @@ const AudioPlayer = ({ peer, volume = 1 }: { peer: any; volume?: number }) => {
       }
     };
 
+    const handleEnded = () => {
+      onStalledRef.current?.("remote audio ended");
+    };
+
+    const handleTrackEnded = () => {
+      onStalledRef.current?.("remote audio track ended");
+    };
+
     const audioTracks = audioStream.getAudioTracks();
     audioTracks.forEach((track) => {
+      track.addEventListener("mute", resumePlayback);
       track.addEventListener("unmute", resumePlayback);
-      track.addEventListener("ended", resumePlayback);
+      track.addEventListener("ended", handleTrackEnded);
     });
 
     audioEl.addEventListener("pause", resumePlayback);
     audioEl.addEventListener("stalled", resumePlayback);
+    audioEl.addEventListener("waiting", resumePlayback);
     audioEl.addEventListener("suspend", resumeWhenVisible);
+    audioEl.addEventListener("ended", handleEnded);
     window.addEventListener("focus", resumePlayback);
     window.addEventListener("pageshow", resumePlayback);
     document.addEventListener("visibilitychange", resumeWhenVisible);
 
     resumePlayback();
+    const playbackWatchdog = window.setInterval(resumePlayback, AUDIO_PLAYBACK_RESUME_INTERVAL_MS);
 
     return () => {
+      window.clearInterval(playbackWatchdog);
       audioTracks.forEach((track) => {
+        track.removeEventListener("mute", resumePlayback);
         track.removeEventListener("unmute", resumePlayback);
-        track.removeEventListener("ended", resumePlayback);
+        track.removeEventListener("ended", handleTrackEnded);
       });
       audioEl.removeEventListener("pause", resumePlayback);
       audioEl.removeEventListener("stalled", resumePlayback);
+      audioEl.removeEventListener("waiting", resumePlayback);
       audioEl.removeEventListener("suspend", resumeWhenVisible);
+      audioEl.removeEventListener("ended", handleEnded);
       window.removeEventListener("focus", resumePlayback);
       window.removeEventListener("pageshow", resumePlayback);
       document.removeEventListener("visibilitychange", resumeWhenVisible);
@@ -1717,31 +1810,30 @@ const VideoPlayer = ({ stream, name, onClose }: { stream: MediaStream; name: str
   const [size, setSize] = useState({ width: 400, height: 225 });
   const [isDragging, setIsDragging] = useState(false);
   const [isResizing, setIsResizing] = useState(false);
+  const [hasAudio, setHasAudio] = useState(false);
   const [volume, setVolume] = useState(100);
   const dragRef = useRef({ startX: 0, startY: 0, initialX: 0, initialY: 0 });
   const resizeRef = useRef({ startX: 0, startY: 0, initialW: 0, initialH: 0 });
-  const hasAudio = stream.getAudioTracks().length > 0;
 
   useEffect(() => {
-    const videoEl = ref.current;
-    const audioEl = audioRef.current;
-    if (videoEl) videoEl.srcObject = stream;
+    if (ref.current) ref.current.srcObject = stream;
     
     // Check for audio tracks and play them
     const audioTracks = stream.getAudioTracks();
-    if (audioTracks.length > 0 && audioEl) {
+    if (audioTracks.length > 0 && audioRef.current) {
       const audioStream = new MediaStream(audioTracks);
-      audioEl.srcObject = audioStream;
-      audioEl.play().catch(() => {});
+      audioRef.current.srcObject = audioStream;
+      audioRef.current.play().catch(() => {});
+      setHasAudio(true);
     }
     
     // Cleanup when component unmounts or stream changes
     return () => {
-      if (videoEl) {
-        videoEl.srcObject = null;
+      if (ref.current) {
+        ref.current.srcObject = null;
       }
-      if (audioEl) {
-        audioEl.srcObject = null;
+      if (audioRef.current) {
+        audioRef.current.srcObject = null;
       }
     };
   }, [stream]);
