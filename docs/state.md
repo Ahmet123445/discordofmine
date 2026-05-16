@@ -4,14 +4,14 @@
 
 ## Current Status
 - **Phase:** Production (Live)
-- **Last Updated:** 2026-04-16
+- **Last Updated:** 2026-05-16
 - **App Name:** V A T A N A S K I (renamed from DiscordOfMine)
 
 ## Deployment URLs
-- **Server:** root@167.86.99.131
-- **Frontend:** http://167.86.99.131:3002
-- **Backend:** http://167.86.99.131:3001
-- **Repository:** https://github.com/Ahmet123445/discordofmine
+- **Server:** root@153.56.130.88
+- **Frontend:** http://153.56.130.88:3002
+- **Backend:** http://153.56.130.88:3001
+- **Repository:** https://github.com/devGibi/discordofmine
 
 ## Completed Features
 
@@ -92,7 +92,7 @@
 
 ### Frontend (VPS)
 ```
-NEXT_PUBLIC_API_URL=http://167.86.99.131:3001
+NEXT_PUBLIC_API_URL=http://153.56.130.88:3001
 ```
 
 ### Backend (VPS)

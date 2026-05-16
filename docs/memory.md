@@ -81,7 +81,7 @@ cd client && npm run dev
 
 ## Deployment Checklist
 1. Ensure all changes committed and pushed
-2. Connect to server with SSH (`root@167.86.99.131`)
+2. Connect to server with SSH (`root@153.56.130.88`)
 3. Run `/opt/discordofmine/deploy.sh main`
 4. Check PM2 process status (`pm2 ls`)
 5. Verify health endpoints (`http://127.0.0.1:3001/health`, `http://127.0.0.1:3002`)
