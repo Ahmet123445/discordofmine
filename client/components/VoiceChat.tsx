@@ -74,7 +74,10 @@ const playScreenStartSound = () => {
 
 const DEFAULT_ICE_SERVERS = [
   { urls: "stun:stun.l.google.com:19302" },
-  { urls: "stun:global.stun.twilio.com:3478" }
+  { urls: "stun:global.stun.twilio.com:3478" },
+  { urls: "turn:openrelay.metered.ca:80", username: "openrelayproject", credential: "openrelayproject" },
+  { urls: "turn:openrelay.metered.ca:443", username: "openrelayproject", credential: "openrelayproject" },
+  { urls: "turn:openrelay.metered.ca:443?transport=tcp", username: "openrelayproject", credential: "openrelayproject" }
 ];
 
 const parseIceServers = () => {
@@ -109,10 +112,11 @@ const parseIceServers = () => {
 };
 
 const ICE_SERVERS = parseIceServers();
-const PEER_DISCONNECTED_GRACE_MS = 5000;
+const PEER_DISCONNECTED_GRACE_MS = 8000;
 const PEER_LIVENESS_INTERVAL_MS = 5000;
-const PEER_AUDIO_STALL_MS = 15000;
+const PEER_AUDIO_STALL_MS = 30000;
 const AUDIO_PLAYBACK_RESUME_INTERVAL_MS = 5000;
+const RECONNECT_DEBOUNCE_MS = 2000;
 
   // SIMD Check Helper
   // const isSimdSupported = async () => { ... } // No longer needed for DeepFilterNet (WASM handles it)
@@ -164,6 +168,9 @@ const AUDIO_PLAYBACK_RESUME_INTERVAL_MS = 5000;
   const peerDisconnectTimersRef = useRef<Map<string, number>>(new Map());
   const peerHealthTimersRef = useRef<Map<string, number>>(new Map());
   const peerAudioStatsRef = useRef<Map<string, { bytes: number; packets: number; stalledSince: number | null }>>(new Map());
+  const peerRecoveryCooldownRef = useRef<Map<string, number>>(new Map());
+  const reconnectDebounceTimerRef = useRef<number | null>(null);
+  const lastReconnectAtRef = useRef<number>(0);
 
   const [noiseSuppressionEnabled, setNoiseSuppressionEnabled] = useState(true); // Default ON
   const [noiseSuppressionLoading, setNoiseSuppressionLoading] = useState(false);
@@ -235,15 +242,24 @@ const AUDIO_PLAYBACK_RESUME_INTERVAL_MS = 5000;
       peerHealthTimersRef.current.delete(peerID);
     }
 
+    const iceTimeoutKey = `${peerID}-ice-timeout`;
+    const iceTimeout = peerHealthTimersRef.current.get(iceTimeoutKey);
+    if (iceTimeout) {
+      window.clearTimeout(iceTimeout);
+      peerHealthTimersRef.current.delete(iceTimeoutKey);
+    }
+
     peerAudioStatsRef.current.delete(peerID);
+    peerRecoveryCooldownRef.current.delete(peerID);
   }, []);
 
   const clearAllPeerRecoveryTimers = useCallback(() => {
     peerDisconnectTimersRef.current.forEach((timer) => window.clearTimeout(timer));
-    peerHealthTimersRef.current.forEach((timer) => window.clearInterval(timer));
+    peerHealthTimersRef.current.forEach((timer) => window.clearTimeout(timer));
     peerDisconnectTimersRef.current.clear();
     peerHealthTimersRef.current.clear();
     peerAudioStatsRef.current.clear();
+    peerRecoveryCooldownRef.current.clear();
   }, []);
 
   const removeRemotePeer = useCallback((peerID: string, destroyPeer = true) => {
@@ -295,6 +311,13 @@ const AUDIO_PLAYBACK_RESUME_INTERVAL_MS = 5000;
     if (!socket || !inVoice || !currentInternalRoomId || !localStream.current) return;
     if (rejoinTimerRef.current) return;
 
+    const now = Date.now();
+    if (now - lastReconnectAtRef.current < RECONNECT_DEBOUNCE_MS) {
+      console.log(`VoiceChat: Skipping rejoin (debounced) after ${reason}`);
+      return;
+    }
+    lastReconnectAtRef.current = now;
+
     rejoinTimerRef.current = window.setTimeout(() => {
       rejoinTimerRef.current = null;
       if (!socket.connected || !localStream.current) return;
@@ -312,6 +335,11 @@ const AUDIO_PLAYBACK_RESUME_INTERVAL_MS = 5000;
     if (!socket || !PeerClass) return;
     
     const handleReconnect = () => {
+      const now = Date.now();
+      if (now - lastReconnectAtRef.current < RECONNECT_DEBOUNCE_MS) {
+        console.log("VoiceChat: Skipping reconnect event (debounced)");
+        return;
+      }
       rejoinCurrentVoice("socket reconnect");
     };
     
@@ -323,6 +351,10 @@ const AUDIO_PLAYBACK_RESUME_INTERVAL_MS = 5000;
       socket.off("connect", handleReconnect);
       socket.off("reconnect", handleReconnect);
       socket.io?.off("reconnect", handleReconnect);
+      if (reconnectDebounceTimerRef.current) {
+        window.clearTimeout(reconnectDebounceTimerRef.current);
+        reconnectDebounceTimerRef.current = null;
+      }
     };
   }, [socket, PeerClass, rejoinCurrentVoice]);
 
@@ -377,6 +409,10 @@ const AUDIO_PLAYBACK_RESUME_INTERVAL_MS = 5000;
       if (rejoinTimerRef.current) {
         window.clearTimeout(rejoinTimerRef.current);
         rejoinTimerRef.current = null;
+      }
+      if (reconnectDebounceTimerRef.current) {
+        window.clearTimeout(reconnectDebounceTimerRef.current);
+        reconnectDebounceTimerRef.current = null;
       }
       clearAllPeerRecoveryTimers();
       cleanupAudioContext();
@@ -766,6 +802,12 @@ const AUDIO_PLAYBACK_RESUME_INTERVAL_MS = 5000;
     // Clean up Audio Context
     cleanupAudioContext();
 
+    if (reconnectDebounceTimerRef.current) {
+      window.clearTimeout(reconnectDebounceTimerRef.current);
+      reconnectDebounceTimerRef.current = null;
+    }
+    lastReconnectAtRef.current = 0;
+
     peersRef.current.forEach((p) => {
       try {
         p.peer.__intentionalDestroy = true;
@@ -791,9 +833,23 @@ const AUDIO_PLAYBACK_RESUME_INTERVAL_MS = 5000;
     clearPeerRecoveryTimers(peerID);
     let recovered = false;
 
+    const isRecoveryOnCooldown = () => {
+      const lastRecovery = peerRecoveryCooldownRef.current.get(peerID) || 0;
+      return (Date.now() - lastRecovery) < 10000;
+    };
+
+    const markRecoveryCooldown = () => {
+      peerRecoveryCooldownRef.current.set(peerID, Date.now());
+    };
+
     const recover = (reason: string) => {
       if (recovered || resettingRemotePeersRef.current || peer.__intentionalDestroy) return;
+      if (isRecoveryOnCooldown()) {
+        console.log(`VoiceChat: Skipping recovery for ${peerID} (cooldown): ${reason}`);
+        return;
+      }
       recovered = true;
+      markRecoveryCooldown();
       if (resettingRemotePeersRef.current) return;
       removeRemotePeer(peerID);
       rejoinCurrentVoice(reason);
@@ -856,6 +912,16 @@ const AUDIO_PLAYBACK_RESUME_INTERVAL_MS = 5000;
 
     pc.addEventListener("connectionstatechange", handleConnectionState);
     pc.addEventListener("iceconnectionstatechange", handleIceState);
+
+    const iceTimeout = window.setTimeout(() => {
+      if (recovered || resettingRemotePeersRef.current || peer.__intentionalDestroy || peer.destroyed) return;
+      const currentState = pc.connectionState || pc.iceConnectionState;
+      if (!["connected", "completed"].includes(currentState)) {
+        console.warn(`VoiceChat: ICE timeout for ${peerID} (state: ${currentState})`);
+        recover("ice candidate timeout");
+      }
+    }, 30000);
+    peerHealthTimersRef.current.set(`${peerID}-ice-timeout`, iceTimeout as unknown as number);
 
     if (typeof pc.getStats === "function") {
       const healthTimer = window.setInterval(async () => {
