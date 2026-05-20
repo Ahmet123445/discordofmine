@@ -1,0 +1,28 @@
+FROM node:22-bookworm-slim
+
+WORKDIR /app
+
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends python3 python3-venv make g++ ca-certificates \
+  && python3 -m venv /opt/yt-dlp \
+  && /opt/yt-dlp/bin/pip install --no-cache-dir yt-dlp \
+  && ln -s /opt/yt-dlp/bin/yt-dlp /usr/local/bin/yt-dlp \
+  && rm -rf /var/lib/apt/lists/*
+
+COPY package*.json ./
+RUN npm ci --omit=dev
+
+COPY . .
+
+RUN mkdir -p data uploads music-cache secrets
+
+ENV NODE_ENV=production
+ENV PORT=3001
+ENV YTDLP_PATH=/usr/local/bin/yt-dlp
+ENV YTDLP_JS_RUNTIMES=node:/usr/local/bin/node
+ENV YTDLP_COOKIES_PATH=/app/secrets/yt-cookies.txt
+ENV MUSIC_CACHE_DIR=/app/music-cache
+
+EXPOSE 3001
+
+CMD ["npm", "start"]

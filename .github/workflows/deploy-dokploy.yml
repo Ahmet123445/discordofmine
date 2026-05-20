@@ -1,0 +1,68 @@
+name: Deploy Dokploy Stack
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-dokploy-main
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    name: Deploy to Dokploy host
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure SSH
+        env:
+          DEPLOY_HOST: ${{ secrets.DOKPLOY_DEPLOY_HOST }}
+          DEPLOY_PORT: ${{ secrets.DOKPLOY_DEPLOY_PORT }}
+          DEPLOY_SSH_KEY: ${{ secrets.DOKPLOY_DEPLOY_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          : "${DEPLOY_PORT:=22}"
+          mkdir -p ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/dokploy_deploy_key
+          chmod 600 ~/.ssh/dokploy_deploy_key
+          ssh-keyscan -p "$DEPLOY_PORT" -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts
+
+      - name: Deploy Dokploy compose stack
+        env:
+          DEPLOY_HOST: ${{ secrets.DOKPLOY_DEPLOY_HOST }}
+          DEPLOY_PORT: ${{ secrets.DOKPLOY_DEPLOY_PORT }}
+          DEPLOY_USER: ${{ secrets.DOKPLOY_DEPLOY_USER }}
+        run: |
+          set -euo pipefail
+          : "${DEPLOY_PORT:=22}"
+          : "${DEPLOY_USER:=deploy}"
+
+          ssh -i ~/.ssh/dokploy_deploy_key -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" 'bash -s' <<'REMOTE'
+          set -euo pipefail
+
+          APP_DIR="/etc/dokploy/sources/discordofmine/current"
+          COMPOSE_DIR="/etc/dokploy/compose/discordofmine-4szfdr/code"
+          REPO_URL="https://github.com/devGibi/discordofmine.git"
+          BRANCH="main"
+
+          sudo mkdir -p "$(dirname "$APP_DIR")"
+
+          if [ ! -d "$APP_DIR/.git" ]; then
+            BACKUP_DIR="${APP_DIR}.backup.$(date +%Y%m%d%H%M%S)"
+            if [ -d "$APP_DIR" ]; then
+              sudo mv "$APP_DIR" "$BACKUP_DIR"
+            fi
+            sudo git clone --branch "$BRANCH" "$REPO_URL" "$APP_DIR"
+          else
+            sudo git -C "$APP_DIR" remote set-url origin "$REPO_URL"
+            sudo git -C "$APP_DIR" fetch --prune origin "$BRANCH"
+            sudo git -C "$APP_DIR" reset --hard "origin/$BRANCH"
+            sudo git -C "$APP_DIR" clean -fd
+          fi
+
+          echo "Deploying $(sudo git -C "$APP_DIR" rev-parse --short HEAD)"
+
+          sudo docker compose -p discordofmine-4szfdr -f "$COMPOSE_DIR/docker-compose.yml" up -d --build --remove-orphans
+          sudo docker compose -p discordofmine-4szfdr -f "$COMPOSE_DIR/docker-compose.yml" ps
+          REMOTE
