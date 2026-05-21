@@ -1,0 +1,65 @@
+services:
+  discord-server:
+    build:
+      context: ./server
+      dockerfile: Dockerfile.dokploy
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 3001
+      JWT_SECRET: ${JWT_SECRET:-super-secret-dev-key}
+      TURN_URL: ${TURN_URL:-}
+      TURN_USERNAME: ${TURN_USERNAME:-}
+      TURN_PASSWORD: ${TURN_PASSWORD:-}
+      ICE_SERVERS_JSON: ${ICE_SERVERS_JSON:-}
+      MUSIC_FRAME_DURATION_MS: ${MUSIC_FRAME_DURATION_MS:-10}
+      MUSIC_PREBUFFER_FRAMES: ${MUSIC_PREBUFFER_FRAMES:-72}
+      MUSIC_REBUFFER_FRAMES: ${MUSIC_REBUFFER_FRAMES:-40}
+      MUSIC_MAX_CATCHUP_FRAMES: ${MUSIC_MAX_CATCHUP_FRAMES:-4}
+      MUSIC_CURRENT_PREFETCH_WAIT_TIMEOUT_MS: ${MUSIC_CURRENT_PREFETCH_WAIT_TIMEOUT_MS:-45000}
+      MUSIC_PREFERRED_AUDIO_EXT: ${MUSIC_PREFERRED_AUDIO_EXT:-webm}
+      RADIO_FEATURE_ENABLED: ${RADIO_FEATURE_ENABLED:-false}
+      RADIO_DEFAULT_VOLUME: ${RADIO_DEFAULT_VOLUME:-40}
+      RADIO_PREBUFFER_FRAMES: ${RADIO_PREBUFFER_FRAMES:-72}
+      RADIO_REBUFFER_FRAMES: ${RADIO_REBUFFER_FRAMES:-40}
+      RADIO_LOG_LEVEL: ${RADIO_LOG_LEVEL:-info}
+    expose:
+      - "3001"
+    volumes:
+      - server-data:/app/data
+      - server-uploads:/app/uploads
+      - server-music-cache:/app/music-cache
+      - server-secrets:/app/secrets
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:3001/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  discord-client:
+    build:
+      context: ./client
+      dockerfile: Dockerfile.dokploy
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:3001}
+        NEXT_PUBLIC_TURN_URL: ${NEXT_PUBLIC_TURN_URL:-}
+        NEXT_PUBLIC_TURN_USERNAME: ${NEXT_PUBLIC_TURN_USERNAME:-}
+        NEXT_PUBLIC_TURN_PASSWORD: ${NEXT_PUBLIC_TURN_PASSWORD:-}
+        NEXT_PUBLIC_RADIO_FEATURE_ENABLED: ${NEXT_PUBLIC_RADIO_FEATURE_ENABLED:-false}
+        NEXT_PUBLIC_ICE_SERVERS_JSON: ${NEXT_PUBLIC_ICE_SERVERS_JSON:-}
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+    expose:
+      - "3000"
+    depends_on:
+      discord-server:
+        condition: service_healthy
+
+volumes:
+  server-data:
+  server-uploads:
+  server-music-cache:
+  server-secrets:
