@@ -1,9 +1,8 @@
-name: Deploy Dokploy Stack
+name: Manual Dokploy SSH Fallback
 
 on:
-  push:
-    branches:
-      - main
+  # Keep this workflow manual only. Production auto deploys should be handled by
+  # the Dokploy GitHub App so deploy records appear in the Dokploy UI.
   workflow_dispatch:
 
 concurrency:
