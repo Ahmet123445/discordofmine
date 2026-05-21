@@ -117,6 +117,7 @@ const PEER_LIVENESS_INTERVAL_MS = 5000;
 const PEER_AUDIO_STALL_MS = 30000;
 const AUDIO_PLAYBACK_RESUME_INTERVAL_MS = 5000;
 const RECONNECT_DEBOUNCE_MS = 2000;
+const isBotPeerId = (peerID: string) => peerID.startsWith("music-bot:") || peerID.startsWith("radio-bot:");
 
   // SIMD Check Helper
   // const isSimdSupported = async () => { ... } // No longer needed for DeepFilterNet (WASM handles it)
@@ -513,7 +514,8 @@ const RECONNECT_DEBOUNCE_MS = 2000;
     }
   };
 
-  const attachActiveScreenTracks = (peer: any) => {
+  const attachActiveScreenTracks = (peerID: string, peer: any) => {
+    if (isBotPeerId(peerID)) return;
     if (!screenStream.current || !peer) return;
 
     const activeTracks = screenStream.current.getTracks().filter((track) => track.readyState === "live");
@@ -732,7 +734,7 @@ const RECONNECT_DEBOUNCE_MS = 2000;
 
       socket.on("user-joined-voice", (payload: { signal: any; callerID: string; username: string; userId?: number | null; replacePeer?: boolean }) => {
         const existing = peersRef.current.find((p) => p.peerID === payload.callerID);
-        const isBotPeer = payload.callerID.startsWith("music-bot:") || payload.callerID.startsWith("radio-bot:");
+        const isBotPeer = isBotPeerId(payload.callerID);
         const shouldReplacePeer = Boolean(
           existing && (payload.replacePeer || (isBotPeer && payload.signal?.type === "offer"))
         );
@@ -995,7 +997,7 @@ const RECONNECT_DEBOUNCE_MS = 2000;
     });
 
     attachPeerLifecycle(userToSignal, peer);
-    attachActiveScreenTracks(peer);
+    attachActiveScreenTracks(userToSignal, peer);
 
     return peer;
   };
@@ -1019,7 +1021,7 @@ const RECONNECT_DEBOUNCE_MS = 2000;
     });
 
     attachPeerLifecycle(callerID, peer);
-    attachActiveScreenTracks(peer);
+    attachActiveScreenTracks(callerID, peer);
 
     peer.signal(incomingSignal);
 
@@ -1101,6 +1103,7 @@ const RECONNECT_DEBOUNCE_MS = 2000;
           const screenShareStream = new MediaStream([videoTrack, screenAudioTrack]);
 
           peersRef.current.forEach((p) => {
+            if (isBotPeerId(p.peerID)) return;
             // Add video track
             p.peer.addTrack(videoTrack, screenShareStream);
             // Add screen audio track separately (will create new stream on receiver)
@@ -1113,6 +1116,7 @@ const RECONNECT_DEBOUNCE_MS = 2000;
         } else if (videoTrack) {
           // No screen audio - just add video
           peersRef.current.forEach((p) => {
+            if (isBotPeerId(p.peerID)) return;
             p.peer.addTrack(videoTrack, stream);
             setTimeout(() => tuneScreenVideoSender(p.peer, videoTrack), 0);
           });
@@ -1141,6 +1145,7 @@ const RECONNECT_DEBOUNCE_MS = 2000;
 
     // Remove video and screen audio tracks from peers
     peersRef.current.forEach((p) => {
+      if (isBotPeerId(p.peerID)) return;
       try {
         const senders = p.peer._pc?.getSenders?.() || [];
         senders.forEach((sender: RTCRtpSender) => {
