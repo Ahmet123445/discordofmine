@@ -127,6 +127,7 @@ const RECONNECT_DEBOUNCE_MS = 2000;
   const [PeerClass, setPeerClass] = useState<any>(null);
   const [isSharingScreen, setIsSharingScreen] = useState(false);
   const [peers, setPeers] = useState<{ peerID: string; peer: any; volume: number; username: string; userId?: number | null }[]>([]);
+  const [remoteAudioStreams, setRemoteAudioStreams] = useState<{ id: string; stream: MediaStream }[]>([]);
   const [incomingStreams, setIncomingStreams] = useState<{ id: string; stream: MediaStream }[]>([]);
   const [hiddenStreams, setHiddenStreams] = useState<Set<string>>(new Set());
   const [isMuted, setIsMuted] = useState(false);
@@ -279,6 +280,7 @@ const RECONNECT_DEBOUNCE_MS = 2000;
     clearPeerRecoveryTimers(peerID);
     peersRef.current = peersRef.current.filter((p) => p.peerID !== peerID);
     setPeers((prev) => prev.filter((p) => p.peerID !== peerID));
+    setRemoteAudioStreams((prev) => prev.filter((s) => s.id !== peerID));
     setIncomingStreams((prev) => prev.filter((s) => s.id !== peerID));
     announcedScreenStreamsRef.current.forEach((key) => {
       if (key.startsWith(`${peerID}-`)) {
@@ -302,6 +304,7 @@ const RECONNECT_DEBOUNCE_MS = 2000;
     clearAllPeerRecoveryTimers();
     peersRef.current = [];
     setPeers([]);
+    setRemoteAudioStreams([]);
     setIncomingStreams([]);
     setHiddenStreams(new Set());
     announcedScreenStreamsRef.current.clear();
@@ -819,6 +822,7 @@ const RECONNECT_DEBOUNCE_MS = 2000;
     clearAllPeerRecoveryTimers();
     peersRef.current = [];
     setPeers([]);
+    setRemoteAudioStreams([]);
     setIncomingStreams([]);
     setHiddenStreams(new Set());
     announcedScreenStreamsRef.current.clear();
@@ -1024,18 +1028,17 @@ const RECONNECT_DEBOUNCE_MS = 2000;
 
   const handleIncomingStream = (id: string, stream: MediaStream) => {
     const audioTracks = stream.getAudioTracks();
-    if (audioTracks.length > 0) {
-      setPeers((prev) => {
-        const updated = [...prev];
-        const peerIndex = updated.findIndex((p) => p.peerID === id);
-        if (peerIndex !== -1) {
-          updated[peerIndex] = { ...updated[peerIndex] };
-        }
-        return updated;
+    const videoTracks = stream.getVideoTracks();
+
+    if (audioTracks.length > 0 && videoTracks.length === 0) {
+      const audioStream = new MediaStream(audioTracks);
+      setRemoteAudioStreams((prev) => {
+        const existing = prev.find((s) => s.id === id);
+        if (existing?.stream.id === audioStream.id) return prev;
+        return [...prev.filter((s) => s.id !== id), { id, stream: audioStream }];
       });
     }
 
-    const videoTracks = stream.getVideoTracks();
     if (videoTracks.length > 0) {
       const streamKey = `${id}-${stream.id}`;
       if (!announcedScreenStreamsRef.current.has(streamKey)) {
@@ -1543,7 +1546,7 @@ const RECONNECT_DEBOUNCE_MS = 2000;
       {peers.map((p) => (
         <AudioPlayer
           key={p.peerID}
-          peer={p.peer}
+          audioStream={remoteAudioStreams.find((s) => s.id === p.peerID)?.stream || null}
           volume={isDeafened ? 0 : p.volume / 100}
           onStalled={(reason) => {
             removeRemotePeer(p.peerID);
@@ -1652,8 +1655,7 @@ const RECONNECT_DEBOUNCE_MS = 2000;
   );
 }
 
-const AudioPlayer = ({ peer, volume = 1, onStalled }: { peer: any; volume?: number; onStalled?: (reason: string) => void }) => {
-  const [audioStream, setAudioStream] = useState<MediaStream | null>(null);
+const AudioPlayer = ({ audioStream, volume = 1, onStalled }: { audioStream: MediaStream | null; volume?: number; onStalled?: (reason: string) => void }) => {
   const audioRef = useRef<HTMLAudioElement>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const mediaSourceRef = useRef<MediaElementAudioSourceNode | null>(null);
@@ -1727,29 +1729,6 @@ const AudioPlayer = ({ peer, volume = 1, onStalled }: { peer: any; volume?: numb
       return false;
     }
   };
-
-  useEffect(() => {
-    const handler = (stream: MediaStream) => {
-      // Ignore screen share streams (they have video tracks) - they are handled by VideoPlayer
-      // Only handle microphone streams (audio only)
-      if (stream.getVideoTracks().length > 0) return;
-
-      const audioTracks = stream.getAudioTracks();
-      if (audioTracks.length > 0) {
-        setAudioStream(new MediaStream(audioTracks));
-      }
-    };
-    peer.on("stream", handler);
-    
-    // If peer already has remote streams (reconnection case)
-    if (peer._remoteStreams && peer._remoteStreams.length > 0) {
-      peer._remoteStreams.forEach((s: MediaStream) => handler(s));
-    }
-    
-    return () => {
-      peer.off("stream", handler);
-    };
-  }, [peer]);
 
   useEffect(() => {
     volumeRef.current = volume;
