@@ -154,6 +154,7 @@ const isBotPeerId = (peerID: string) => peerID.startsWith("music-bot:") || peerI
   const [allRoomsUsers, setAllRoomsUsers] = useState<{ [roomId: string]: VoiceUser[] }>({});
 
   const peersRef = useRef<{ peerID: string; peer: any }[]>([]);
+  const peerUserDetailsRef = useRef<Map<string, VoiceUser>>(new Map());
   const localStream = useRef<MediaStream | null>(null);
   const screenStream = useRef<MediaStream | null>(null);
   
@@ -169,6 +170,7 @@ const isBotPeerId = (peerID: string) => peerID.startsWith("music-bot:") || peerI
   const replacePeersOnNextJoinRef = useRef(false);
   const peerDisconnectTimersRef = useRef<Map<string, number>>(new Map());
   const peerHealthTimersRef = useRef<Map<string, number>>(new Map());
+  const peerReconnectTimersRef = useRef<Map<string, number>>(new Map());
   const peerAudioStatsRef = useRef<Map<string, { bytes: number; packets: number; stalledSince: number | null }>>(new Map());
   const peerRecoveryCooldownRef = useRef<Map<string, number>>(new Map());
   const reconnectDebounceTimerRef = useRef<number | null>(null);
@@ -244,6 +246,12 @@ const isBotPeerId = (peerID: string) => peerID.startsWith("music-bot:") || peerI
       peerHealthTimersRef.current.delete(peerID);
     }
 
+    const reconnectTimer = peerReconnectTimersRef.current.get(peerID);
+    if (reconnectTimer) {
+      window.clearTimeout(reconnectTimer);
+      peerReconnectTimersRef.current.delete(peerID);
+    }
+
     const iceTimeoutKey = `${peerID}-ice-timeout`;
     const iceTimeout = peerHealthTimersRef.current.get(iceTimeoutKey);
     if (iceTimeout) {
@@ -252,14 +260,15 @@ const isBotPeerId = (peerID: string) => peerID.startsWith("music-bot:") || peerI
     }
 
     peerAudioStatsRef.current.delete(peerID);
-    peerRecoveryCooldownRef.current.delete(peerID);
   }, []);
 
   const clearAllPeerRecoveryTimers = useCallback(() => {
     peerDisconnectTimersRef.current.forEach((timer) => window.clearTimeout(timer));
     peerHealthTimersRef.current.forEach((timer) => window.clearTimeout(timer));
+    peerReconnectTimersRef.current.forEach((timer) => window.clearTimeout(timer));
     peerDisconnectTimersRef.current.clear();
     peerHealthTimersRef.current.clear();
+    peerReconnectTimersRef.current.clear();
     peerAudioStatsRef.current.clear();
     peerRecoveryCooldownRef.current.clear();
   }, []);
@@ -304,6 +313,7 @@ const isBotPeerId = (peerID: string) => peerID.startsWith("music-bot:") || peerI
 
     clearAllPeerRecoveryTimers();
     peersRef.current = [];
+    peerUserDetailsRef.current.clear();
     setPeers([]);
     setRemoteAudioStreams([]);
     setIncomingStreams([]);
@@ -495,11 +505,9 @@ const isBotPeerId = (peerID: string) => peerID.startsWith("music-bot:") || peerI
         params.encodings = [{}];
       }
       params.encodings.forEach((enc: RTCRtpEncodingParameters) => {
-        // 2.5 Mbps @ 30fps — 1080p icin akici ve tipik Turkiye ev uplink'inin
-        // 3+ peer mesh'te doyurmayacagi degerler. Radyo audio + mikrofon icin
-        // bant genisligi pay birakir, packet drop / jitter azalir -> ses
-        // robotiklesmez, frame drop minimize olur.
-        enc.maxBitrate = 2_500_000;
+        const humanPeerCount = peersRef.current.filter((p) => !isBotPeerId(p.peerID)).length;
+        // Mesh upload is duplicated per peer; keep headroom for voice when 3+ users are connected.
+        enc.maxBitrate = humanPeerCount >= 2 ? 1_200_000 : 2_500_000;
         (enc as any).maxFramerate = 30;
         (enc as any).networkPriority = "medium";
         (enc as any).priority = "medium";
@@ -723,6 +731,7 @@ const isBotPeerId = (peerID: string) => peerID.startsWith("music-bot:") || peerI
         replacePeersOnNextJoinRef.current = false;
         const peersArr: { peerID: string; peer: any; volume: number; username: string; userId?: number | null }[] = [];
         users.forEach((u) => {
+          peerUserDetailsRef.current.set(u.id, u);
           if (socket.id) {
             const peer = createPeer(u.id, socket.id, streamToUse, user.username, user.id, replacePeer);
             peersRef.current.push({ peerID: u.id, peer });
@@ -735,12 +744,21 @@ const isBotPeerId = (peerID: string) => peerID.startsWith("music-bot:") || peerI
       socket.on("user-joined-voice", (payload: { signal: any; callerID: string; username: string; userId?: number | null; replacePeer?: boolean }) => {
         const existing = peersRef.current.find((p) => p.peerID === payload.callerID);
         const isBotPeer = isBotPeerId(payload.callerID);
+        const isOfferSignal = payload.signal?.type === "offer";
+        peerUserDetailsRef.current.set(payload.callerID, {
+          id: payload.callerID,
+          username: payload.username,
+          userId: payload.userId ?? null
+        });
         const shouldReplacePeer = Boolean(
-          existing && (payload.replacePeer || (isBotPeer && payload.signal?.type === "offer"))
+          existing && isOfferSignal && (payload.replacePeer || isBotPeer)
         );
 
         if (existing && !shouldReplacePeer && isPeerUsable(existing.peer)) {
           existing.peer.signal(payload.signal);
+          return;
+        }
+        if (!isOfferSignal) {
           return;
         }
         if (existing && shouldReplacePeer) {
@@ -784,6 +802,7 @@ const isBotPeerId = (peerID: string) => peerID.startsWith("music-bot:") || peerI
 
       socket.on("user-left-voice", (id: string) => {
         playLeaveSound();
+        peerUserDetailsRef.current.delete(id);
         removeRemotePeer(id);
       });
     } catch (err) {
@@ -858,7 +877,7 @@ const isBotPeerId = (peerID: string) => peerID.startsWith("music-bot:") || peerI
       markRecoveryCooldown();
       if (resettingRemotePeersRef.current) return;
       removeRemotePeer(peerID);
-      rejoinCurrentVoice(reason);
+      reconnectRemotePeer(peerID, reason);
     };
 
     const clearDisconnectGrace = () => {
@@ -989,7 +1008,14 @@ const isBotPeerId = (peerID: string) => peerID.startsWith("music-bot:") || peerI
     });
 
     peer.on("signal", (signal: any) => {
-      socket?.emit("sending-signal", { userToSignal, callerID, signal, username: myUsername, userId: myUserId, replacePeer });
+      socket?.emit("sending-signal", {
+        userToSignal,
+        callerID,
+        signal,
+        username: myUsername,
+        userId: myUserId,
+        replacePeer: replacePeer && signal?.type === "offer"
+      });
     });
 
     peer.on("stream", (remoteStream: MediaStream) => {
@@ -1001,6 +1027,52 @@ const isBotPeerId = (peerID: string) => peerID.startsWith("music-bot:") || peerI
 
     return peer;
   };
+
+  function reconnectRemotePeer(peerID: string, reason: string) {
+    if (isBotPeerId(peerID)) {
+      rejoinCurrentVoice(reason);
+      return;
+    }
+    if (!socket?.id || !localStream.current || !PeerClass) {
+      rejoinCurrentVoice(reason);
+      return;
+    }
+    if (peerReconnectTimersRef.current.has(peerID)) return;
+
+    const timer = window.setTimeout(() => {
+      peerReconnectTimersRef.current.delete(peerID);
+      if (!socket?.id || !localStream.current || !inVoice) return;
+      const existing = peersRef.current.find((p) => p.peerID === peerID);
+      if (existing && isPeerUsable(existing.peer)) return;
+
+      const knownUser = peerUserDetailsRef.current.get(peerID);
+      const peer = createPeer(
+        peerID,
+        socket.id,
+        localStream.current,
+        user.username,
+        user.id,
+        true
+      );
+
+      peersRef.current = [...peersRef.current.filter((p) => p.peerID !== peerID), { peerID, peer }];
+      setPeers((prev) => {
+        const previous = prev.find((p) => p.peerID === peerID);
+        return [
+          ...prev.filter((p) => p.peerID !== peerID),
+          {
+            peerID,
+            peer,
+            volume: previous?.volume ?? 100,
+            username: knownUser?.username || previous?.username || `User ${peerID.substring(0, 4)}`,
+            userId: knownUser?.userId ?? previous?.userId
+          }
+        ];
+      });
+    }, 500);
+
+    peerReconnectTimersRef.current.set(peerID, timer);
+  }
 
   const addPeer = (incomingSignal: any, callerID: string, stream: MediaStream) => {
     const peer = new PeerClass({
