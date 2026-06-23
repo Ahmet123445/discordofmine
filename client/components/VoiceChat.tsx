@@ -469,6 +469,104 @@ const isBotPeerId = (peerID: string) => peerID.startsWith("music-bot:") || peerI
       destinationNodeRef.current = null;
     }
     if (audioContextRef.current && audioContextRef.current.state !== 'closed') {
+
+  // CRITICAL: Heartbeat to keep session alive in database
+  // Sends every 30 seconds to prevent stale session cleanup
+  useEffect(() => {
+    if (!socket || !inVoice || !currentInternalRoomId) return;
+    
+    const namespacedRoomId = `${serverId}-${currentInternalRoomId}`;
+    
+    // Send heartbeat immediately on join
+    socket.emit("heartbeat", { roomId: namespacedRoomId });
+    
+    // Then send every 30 seconds
+    const interval = setInterval(() => {
+      socket.emit("heartbeat", { roomId: namespacedRoomId });
+    }, 30000);
+    
+    return () => clearInterval(interval);
+  }, [socket, inVoice, currentInternalRoomId, serverId]);
+
+  // Keyboard Shortcuts
+  useEffect(() => {
+    if (!mounted) return;
+    
+    const checkKeybind = (e: KeyboardEvent, bind: typeof keybinds.mute) => {
+      const keyMatch = e.key.toLowerCase() === bind.key.toLowerCase();
+      const altMatch = e.altKey === bind.alt;
+      const ctrlMatch = e.ctrlKey === bind.ctrl;
+      const shiftMatch = e.shiftKey === bind.shift;
+      return keyMatch && altMatch && ctrlMatch && shiftMatch;
+    };
+    
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (editingKeybind) return;
+      
+      if (checkKeybind(e, keybinds.mute)) {
+        e.preventDefault();
+        toggleMute();
+      }
+      if (checkKeybind(e, keybinds.deafen)) {
+        e.preventDefault();
+        toggleDeafen();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [inVoice, isMuted, isDeafened, mounted, PeerClass, voiceRooms, keybinds, editingKeybind]);
+
+  useEffect(() => {
+    return () => {
+      if (rejoinTimerRef.current) {
+        window.clearTimeout(rejoinTimerRef.current);
+        rejoinTimerRef.current = null;
+      }
+      if (reconnectDebounceTimerRef.current) {
+        window.clearTimeout(reconnectDebounceTimerRef.current);
+        reconnectDebounceTimerRef.current = null;
+      }
+      clearAllPeerRecoveryTimers();
+      cleanupAudioContext();
+      if (localStream.current) {
+        localStream.current.getTracks().forEach((t) => t.stop());
+      }
+    };
+  }, [clearAllPeerRecoveryTimers]);
+
+  useEffect(() => {
+    if (!inVoice) return;
+
+    const handleBeforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+      return "";
+    };
+
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => {
+      window.removeEventListener("beforeunload", handleBeforeUnload);
+    };
+  }, [inVoice]);
+  
+  const cleanupAudioContext = () => {
+    if (gateIntervalRef.current) {
+      window.clearInterval(gateIntervalRef.current);
+      gateIntervalRef.current = null;
+    }
+    if (deepFilterRef.current) {
+      deepFilterRef.current.destroy();
+      deepFilterRef.current = null;
+    }
+    if (sourceNodeRef.current) {
+      sourceNodeRef.current.disconnect();
+      sourceNodeRef.current = null;
+    }
+    if (destinationNodeRef.current) {
+      destinationNodeRef.current.disconnect();
+      destinationNodeRef.current = null;
+    }
+    if (audioContextRef.current && audioContextRef.current.state !== 'closed') {
       audioContextRef.current.close().catch(() => {});
       audioContextRef.current = null;
     }
@@ -481,6 +579,22 @@ const isBotPeerId = (peerID: string) => peerID.startsWith("music-bot:") || peerI
       if (audioTrack) {
         audioTrack.enabled = !audioTrack.enabled;
         setIsMuted(!audioTrack.enabled);
+        
+        // Sync the enabled state to all cloned tracks being sent to peers
+        peersRef.current.forEach((p) => {
+          try {
+            const pc: RTCPeerConnection | undefined = p.peer?._pc;
+            if (pc && typeof pc.getSenders === "function") {
+              pc.getSenders().forEach((sender) => {
+                if (sender.track && sender.track.kind === "audio" && sender.track.id !== screenStream.current?.getAudioTracks()[0]?.id) {
+                  sender.track.enabled = audioTrack.enabled;
+                }
+              });
+            }
+          } catch (err) {
+            console.warn("Failed to sync mute state to peer:", err);
+          }
+        });
       }
     }
   };
@@ -512,7 +626,7 @@ const isBotPeerId = (peerID: string) => peerID.startsWith("music-bot:") || peerI
         (enc as any).networkPriority = "medium";
         (enc as any).priority = "medium";
       });
-      (params as any).degradationPreference = "maintain-framerate";
+      (params as any).degradationPreference = "maintain-resolution";
 
       sender.setParameters(params).catch((err) => {
         console.warn("setParameters (screen video) failed, falling back:", err);
@@ -998,10 +1112,16 @@ const isBotPeerId = (peerID: string) => peerID.startsWith("music-bot:") || peerI
   };
 
   const createPeer = (userToSignal: string, callerID: string, stream: MediaStream, myUsername: string, myUserId: number, replacePeer = false) => {
+    const peerStream = stream.clone();
+    const originalTrack = stream.getAudioTracks()[0];
+    if (originalTrack) {
+      peerStream.getAudioTracks().forEach(t => t.enabled = originalTrack.enabled);
+    }
+
     const peer = new PeerClass({
       initiator: true,
       trickle: true,
-      stream,
+      stream: peerStream,
       config: {
         iceServers: ICE_SERVERS
       }
@@ -1075,10 +1195,16 @@ const isBotPeerId = (peerID: string) => peerID.startsWith("music-bot:") || peerI
   }
 
   const addPeer = (incomingSignal: any, callerID: string, stream: MediaStream) => {
+    const peerStream = stream.clone();
+    const originalTrack = stream.getAudioTracks()[0];
+    if (originalTrack) {
+      peerStream.getAudioTracks().forEach(t => t.enabled = originalTrack.enabled);
+    }
+
     const peer = new PeerClass({
       initiator: false,
       trickle: true,
-      stream,
+      stream: peerStream,
       config: {
         iceServers: ICE_SERVERS
       }
