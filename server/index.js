@@ -946,7 +946,6 @@ const stopPlaybackTimer = (session) => {
 };
 
 const resetPlaybackState = (session) => {
-  stopPlaybackTimer(session);
   session.audioChunks = [];
   session.bufferedBytes = 0;
   session.hasPlaybackStarted = false;
@@ -1661,6 +1660,7 @@ const getOrCreateMusicSession = (voiceRoomId) => {
 
   musicSessions.set(voiceRoomId, session);
   startMusicPeerHealthMonitor(session);
+  startPlaybackTimer(session);
   return session;
 };
 
@@ -1829,12 +1829,12 @@ const startPlaybackTimer = (session) => {
   session.nextPlaybackDueAt = Date.now();
 
   const tick = () => {
-    if (!session.isPlaying) {
+    if (!musicSessions.has(session.voiceRoomId)) {
       stopPlaybackTimer(session);
       return;
     }
 
-    if (session.isPaused || !session.hasPlaybackStarted) {
+    if (!session.isPlaying || session.isPaused || !session.hasPlaybackStarted) {
       pushSilenceFrame(session);
       session.nextPlaybackDueAt = Date.now() + FRAME_DURATION_MS;
       session.playbackInterval = setTimeout(tick, FRAME_DURATION_MS);
@@ -1880,8 +1880,7 @@ const startPlaybackTimer = (session) => {
 
         pushSilenceFrame(session);
       } else {
-        shouldStop = true;
-        break;
+        pushSilenceFrame(session);
       }
 
       session.nextPlaybackDueAt += FRAME_DURATION_MS;
@@ -1889,12 +1888,6 @@ const startPlaybackTimer = (session) => {
 
     if (didFlushAudio) {
       emitMusicState(session, false);
-    }
-
-    if (shouldStop) {
-      stopPlaybackTimer(session);
-      emitMusicState(session, true);
-      return;
     }
 
     const delay = Math.max(0, session.nextPlaybackDueAt - Date.now());
@@ -2009,7 +2002,6 @@ const playNextInSession = async (voiceRoomId) => {
 
           if (session.bufferedBytes >= FRAME_SIZE_BYTES) return;
           clearInterval(finalizeWhenDrained);
-          stopPlaybackTimer(session);
           resetPlaybackState(session);
           disposeTrack(nextTrack);
           session.current = null;
@@ -2039,7 +2031,6 @@ const playNextInSession = async (voiceRoomId) => {
         return;
       }
 
-      stopPlaybackTimer(session);
       resetPlaybackState(session);
       disposeTrack(nextTrack);
       session.current = null;
@@ -3216,7 +3207,6 @@ io.on("connection", (socket) => {
             session.sourceProcess = null;
             session.ffmpegProcess = null;
             session.sourceEnded = true;
-            stopPlaybackTimer(session);
             resetPlaybackState(session);
 
             if (code !== 0 && !session.isStoppingCurrent) {
