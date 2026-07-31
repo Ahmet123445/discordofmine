@@ -1237,8 +1237,15 @@ const isBotPeerId = (peerID: string) => peerID.startsWith("music-bot:") || peerI
   const stopScreenShare = () => {
     if (!screenStream.current) return;
 
+    // Capture screen track objects BEFORE stopping them.
+    // Screen tracks are added to peers by reference (never cloned), so object
+    // identity is the only reliable way to find their senders. The microphone
+    // track IS cloned per peer (new track id), which means any id-based
+    // comparison would also match — and kill — the mic sender.
+    const screenTracks = new Set(screenStream.current.getTracks());
+
     // Stop all screen stream tracks
-    screenStream.current.getTracks().forEach((track) => {
+    screenTracks.forEach((track) => {
       track.stop();
       track.enabled = false;
     });
@@ -1249,14 +1256,8 @@ const isBotPeerId = (peerID: string) => peerID.startsWith("music-bot:") || peerI
       try {
         const senders = p.peer._pc?.getSenders?.() || [];
         senders.forEach((sender: RTCRtpSender) => {
-          // Remove video tracks
-          if (sender.track?.kind === 'video') {
-            p.peer._pc?.removeTrack?.(sender);
-          }
-          // Remove screen audio tracks (not microphone)
-          // Screen audio tracks have a different id than localStream audio
-          if (sender.track?.kind === 'audio' &&
-              sender.track.id !== localStream.current?.getAudioTracks()[0]?.id) {
+          // Remove only screen share senders; never touch the microphone sender
+          if (sender.track && screenTracks.has(sender.track)) {
             p.peer._pc?.removeTrack?.(sender);
           }
         });
